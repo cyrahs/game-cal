@@ -34,6 +34,23 @@ export type RecurringActivity = {
   durationDays?: number;
 };
 
+export type RecurringSettingsExport = {
+  type: "game-cal.recurring-settings";
+  v: 1;
+  recurringActivitiesByGame: Partial<Record<GameId, RecurringActivity[]>>;
+};
+
+export type RecurringSettingsImportResult =
+  | {
+      ok: true;
+      gameCount: number;
+      activityCount: number;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 const DEFAULT_RECURRING_ACTIVITIES_BY_GAME: Partial<Record<GameId, RecurringActivity[]>> = {};
 
 function cloneRecurringRule(rule: RecurringRule): RecurringRule {
@@ -157,6 +174,40 @@ function coerceRecurringActivity(input: unknown): RecurringActivity | null {
   return { id, title, rule, durationDays };
 }
 
+function coerceRecurringActivitiesByGame(input: unknown): Partial<Record<GameId, RecurringActivity[]>> | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const next: Partial<Record<GameId, RecurringActivity[]>> = {};
+  for (const gameId of ALL_GAME_IDS) {
+    const arr = (input as any)[gameId];
+    if (!Array.isArray(arr)) continue;
+    const cleaned: RecurringActivity[] = [];
+    const usedIds = new Set<string>();
+    for (const item of arr) {
+      const activity = coerceRecurringActivity(item);
+      if (!activity) continue;
+      if (usedIds.has(activity.id)) continue;
+      usedIds.add(activity.id);
+      cleaned.push(activity);
+    }
+    if (cleaned.length > 0) next[gameId] = cleaned;
+  }
+  return next;
+}
+
+function parseRecurringSettingsImport(input: unknown): Partial<Record<GameId, RecurringActivity[]>> | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const obj = input as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(obj, "recurringActivitiesByGame")) {
+    return coerceRecurringActivitiesByGame(obj.recurringActivitiesByGame);
+  }
+
+  const hasRawGameArray = ALL_GAME_IDS.some((gameId) => Object.prototype.hasOwnProperty.call(obj, gameId) && Array.isArray(obj[gameId]));
+  if (!hasRawGameArray) return null;
+
+  const source = input;
+  return coerceRecurringActivitiesByGame(source);
+}
+
 function createRecurringActivityId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `ra_${Date.now().toString(36)}_${rand}`;
@@ -199,6 +250,8 @@ export type PrefsContextValue = {
   addRecurringActivity: (gameId: GameId, activity: Omit<RecurringActivity, "id">) => void;
   updateRecurringActivity: (gameId: GameId, activityId: string, activity: Omit<RecurringActivity, "id">) => void;
   removeRecurringActivity: (gameId: GameId, activityId: string) => void;
+  exportRecurringSettings: () => RecurringSettingsExport;
+  importRecurringSettings: (input: unknown) => RecurringSettingsImportResult;
 
   sync: {
     uuid: string;
@@ -379,25 +432,7 @@ function coercePrefs(input: unknown): PrefsState {
     }
   }
 
-  let recurringActivitiesByGame = base.timeline.recurringActivitiesByGame;
-  const srcActivities = obj.timeline?.recurringActivitiesByGame;
-  if (srcActivities && typeof srcActivities === "object") {
-    recurringActivitiesByGame = {};
-    for (const gameId of ALL_GAME_IDS) {
-      const arr = (srcActivities as any)[gameId];
-      if (!Array.isArray(arr)) continue;
-      const cleaned: RecurringActivity[] = [];
-      const usedIds = new Set<string>();
-      for (const item of arr) {
-        const activity = coerceRecurringActivity(item);
-        if (!activity) continue;
-        if (usedIds.has(activity.id)) continue;
-        usedIds.add(activity.id);
-        cleaned.push(activity);
-      }
-      if (cleaned.length > 0) recurringActivitiesByGame[gameId] = cleaned;
-    }
-  }
+  const recurringActivitiesByGame = coerceRecurringActivitiesByGame(obj.timeline?.recurringActivitiesByGame) ?? base.timeline.recurringActivitiesByGame;
 
   const updatedAt = typeof obj.updatedAt === "number" && Number.isFinite(obj.updatedAt) ? obj.updatedAt : 0;
 
@@ -931,6 +966,58 @@ export function PrefsProvider(props: { children: ReactNode }) {
     });
   }, []);
 
+  const exportRecurringSettings = useCallback((): RecurringSettingsExport => {
+    return {
+      type: "game-cal.recurring-settings",
+      v: 1,
+      recurringActivitiesByGame: cloneRecurringActivitiesByGame(prefsRef.current.timeline.recurringActivitiesByGame),
+    };
+  }, []);
+
+  const importRecurringSettings = useCallback((input: unknown): RecurringSettingsImportResult => {
+    const recurringActivitiesByGame = parseRecurringSettingsImport(input);
+    if (!recurringActivitiesByGame) {
+      return { ok: false, error: "文件格式不正确，缺少 recurringActivitiesByGame 或内容无效。" };
+    }
+
+    let gameCount = 0;
+    let activityCount = 0;
+    const validIdByGame: Partial<Record<GameId, Set<string>>> = {};
+    for (const gameId of ALL_GAME_IDS) {
+      const entries = recurringActivitiesByGame[gameId];
+      if (!entries || entries.length === 0) continue;
+      gameCount += 1;
+      activityCount += entries.length;
+      validIdByGame[gameId] = new Set(entries.map((entry) => entry.id));
+    }
+
+    setPrefs((prev) => {
+      const nextCompletedRecurringByGame: PrefsState["timeline"]["completedRecurringByGame"] = {};
+      for (const gameId of ALL_GAME_IDS) {
+        const existing = prev.timeline.completedRecurringByGame[gameId];
+        const validIds = validIdByGame[gameId];
+        if (!existing || !validIds || validIds.size === 0) continue;
+        const nextForGame: Record<string, string> = {};
+        for (const [id, cycleKey] of Object.entries(existing)) {
+          if (validIds.has(id)) nextForGame[id] = cycleKey;
+        }
+        if (Object.keys(nextForGame).length > 0) nextCompletedRecurringByGame[gameId] = nextForGame;
+      }
+
+      return {
+        ...prev,
+        timeline: {
+          ...prev.timeline,
+          recurringActivitiesByGame: cloneRecurringActivitiesByGame(recurringActivitiesByGame),
+          completedRecurringByGame: nextCompletedRecurringByGame,
+        },
+        updatedAt: Date.now(),
+      };
+    });
+
+    return { ok: true, gameCount, activityCount };
+  }, []);
+
   const value: PrefsContextValue = useMemo(
     () => ({
       prefs,
@@ -942,6 +1029,8 @@ export function PrefsProvider(props: { children: ReactNode }) {
       addRecurringActivity,
       updateRecurringActivity,
       removeRecurringActivity,
+      exportRecurringSettings,
+      importRecurringSettings,
       sync: {
         uuid,
         password,
@@ -957,6 +1046,8 @@ export function PrefsProvider(props: { children: ReactNode }) {
     }),
     [
       addRecurringActivity,
+      exportRecurringSettings,
+      importRecurringSettings,
       password,
       prefs,
       pull,

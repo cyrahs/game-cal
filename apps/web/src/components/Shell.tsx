@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import dayjs from "dayjs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import genshinIcon from "../assets/genshin.png";
@@ -58,7 +58,7 @@ const games: GameLink[] = [
 const allGameIds = games.map((g) => g.id);
 
 export default function Shell() {
-  const { prefs, setTheme, setVisibleGameIds, sync } = usePrefs();
+  const { prefs, setTheme, setVisibleGameIds, sync, exportRecurringSettings, importRecurringSettings } = usePrefs();
   const genshinEvents = useEvents("genshin");
   const starrailEvents = useEvents("starrail");
   const zzzEvents = useEvents("zzz");
@@ -71,8 +71,60 @@ export default function Shell() {
   const buildCommitShort = buildCommit === "unknown" ? "unknown" : buildCommit.slice(0, 12);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement | null>(null);
+  const recurringImportInputRef = useRef<HTMLInputElement | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [recurringSettingsFeedback, setRecurringSettingsFeedback] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => dayjs());
+
+  const handleExportRecurringSettings = () => {
+    try {
+      const payload = exportRecurringSettings();
+      const text = JSON.stringify(payload, null, 2);
+      const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+      const downloadUrl = URL.createObjectURL(blob);
+      const download = document.createElement("a");
+      download.href = downloadUrl;
+      download.download = `game-cal-recurring-${dayjs().format("YYYYMMDD-HHmmss")}.json`;
+      download.click();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+
+      let gameCount = 0;
+      let activityCount = 0;
+      for (const gameId of allGameIds) {
+        const activities = payload.recurringActivitiesByGame[gameId];
+        if (!activities || activities.length === 0) continue;
+        gameCount += 1;
+        activityCount += activities.length;
+      }
+      setRecurringSettingsFeedback({ kind: "success", text: `已导出 ${gameCount} 个游戏，共 ${activityCount} 条循环活动。` });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRecurringSettingsFeedback({ kind: "error", text: `导出失败：${msg}` });
+    }
+  };
+
+  const handleImportRecurringSettings = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as unknown;
+      const result = importRecurringSettings(parsed);
+      if (!result.ok) {
+        setRecurringSettingsFeedback({ kind: "error", text: `导入失败：${result.error}` });
+        return;
+      }
+      setRecurringSettingsFeedback({
+        kind: "success",
+        text: `导入成功：${result.gameCount} 个游戏，共 ${result.activityCount} 条循环活动。`,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRecurringSettingsFeedback({ kind: "error", text: `导入失败：${msg}` });
+    } finally {
+      e.target.value = "";
+    }
+  };
 
   const visibleGameIdSet = useMemo(() => new Set<GameId>(visibleGameIds), [visibleGameIds]);
   const upstreamEventsByGame = useMemo<Record<GameId, CalendarEvent[]>>(
@@ -487,6 +539,49 @@ export default function Shell() {
                         <span className="block mt-1">上次上传: {new Date(sync.state.lastPushAt).toLocaleString()}</span>
                       ) : null}
                     </div>
+
+                    <div className="my-4 h-px bg-[color:var(--line)]" />
+
+                    <div className="text-sm font-semibold">循环活动设置</div>
+                    <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                      可导出当前循环活动配置到 JSON 文件，也可从文件导入并覆盖现有循环活动配置。
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+                        onClick={handleExportRecurringSettings}
+                      >
+                        导出循环活动
+                      </button>
+                      <button
+                        type="button"
+                        className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+                        onClick={() => {
+                          setRecurringSettingsFeedback(null);
+                          recurringImportInputRef.current?.click();
+                        }}
+                      >
+                        导入循环活动
+                      </button>
+                    </div>
+                    <input
+                      ref={recurringImportInputRef}
+                      type="file"
+                      accept="application/json,.json"
+                      className="hidden"
+                      onChange={(e) => void handleImportRecurringSettings(e)}
+                    />
+                    {recurringSettingsFeedback ? (
+                      <div
+                        className={clsx(
+                          "mt-2 text-[11px]",
+                          recurringSettingsFeedback.kind === "error" ? "text-red-600/90 dark:text-red-400/90" : "text-[color:var(--muted)]"
+                        )}
+                      >
+                        {recurringSettingsFeedback.text}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
