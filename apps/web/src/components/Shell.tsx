@@ -57,6 +57,16 @@ const games: GameLink[] = [
 
 const allGameIds = games.map((g) => g.id);
 
+function formatUtcOffsetLabelByDate(date: Date): string {
+  const mins = -date.getTimezoneOffset();
+  const sign = mins >= 0 ? "+" : "-";
+  const abs = Math.abs(mins);
+  const hh = Math.floor(abs / 60);
+  const mm = abs % 60;
+  if (mm === 0) return `UTC${sign}${hh}`;
+  return `UTC${sign}${hh}:${String(mm).padStart(2, "0")}`;
+}
+
 export default function Shell() {
   const { prefs, setTheme, setVisibleGameIds, sync, exportRecurringSettings, importRecurringSettings } = usePrefs();
   const genshinEvents = useEvents("genshin");
@@ -75,6 +85,7 @@ export default function Shell() {
   const [showPassword, setShowPassword] = useState(false);
   const [recurringSettingsFeedback, setRecurringSettingsFeedback] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => dayjs());
+  const timezoneLabel = useMemo(() => formatUtcOffsetLabelByDate(now.toDate()), [now]);
 
   const handleExportRecurringSettings = () => {
     try {
@@ -225,7 +236,7 @@ export default function Shell() {
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div className="flex flex-col">
             <div className="text-2xl font-semibold tracking-tight">Game Calendar</div>
-            <div className="text-sm text-[color:var(--muted)]">活动日历</div>
+            <div className="text-sm text-[color:var(--muted)]">活动日历 ({timezoneLabel})</div>
           </div>
 
           <nav className="flex items-center gap-2">

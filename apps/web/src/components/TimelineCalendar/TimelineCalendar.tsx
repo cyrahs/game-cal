@@ -634,22 +634,11 @@ function normalizeEventTitle(input: string): string {
   return input.replace(/\\[rnt]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function formatUtcOffsetLabel(d: Dayjs): string {
-  // Use native Date timezone offset so DST is handled correctly for the event's instant.
-  const mins = -d.toDate().getTimezoneOffset(); // e.g. +480 for UTC+8
-  const sign = mins >= 0 ? "+" : "-";
-  const abs = Math.abs(mins);
-  const hh = Math.floor(abs / 60);
-  const mm = abs % 60;
-  if (mm === 0) return `UTC${sign}${hh}`;
-  return `UTC${sign}${hh}:${String(mm).padStart(2, "0")}`;
-}
-
 function formatRange(s: string, e: string) {
   const sd = parseDateTime(s);
   const ed = parseDateTime(e);
   if (!sd.isValid() || !ed.isValid()) return `${s} ~ ${e}`;
-  return `${sd.format("MM/DD HH:mm")} ~ ${ed.format("MM/DD HH:mm")} (${formatUtcOffsetLabel(sd)})`;
+  return `${sd.format("MM/DD HH:mm")} ~ ${ed.format("MM/DD HH:mm")}`;
 }
 
 function preprocessAnnContent(input: string): string {
