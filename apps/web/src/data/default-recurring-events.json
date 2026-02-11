@@ -1,0 +1,224 @@
+{
+  "type": "game-cal.recurring-settings",
+  "v": 1,
+  "recurringActivitiesByGame": {
+    "genshin": [
+      {
+        "id": "ra_mlhhjr5n_3c6ie5oa",
+        "title": "周本",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhjha9x_e3gwj3mn",
+        "title": "深境螺旋",
+        "rule": {
+          "kind": "monthly",
+          "day": 16,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhjjvfb_hkigx15x",
+        "title": "幻想真境史诗",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ],
+    "starrail": [
+      {
+        "id": "ra_mlhhlp5z_k0jr58t7",
+        "title": "周本",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhi4rtw_rf3t0v39",
+        "title": "货币战争",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-02-02",
+          "everyDays": 14,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhi8ebe_tsawivvz",
+        "title": "末日幻影",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2025-12-22",
+          "everyDays": 42,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhikmdd_wbqvqlb5",
+        "title": "差分宇宙",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-02-09",
+          "everyDays": 14,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhil4qd_hhinr0u2",
+        "title": "虚构叙事",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-01-05",
+          "everyDays": 42,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhilq18_l0c8k990",
+        "title": "混沌回忆",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-01-19",
+          "everyDays": 42,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ],
+    "zzz": [
+      {
+        "id": "ra_mlhjw39w_h0vvl5fk",
+        "title": "危局强袭战",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-01-30",
+          "everyDays": 14,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhjxq0b_wdky6pil",
+        "title": "式舆防卫战",
+        "rule": {
+          "kind": "interval",
+          "startDate": "2026-02-06",
+          "everyDays": 14,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhjy8qq_hu8u0v96",
+        "title": "零号空洞",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhk7bh4_cqz6mvlw",
+        "title": "周本",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ],
+    "ww": [
+      {
+        "id": "ra_mlhk2q5z_ayams3rh",
+        "title": "冥歌海墟",
+        "rule": {
+          "kind": "monthly",
+          "day": 16,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhk3u41_kzp3119t",
+        "title": "千道门扉的异想",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhk4xey_1pzv2lo1",
+        "title": "逆境深塔",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mlhk71h1_yrto4kp0",
+        "title": "周本",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ],
+    "snowbreak": [
+      {
+        "id": "ra_mlhqbrgd_b7llsbje",
+        "title": "地下清理",
+        "rule": {
+          "kind": "cron",
+          "expression": "0 4 1,16 * *"
+        }
+      },
+      {
+        "id": "ra_mlhqdie1_m55p71j0",
+        "title": "精神拟境 & 信源研析",
+        "durationDays": 3,
+        "rule": {
+          "kind": "weekly",
+          "weekday": 5,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ],
+    "endfield": [
+      {
+        "id": "ra_mlhjz53j_ih83s0v9",
+        "title": "周常",
+        "rule": {
+          "kind": "weekly",
+          "weekday": 1,
+          "hour": 4,
+          "minute": 0
+        }
+      }
+    ]
+  }
+}

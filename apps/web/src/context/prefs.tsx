@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { GameId } from "../api/types";
+import defaultRecurringSettingsTemplate from "../data/default-recurring-events.json";
 import { ThemeProvider, type Theme } from "./theme";
 import { decryptJson, encryptJson } from "../sync/crypto";
 
@@ -51,7 +52,8 @@ export type RecurringSettingsImportResult =
       error: string;
     };
 
-const DEFAULT_RECURRING_ACTIVITIES_BY_GAME: Partial<Record<GameId, RecurringActivity[]>> = {};
+const DEFAULT_RECURRING_ACTIVITIES_BY_GAME: Partial<Record<GameId, RecurringActivity[]>> =
+  parseRecurringSettingsImport(defaultRecurringSettingsTemplate) ?? {};
 
 function cloneRecurringRule(rule: RecurringRule): RecurringRule {
   if (rule.kind === "weekly") return { ...rule };

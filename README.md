@@ -172,3 +172,6 @@ pnpm --filter @game-cal/api start
   - 每周几
   - 指定开始日期 + 循环天数
   - 自定义 Cron（5 段：分钟 小时 日 月 星期）
+
+首次打开页面时，默认循环活动模板来自：
+- `apps/web/src/data/default-recurring-events.json`
