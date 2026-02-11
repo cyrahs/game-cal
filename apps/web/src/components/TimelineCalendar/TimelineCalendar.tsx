@@ -1086,7 +1086,6 @@ function EventListRow(props: {
 }) {
   const isEnd = props.now.isAfter(props.event._e);
   const isStrike = props.checked || isEnd;
-  const banner = props.event.banner;
 
   return (
     <div
@@ -1106,18 +1105,6 @@ function EventListRow(props: {
           className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
         />
       </div>
-
-      {banner ? (
-        <div className="w-14 h-14 shrink-0 rounded-xl overflow-hidden border border-[color:var(--line)] bg-[color:var(--tile)]">
-          <img
-            src={banner}
-            alt={props.event.title}
-            loading="lazy"
-            className="w-full h-full object-cover"
-            referrerPolicy="no-referrer"
-          />
-        </div>
-      ) : null}
 
       <div className="min-w-0 flex-1">
         <div className={clsx("text-sm font-semibold leading-snug", isStrike && "opacity-70 line-through")}>
