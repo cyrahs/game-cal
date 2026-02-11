@@ -19,13 +19,18 @@ interface Env extends RuntimeEnv {
   SYNC_RATE_LIMIT_MAX?: string;
   SYNC_RATE_LIMIT_WINDOW_SECONDS?: string;
   SYNC_RATE_LIMIT_WRITE_COST?: string;
+  // Shared per-IP limit for D1-backed sync operations.
+  SYNC_D1_RATE_LIMIT_MAX?: string;
+  SYNC_D1_RATE_LIMIT_WINDOW_SECONDS?: string;
 }
 
 const cache = new SimpleTtlCache();
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
-const DEFAULT_SYNC_RATE_LIMIT_MAX = 20;
+const DEFAULT_SYNC_RATE_LIMIT_MAX = 120;
 const DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS = 60;
-const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 2;
+const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 1;
+const DEFAULT_SYNC_D1_RATE_LIMIT_MAX = 5;
+const DEFAULT_SYNC_D1_RATE_LIMIT_WINDOW_SECONDS = 60;
 const SYNC_RATE_LIMIT_MAX_TRACKED_IPS = 20_000;
 
 const SYNC_TABLE = "gc_sync_state";
@@ -50,6 +55,8 @@ type SyncRateLimitOutcome = {
 
 const syncRateBuckets = new Map<string, SyncRateBucket>();
 let syncRateLastSweepAtMs = 0;
+const syncD1RateBuckets = new Map<string, SyncRateBucket>();
+let syncD1RateLastSweepAtMs = 0;
 
 let didInitSyncSchema = false;
 let didInitEventsSchema = false;
@@ -119,6 +126,18 @@ function parseSyncRateLimitConfig(env: Env): { limit: number; windowMs: number; 
   };
 }
 
+function parseSyncD1RateLimitConfig(env: Env): { limit: number; windowMs: number } {
+  const limit = Math.min(parsePositiveInt(env.SYNC_D1_RATE_LIMIT_MAX, DEFAULT_SYNC_D1_RATE_LIMIT_MAX), 10_000);
+  const windowSeconds = Math.min(
+    parsePositiveInt(env.SYNC_D1_RATE_LIMIT_WINDOW_SECONDS, DEFAULT_SYNC_D1_RATE_LIMIT_WINDOW_SECONDS),
+    60 * 60
+  );
+  return {
+    limit,
+    windowMs: Math.trunc(windowSeconds * 1000),
+  };
+}
+
 function extractClientIp(request: Request): string {
   const cf = (request.headers.get("cf-connecting-ip") ?? "").trim();
   if (cf && cf.length <= 128) return cf.toLowerCase();
@@ -156,6 +175,29 @@ function maybeSweepSyncRateBuckets(nowMs: number, windowMs: number): void {
   }
 }
 
+function maybeSweepSyncD1RateBuckets(nowMs: number, windowMs: number): void {
+  const staleAfterMs = windowMs * 3;
+  const shouldSweepByTime = nowMs - syncD1RateLastSweepAtMs >= windowMs;
+  const shouldSweepBySize = syncD1RateBuckets.size > SYNC_RATE_LIMIT_MAX_TRACKED_IPS;
+  if (!shouldSweepByTime && !shouldSweepBySize) return;
+  syncD1RateLastSweepAtMs = nowMs;
+
+  for (const [ip, bucket] of syncD1RateBuckets.entries()) {
+    if (nowMs - bucket.updatedAtMs > staleAfterMs) {
+      syncD1RateBuckets.delete(ip);
+    }
+  }
+
+  if (syncD1RateBuckets.size <= SYNC_RATE_LIMIT_MAX_TRACKED_IPS) return;
+
+  const overflow = syncD1RateBuckets.size - SYNC_RATE_LIMIT_MAX_TRACKED_IPS;
+  const oldest = [...syncD1RateBuckets.entries()].sort((a, b) => a[1].updatedAtMs - b[1].updatedAtMs);
+  for (let i = 0; i < overflow; i++) {
+    const ip = oldest[i]?.[0];
+    if (ip) syncD1RateBuckets.delete(ip);
+  }
+}
+
 function toSyncRateHeaders(limit: number, remaining: number, resetAtMs: number, retryAfterSeconds = 0): Headers {
   const headers = new Headers();
   headers.set("x-ratelimit-limit", String(limit));
@@ -172,6 +214,14 @@ function applyResponseHeaders(res: Response, extra: Headers): Response {
   const headers = new Headers(res.headers);
   for (const [k, v] of extra.entries()) headers.set(k, v);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+function syncRateLimitedResponse(headers: Headers, action: "sync" | "d1"): Response {
+  const msg =
+    action === "d1"
+      ? "Too many D1-backed sync requests from this IP. Please retry later."
+      : "Too many sync requests from this IP. Please retry later.";
+  return json({ code: 429, msg, data: null } satisfies ApiResponse<null>, { status: 429, headers });
 }
 
 function takeSyncRateLimit(request: Request, env: Env): SyncRateLimitOutcome {
@@ -199,6 +249,38 @@ function takeSyncRateLimit(request: Request, env: Env): SyncRateLimitOutcome {
   }
 
   syncRateBuckets.set(ip, { tokens: nextTokens, updatedAtMs: nowMs });
+  const secondsUntilFull = Math.max(1, Math.ceil(((limit - nextTokens) / refillPerMs) / 1000));
+
+  return {
+    allowed: true,
+    headers: toSyncRateHeaders(limit, Math.floor(nextTokens), nowMs + secondsUntilFull * 1000),
+  };
+}
+
+function takeSyncD1RateLimit(request: Request, env: Env): SyncRateLimitOutcome {
+  const { limit, windowMs } = parseSyncD1RateLimitConfig(env);
+  const ip = extractClientIp(request);
+  const nowMs = Date.now();
+  maybeSweepSyncD1RateBuckets(nowMs, windowMs);
+
+  const refillPerMs = limit / windowMs;
+  const existing = syncD1RateBuckets.get(ip) ?? { tokens: limit, updatedAtMs: nowMs };
+
+  const elapsedMs = Math.max(0, nowMs - existing.updatedAtMs);
+  const tokens = Math.min(limit, existing.tokens + elapsedMs * refillPerMs);
+  const nextTokens = tokens - 1;
+
+  if (nextTokens < 0) {
+    const waitMs = Math.abs(nextTokens) / refillPerMs;
+    const retryAfterSeconds = Math.max(1, Math.ceil(waitMs / 1000));
+    syncD1RateBuckets.set(ip, { tokens, updatedAtMs: nowMs });
+    return {
+      allowed: false,
+      headers: toSyncRateHeaders(limit, Math.floor(tokens), nowMs + retryAfterSeconds * 1000, retryAfterSeconds),
+    };
+  }
+
+  syncD1RateBuckets.set(ip, { tokens: nextTokens, updatedAtMs: nowMs });
   const secondsUntilFull = Math.max(1, Math.ceil(((limit - nextTokens) / refillPerMs) / 1000));
 
   return {
@@ -659,10 +741,16 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
     if (request.method !== "POST") {
       return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
     }
+    const d1Decision = takeSyncD1RateLimit(request, env);
+    if (!d1Decision.allowed) {
+      return syncRateLimitedResponse(d1Decision.headers, "d1");
+    }
+    const respondRotate = (res: Response): Response => applyResponseHeaders(res, d1Decision.headers);
+
     const row = await readSyncRowWithBuffer(env, uuidRaw);
-    if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
+    if (!row) return respondRotate(json({ code: 404, msg: "Not found", data: null }, { status: 404 }));
     if (!(await verifyRowPassword(row, password))) {
-      return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
+      return respondRotate(json({ code: 403, msg: "Invalid password", data: null }, { status: 403 }));
     }
 
     let body: any = null;
@@ -676,16 +764,16 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
     const clientUpdatedAt = typeof body?.clientUpdatedAt === "number" ? body.clientUpdatedAt : NaN;
 
     if (!newPassword.trim()) {
-      return json({ code: 400, msg: "Missing body.newPassword", data: null }, { status: 400 });
+      return respondRotate(json({ code: 400, msg: "Missing body.newPassword", data: null }, { status: 400 }));
     }
     if (!blob) {
-      return json({ code: 400, msg: "Missing body.blob", data: null }, { status: 400 });
+      return respondRotate(json({ code: 400, msg: "Missing body.blob", data: null }, { status: 400 }));
     }
     if (!Number.isFinite(clientUpdatedAt) || clientUpdatedAt <= 0) {
-      return json({ code: 400, msg: "Invalid body.clientUpdatedAt", data: null }, { status: 400 });
+      return respondRotate(json({ code: 400, msg: "Invalid body.clientUpdatedAt", data: null }, { status: 400 }));
     }
     if (blob.length > 900_000) {
-      return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
+      return respondRotate(json({ code: 413, msg: "Blob too large", data: null }, { status: 413 }));
     }
 
     const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
@@ -701,7 +789,7 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
     const staged = markSyncRowDirty(nextRow);
     await flushSyncRowImmediately(env, uuidRaw, staged.version);
 
-    return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
+    return respondRotate(json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 }));
   }
 
   if (!mainMatch) {
@@ -742,6 +830,14 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
       return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
     }
 
+    const hasBufferedRow = syncBuffer.has(uuidRaw);
+    const needsD1Guard = force || !hasBufferedRow;
+    const d1Decision = needsD1Guard ? takeSyncD1RateLimit(request, env) : null;
+    if (d1Decision && !d1Decision.allowed) {
+      return syncRateLimitedResponse(d1Decision.headers, "d1");
+    }
+    const respondPut = (res: Response): Response => (d1Decision ? applyResponseHeaders(res, d1Decision.headers) : res);
+
     const existing = await readSyncRowWithBuffer(env, uuidRaw);
     if (!existing) {
       const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
@@ -763,21 +859,23 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
         scheduleSyncRowFlush(env, ctx, uuidRaw, staged.version);
       }
 
-      return json({ code: 201, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 201 });
+      return respondPut(json({ code: 201, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 201 }));
     }
 
     if (!(await verifyRowPassword(existing, password))) {
-      return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
+      return respondPut(json({ code: 403, msg: "Invalid password", data: null }, { status: 403 }));
     }
 
     if (!force && Math.trunc(clientUpdatedAt) < Math.trunc(existing.client_updated_at)) {
-      return json(
-        {
-          code: 409,
-          msg: "Conflict: server has a newer version",
-          data: { uuid: existing.uuid, blob: existing.blob, clientUpdatedAt: existing.client_updated_at },
-        },
-        { status: 409 }
+      return respondPut(
+        json(
+          {
+            code: 409,
+            msg: "Conflict: server has a newer version",
+            data: { uuid: existing.uuid, blob: existing.blob, clientUpdatedAt: existing.client_updated_at },
+          },
+          { status: 409 }
+        )
       );
     }
 
@@ -794,7 +892,7 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
       scheduleSyncRowFlush(env, ctx, uuidRaw, staged.version);
     }
 
-    return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
+    return respondPut(json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 }));
   }
 
   return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
@@ -882,16 +980,12 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
       );
       const decision = takeSyncRateLimit(request, env);
       if (!decision.allowed) {
-        return json(
-          {
-            code: 429,
-            msg: "Too many sync requests from this IP. Please retry later.",
-            data: null,
-          } satisfies ApiResponse<null>,
-          { status: 429, headers: decision.headers }
-        );
+        return syncRateLimitedResponse(decision.headers, "sync");
       }
       const res = await handleSyncApi(request, env, ctx);
+      if (res.headers.has("x-ratelimit-limit")) {
+        return res;
+      }
       return applyResponseHeaders(res, decision.headers);
     }
     return handleSyncApi(request, env, ctx);
