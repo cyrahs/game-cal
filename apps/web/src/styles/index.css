@@ -1,0 +1,197 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+
+  --bg0: #faf7f0;
+  --bg1: #f3efe6;
+  --ink: #0f172a;
+  --ink2: rgba(15, 23, 42, 0.82);
+  --muted: rgba(15, 23, 42, 0.62);
+  --card: rgba(255, 255, 255, 0.78);
+  --wash: rgba(255, 255, 255, 0.4);
+  --wash-strong: rgba(255, 255, 255, 0.7);
+  --tile: rgba(255, 255, 255, 0.5);
+  --tile-strong: rgba(255, 255, 255, 0.6);
+  --popover: rgba(255, 255, 255, 0.96);
+  --line: rgba(15, 23, 42, 0.14);
+  --accent: #0ea5e9;
+  --accent2: #f97316;
+  --ring: rgba(15, 23, 42, 0.22);
+  --shadow-ink: rgba(16, 24, 40, 0.18);
+}
+
+html.dark {
+  color-scheme: dark;
+
+  --bg0: #0b1020;
+  --bg1: #060913;
+  --ink: #e2e8f0;
+  --ink2: rgba(226, 232, 240, 0.82);
+  --muted: rgba(226, 232, 240, 0.66);
+
+  --card: rgba(15, 23, 42, 0.62);
+  --wash: rgba(15, 23, 42, 0.35);
+  --wash-strong: rgba(15, 23, 42, 0.55);
+  --tile: rgba(15, 23, 42, 0.45);
+  --tile-strong: rgba(15, 23, 42, 0.55);
+  --popover: rgba(2, 6, 23, 0.92);
+
+  --line: rgba(226, 232, 240, 0.12);
+  --ring: rgba(226, 232, 240, 0.2);
+  --shadow-ink: rgba(0, 0, 0, 0.55);
+}
+
+html,
+body {
+  /* Don't lock the page to the viewport height, otherwise the gradient can tile when scrolling. */
+  min-height: 100%;
+}
+
+/* Prevent layout shift when the page toggles between "needs vertical scrollbar" and "doesn't".
+   This stabilizes hover hit-testing for absolutely-positioned timeline bars on platforms where
+   scrollbars consume layout width (e.g. Windows). */
+html {
+  scrollbar-gutter: stable;
+}
+
+@supports not (scrollbar-gutter: stable) {
+  html {
+    overflow-y: scroll;
+  }
+}
+
+body {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.16), transparent 60%),
+    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.14), transparent 62%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+}
+
+html.dark body {
+  background:
+    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.22), transparent 60%),
+    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.18), transparent 62%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+}
+
+/* Subtle "paper" grain without an image. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(0deg,
+      rgba(15, 23, 42, 0.02),
+      rgba(15, 23, 42, 0.02) 1px,
+      transparent 1px,
+      transparent 3px);
+  mix-blend-mode: multiply;
+  opacity: 0.35;
+}
+
+html.dark body::before {
+  background-image:
+    repeating-linear-gradient(0deg,
+      rgba(255, 255, 255, 0.03),
+      rgba(255, 255, 255, 0.03) 1px,
+      transparent 1px,
+      transparent 3px);
+  mix-blend-mode: overlay;
+  opacity: 0.22;
+}
+
+.glass {
+  background: var(--card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+}
+
+.fade-in {
+  animation: fadeIn 260ms ease-out both;
+}
+
+.gc-line-clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.event-ann-content {
+  line-height: 1.55;
+}
+
+.event-ann-content p {
+  margin-top: 0.5rem;
+  white-space: pre-wrap;
+}
+
+.event-ann-content h1,
+.event-ann-content h2,
+.event-ann-content h3 {
+  margin-top: 0.9rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.event-ann-content h1 {
+  font-size: 1.05rem;
+}
+
+.event-ann-content h2 {
+  font-size: 1rem;
+}
+
+.event-ann-content h3 {
+  font-size: 0.95rem;
+}
+
+.event-ann-content ul,
+.event-ann-content ol {
+  margin-top: 0.5rem;
+  padding-left: 1.25rem;
+}
+
+.event-ann-content ul {
+  list-style: disc;
+}
+
+.event-ann-content ol {
+  list-style: decimal;
+}
+
+.event-ann-content li + li {
+  margin-top: 0.25rem;
+}
+
+.event-ann-content img {
+  display: block;
+  margin-top: 0.75rem;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  border: 1px solid var(--line);
+}
+
+.event-ann-content a {
+  color: var(--accent);
+  text-decoration: underline;
+}

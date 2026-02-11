@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "game-cal",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-02-10",
+  // Deploy-button friendly default: publish to workers.dev unless user configures routes/custom domains.
+  "workers_dev": true,
+  "assets": {
+    "directory": "./apps/web/dist",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "game-cal",
+      // Keep template-friendly: let Wrangler/Deploy Button provision or link D1 per-account.
+      "migrations_dir": "apps/worker/migrations"
+    }
+  ]
+}

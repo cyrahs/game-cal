@@ -1,0 +1,564 @@
+import { SimpleTtlCache } from "../../api/src/lib/cache.js";
+import type { RuntimeEnv } from "../../api/src/lib/runtimeEnv.js";
+import { GAMES, fetchEventsForGame } from "../../api/src/games/index.js";
+import type { ApiResponse, CalendarEvent, GameId } from "../../api/src/types.js";
+
+interface Env extends RuntimeEnv {
+  // Workers Assets binding (see wrangler.jsonc assets.binding).
+  ASSETS: Fetcher;
+
+  // Optional D1 binding for sync state.
+  // Configure in wrangler.jsonc -> d1_databases: [{ binding: "DB", ... }]
+  DB?: D1Database;
+
+  // Optional runtime knobs (match the Node API env vars where possible).
+  CACHE_TTL_SECONDS?: string;
+  CORS_ORIGIN?: string; // comma-separated allowlist; omit/empty to allow all
+}
+
+const cache = new SimpleTtlCache();
+const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
+
+const SYNC_TABLE = "gc_sync_state";
+const EVENTS_TABLE = "gc_events_cache";
+const SYNC_PBKDF2_ITERATIONS = 100_000;
+const SYNC_SALT_BYTES = 16;
+const SYNC_HASH_BYTES = 32; // 256-bit
+let didInitSyncSchema = false;
+let didInitEventsSchema = false;
+let eventsRefreshAllPromise: Promise<void> | null = null;
+
+function json(value: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(value), {
+    ...init,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(init?.headers ?? {}),
+    },
+  });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function hexToBytes(hex: string): Uint8Array | null {
+  const h = hex.trim();
+  if (h.length === 0 || h.length % 2 !== 0) return null;
+  if (!/^[0-9a-f]+$/i.test(h)) return null;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
+}
+
+function getLatestRefreshCutoffMs(nowMs: number): number {
+  const d = new Date(nowMs);
+  return Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate(),
+    0,
+    0,
+    0
+  );
+}
+
+function getPasswordHeader(req: Request): string | null {
+  const raw = req.headers.get("x-gc-password") ?? req.headers.get("x-game-cal-password");
+  const v = (raw ?? "").trim();
+  return v ? v : null;
+}
+
+function isLikelyValidUuidKey(uuid: string): boolean {
+  // Keep this fairly permissive (it's also part of the URL path), but avoid abuse.
+  const v = uuid.trim();
+  if (v.length < 8 || v.length > 64) return false;
+  return /^[0-9a-z-]+$/i.test(v);
+}
+
+async function pbkdf2Hash(password: string, salt: Uint8Array): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, [
+    "deriveBits",
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: SYNC_PBKDF2_ITERATIONS },
+    keyMaterial,
+    SYNC_HASH_BYTES * 8
+  );
+  return new Uint8Array(bits);
+}
+
+async function ensureSyncSchema(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (didInitSyncSchema) return true;
+  // Idempotent init to reduce "oops forgot migrations" footguns.
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ${SYNC_TABLE} (
+      uuid TEXT PRIMARY KEY,
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      blob TEXT NOT NULL,
+      client_updated_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_gc_sync_state_updated_at ON ${SYNC_TABLE}(updated_at)`
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_gc_sync_state_client_updated_at ON ${SYNC_TABLE}(client_updated_at)`
+  ).run();
+  didInitSyncSchema = true;
+  return true;
+}
+
+type SyncRow = {
+  uuid: string;
+  password_salt: string;
+  password_hash: string;
+  blob: string;
+  client_updated_at: number;
+  created_at: number;
+  updated_at: number;
+};
+
+type EventCacheRow = {
+  game: GameId;
+  payload: string;
+  updated_at: number | string;
+};
+
+async function readSyncRow(env: Env, uuid: string): Promise<SyncRow | null> {
+  if (!env.DB) return null;
+  const row = (await env.DB.prepare(
+    `SELECT uuid, password_salt, password_hash, blob, client_updated_at, created_at, updated_at FROM ${SYNC_TABLE} WHERE uuid = ?`
+  )
+    .bind(uuid)
+    .first()) as SyncRow | null;
+  return row;
+}
+
+async function verifyRowPassword(row: SyncRow, password: string): Promise<boolean> {
+  const salt = hexToBytes(row.password_salt);
+  const expected = hexToBytes(row.password_hash);
+  if (!salt || !expected) return false;
+  const actual = await pbkdf2Hash(password, salt);
+  return timingSafeEqual(actual, expected);
+}
+
+async function ensureEventsSchema(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (didInitEventsSchema) return true;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (
+      game TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_gc_events_cache_updated_at ON ${EVENTS_TABLE}(updated_at)`
+  ).run();
+  didInitEventsSchema = true;
+  return true;
+}
+
+async function readEventCacheRow(env: Env, game: GameId): Promise<EventCacheRow | null> {
+  if (!env.DB) return null;
+  return (await env.DB.prepare(`SELECT game, payload, updated_at FROM ${EVENTS_TABLE} WHERE game = ?`)
+    .bind(game)
+    .first()) as EventCacheRow | null;
+}
+
+async function writeEventCacheRow(env: Env, game: GameId, payload: string, updatedAt: number): Promise<void> {
+  if (!env.DB) return;
+  await env.DB.prepare(
+    `INSERT INTO ${EVENTS_TABLE} (game, payload, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(game) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+  )
+    .bind(game, payload, Math.trunc(updatedAt))
+    .run();
+}
+
+function decodeEventPayload(payload: string): CalendarEvent[] | null {
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    return Array.isArray(parsed) ? (parsed as CalendarEvent[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshGameEventsToD1(env: Env, game: GameId): Promise<CalendarEvent[]> {
+  const events = await fetchEventsForGame(game, env);
+  await writeEventCacheRow(env, game, JSON.stringify(events), Date.now());
+  return events;
+}
+
+async function refreshAllGamesToD1(env: Env): Promise<void> {
+  const tasks = GAMES.map(async ({ id }) => {
+    await refreshGameEventsToD1(env, id);
+  });
+  const results = await Promise.allSettled(tasks);
+  for (const [idx, r] of results.entries()) {
+    if (r.status === "rejected") {
+      const game = GAMES[idx]?.id;
+      console.error("Failed to refresh D1 event cache", { game, err: r.reason });
+    }
+  }
+}
+
+function triggerRefreshAllGames(env: Env): Promise<void> {
+  const existing = eventsRefreshAllPromise;
+  if (existing) return existing;
+  const p = refreshAllGamesToD1(env).finally(() => {
+    eventsRefreshAllPromise = null;
+  });
+  eventsRefreshAllPromise = p;
+  return p;
+}
+
+async function getEventsForGameWithCache(env: Env, game: GameId): Promise<CalendarEvent[]> {
+  const cacheTtlMs = parseCacheTtlMs(env);
+  const memoryFallback = async () =>
+    await cache.getOrSet(`events:${game}`, cacheTtlMs, () => fetchEventsForGame(game, env));
+
+  if (!env.DB) return await memoryFallback();
+
+  try {
+    if (!(await ensureEventsSchema(env))) {
+      return await memoryFallback();
+    }
+
+    const row = await readEventCacheRow(env, game);
+    const cutoff = getLatestRefreshCutoffMs(Date.now());
+
+    if (!row) {
+      await triggerRefreshAllGames(env);
+      const refreshed = await readEventCacheRow(env, game);
+      const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
+      if (parsed) return parsed;
+      return await refreshGameEventsToD1(env, game);
+    }
+
+    const parsed = decodeEventPayload(row.payload);
+    const updatedAt = Number(row.updated_at);
+    if (!parsed || !Number.isFinite(updatedAt) || updatedAt < cutoff) {
+      await triggerRefreshAllGames(env);
+      const refreshed = await readEventCacheRow(env, game);
+      const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
+      if (refreshedParsed) return refreshedParsed;
+      return await refreshGameEventsToD1(env, game);
+    }
+
+    return parsed;
+  } catch (err) {
+    console.error("D1 event cache failed, fallback to in-memory cache", { game, err });
+    return await memoryFallback();
+  }
+}
+
+async function handleSyncApi(request: Request, env: Env): Promise<Response> {
+  if (!(await ensureSyncSchema(env))) {
+    return json({ code: 501, msg: "Sync store not configured (missing D1 binding)", data: null }, { status: 501 });
+  }
+
+  const url = new URL(request.url);
+  const rotateMatch = /^\/api\/sync\/([^/]+)\/rotate$/.exec(url.pathname);
+  const mainMatch = /^\/api\/sync\/([^/]+)$/.exec(url.pathname);
+
+  const uuidRaw = decodeURIComponent((rotateMatch?.[1] ?? mainMatch?.[1] ?? "").trim());
+  if (!uuidRaw || !isLikelyValidUuidKey(uuidRaw)) {
+    return json({ code: 400, msg: "Invalid uuid", data: null }, { status: 400 });
+  }
+
+  const password = getPasswordHeader(request);
+  if (!password) {
+    return json({ code: 400, msg: "Missing header: x-gc-password", data: null }, { status: 400 });
+  }
+
+  if (rotateMatch) {
+    if (request.method !== "POST") {
+      return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
+    }
+    const row = await readSyncRow(env, uuidRaw);
+    if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
+    if (!(await verifyRowPassword(row, password))) {
+      return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
+    }
+
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+    const newPassword = typeof body?.newPassword === "string" ? body.newPassword : "";
+    const blob = typeof body?.blob === "string" ? body.blob : "";
+    const clientUpdatedAt = typeof body?.clientUpdatedAt === "number" ? body.clientUpdatedAt : NaN;
+
+    if (!newPassword.trim()) {
+      return json({ code: 400, msg: "Missing body.newPassword", data: null }, { status: 400 });
+    }
+    if (!blob) {
+      return json({ code: 400, msg: "Missing body.blob", data: null }, { status: 400 });
+    }
+    if (!Number.isFinite(clientUpdatedAt) || clientUpdatedAt <= 0) {
+      return json({ code: 400, msg: "Invalid body.clientUpdatedAt", data: null }, { status: 400 });
+    }
+    if (blob.length > 900_000) {
+      return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
+    }
+
+    const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
+    const hash = await pbkdf2Hash(newPassword, salt);
+    const now = Date.now();
+    await env.DB!.prepare(
+      `UPDATE ${SYNC_TABLE} SET password_salt = ?, password_hash = ?, blob = ?, client_updated_at = ?, updated_at = ? WHERE uuid = ?`
+    )
+      .bind(bytesToHex(salt), bytesToHex(hash), blob, Math.trunc(clientUpdatedAt), now, uuidRaw)
+      .run();
+
+    return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
+  }
+
+  if (!mainMatch) {
+    return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
+  }
+
+  if (request.method === "GET") {
+    const row = await readSyncRow(env, uuidRaw);
+    if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
+    if (!(await verifyRowPassword(row, password))) {
+      return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
+    }
+    return json(
+      { code: 200, data: { uuid: row.uuid, blob: row.blob, clientUpdatedAt: row.client_updated_at } },
+      { status: 200 }
+    );
+  }
+
+  if (request.method === "PUT") {
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+
+    const blob = typeof body?.blob === "string" ? body.blob : "";
+    const clientUpdatedAt = typeof body?.clientUpdatedAt === "number" ? body.clientUpdatedAt : NaN;
+    const force = url.searchParams.get("force") === "1";
+
+    if (!blob) {
+      return json({ code: 400, msg: "Missing body.blob", data: null }, { status: 400 });
+    }
+    if (!Number.isFinite(clientUpdatedAt) || clientUpdatedAt <= 0) {
+      return json({ code: 400, msg: "Invalid body.clientUpdatedAt", data: null }, { status: 400 });
+    }
+    if (blob.length > 900_000) {
+      return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
+    }
+
+    const existing = await readSyncRow(env, uuidRaw);
+    const now = Date.now();
+    if (!existing) {
+      const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
+      const hash = await pbkdf2Hash(password, salt);
+      await env.DB!.prepare(
+        `INSERT INTO ${SYNC_TABLE} (uuid, password_salt, password_hash, blob, client_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(uuidRaw, bytesToHex(salt), bytesToHex(hash), blob, Math.trunc(clientUpdatedAt), now, now)
+        .run();
+
+      return json({ code: 201, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 201 });
+    }
+
+    if (!(await verifyRowPassword(existing, password))) {
+      return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
+    }
+
+    if (!force && Math.trunc(clientUpdatedAt) < Math.trunc(existing.client_updated_at)) {
+      return json(
+        {
+          code: 409,
+          msg: "Conflict: server has a newer version",
+          data: { uuid: existing.uuid, blob: existing.blob, clientUpdatedAt: existing.client_updated_at },
+        },
+        { status: 409 }
+      );
+    }
+
+    await env.DB!.prepare(
+      `UPDATE ${SYNC_TABLE} SET blob = ?, client_updated_at = ?, updated_at = ? WHERE uuid = ?`
+    )
+      .bind(blob, Math.trunc(clientUpdatedAt), now, uuidRaw)
+      .run();
+
+    return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
+  }
+
+  return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
+}
+
+function parseCacheTtlMs(env: Env): number {
+  const raw = env.CACHE_TTL_SECONDS;
+  const n = Number(raw ?? String(DEFAULT_CACHE_TTL_SECONDS));
+  const seconds = Number.isFinite(n) && n > 0 ? n : DEFAULT_CACHE_TTL_SECONDS;
+  return Math.trunc(seconds * 1000);
+}
+
+function parseCorsAllowlist(env: Env): string[] | null {
+  const raw = (env.CORS_ORIGIN ?? "").trim();
+  if (!raw) return null;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function withCors(req: Request, env: Env, res: Response): Response {
+  const allowlist = parseCorsAllowlist(env);
+  if (!allowlist) {
+    // allow all
+    const h = new Headers(res.headers);
+    h.set("access-control-allow-origin", "*");
+    h.append("vary", "origin");
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+  }
+
+  const origin = req.headers.get("origin") ?? "";
+  if (!origin || !allowlist.includes(origin)) return res;
+
+  const h = new Headers(res.headers);
+  h.set("access-control-allow-origin", origin);
+  h.append("vary", "origin");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
+function corsPreflight(req: Request, env: Env): Response {
+  const allowlist = parseCorsAllowlist(env);
+  const origin = req.headers.get("origin") ?? "";
+
+  // If allowlist is set, only allow matching origins.
+  if (allowlist && (!origin || !allowlist.includes(origin))) {
+    return new Response(null, { status: 204 });
+  }
+
+  const reqHeaders = req.headers.get("access-control-request-headers") ?? "content-type";
+
+  const headers = new Headers();
+  headers.set("access-control-allow-methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+  headers.set("access-control-allow-headers", reqHeaders);
+  headers.set("access-control-max-age", "86400");
+
+  if (allowlist) {
+    headers.set("access-control-allow-origin", origin);
+    headers.append("vary", "origin");
+  } else {
+    headers.set("access-control-allow-origin", "*");
+    headers.append("vary", "origin");
+  }
+
+  return new Response(null, { status: 204, headers });
+}
+
+function isGameId(x: unknown): x is GameId {
+  return typeof x === "string" && GAMES.some((g) => g.id === x);
+}
+
+async function handleApi(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (request.method === "OPTIONS") {
+    return corsPreflight(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/sync/")) {
+    return handleSyncApi(request, env);
+  }
+
+  if (request.method !== "GET") {
+    return json({ code: 405, msg: "Method not allowed", data: null } satisfies ApiResponse<null>, {
+      status: 405,
+    });
+  }
+
+  if (url.pathname === "/api/health") {
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/games") {
+    return json({ code: 200, data: GAMES } satisfies ApiResponse<typeof GAMES>);
+  }
+
+  if (url.pathname === "/api/events") {
+    const game = url.searchParams.get("game");
+    if (!game) {
+      return json({ code: 400, msg: "Missing query param: game", data: [] } satisfies ApiResponse<[]>, {
+        status: 400,
+      });
+    }
+    if (!isGameId(game)) {
+      return json({ code: 400, msg: `Unsupported game: ${game}`, data: [] } satisfies ApiResponse<[]>, {
+        status: 400,
+      });
+    }
+
+    const cacheTtlMs = parseCacheTtlMs(env);
+    const data = await getEventsForGameWithCache(env, game);
+
+    return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
+      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+    });
+  }
+
+  const m = /^\/api\/events\/([^/]+)$/.exec(url.pathname);
+  if (m) {
+    const game = m[1]!;
+    if (!isGameId(game)) {
+      return json({ code: 400, msg: `Unsupported game: ${game}`, data: [] } satisfies ApiResponse<[]>, {
+        status: 400,
+      });
+    }
+
+    const cacheTtlMs = parseCacheTtlMs(env);
+    const data = await getEventsForGameWithCache(env, game);
+
+    return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
+      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+    });
+  }
+
+  return json({ code: 404, msg: "Not found", data: null } satisfies ApiResponse<null>, {
+    status: 404,
+  });
+}
+
+export default {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api")) {
+      const res = await handleApi(request, env);
+      return withCors(request, env, res);
+    }
+
+    // Static SPA assets (built from apps/web). See wrangler.jsonc "assets".
+    return env.ASSETS.fetch(request);
+  },
+};

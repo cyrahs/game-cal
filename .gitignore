@@ -1,0 +1,17 @@
+node_modules
+.DS_Store
+
+# builds
+dist
+.turbo
+.wrangler
+
+# env
+.env
+.env.*.local
+
+# logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*

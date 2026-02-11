@@ -1,0 +1,20 @@
+{
+  "name": "game-cal",
+  "private": true,
+  "packageManager": "pnpm@9.9.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "cf:dev": "pnpm --filter @game-cal/web build && wrangler dev",
+    "cf:deploy": "pnpm --filter @game-cal/web build && wrangler deploy",
+    "cf:deploy:dry": "pnpm --filter @game-cal/web build && wrangler deploy --dry-run",
+    "cf:types": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

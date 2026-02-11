@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  game-cal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: game-cal
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      # Server configuration
+      - NODE_ENV=production
+      - PORT=8787
+      - HOST=0.0.0.0
+      
+      # Cache configuration (seconds)
+      - CACHE_TTL_SECONDS=86400
+      
+      # CORS configuration (comma-separated origins, or leave empty for all)
+      # - CORS_ORIGIN=https://example.com,https://app.example.com
+      
+      # Optional: Custom API URLs for games
+      # - GENSHIN_API_URL=https://...
+      # - STARRAIL_API_URL=https://...
+      # - STARRAIL_CONTENT_API_URL=https://...
+      # - WUTHERING_WAVES_API_URL=https://...
+    
+    # Optional: health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8787/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    
+    # Optional: resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Optional: logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
