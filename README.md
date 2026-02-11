@@ -139,6 +139,8 @@ pnpm --filter @game-cal/api start
 - 默认配额：`20` 次 / `60` 秒
 - 写请求加权：`PUT` 和 `POST` 默认消耗 `2` 个令牌（`GET` 消耗 `1` 个）
 - 超限返回：`429`，并附带 `Retry-After`、`X-RateLimit-*` 响应头
+- `PUT /api/sync/:uuid` 默认先写入 Worker 内存缓冲；同一 `uuid` 在连续写入停止 `30s` 后再回写 D1（减少高频本地状态变更造成的 D1 写放大）
+- `PUT /api/sync/:uuid?force=1` 与 `POST /api/sync/:uuid/rotate` 会立即写入 D1（用于强制覆盖/密码轮换等场景）
 
 可选环境变量（Worker）：
 - `SYNC_RATE_LIMIT_MAX`（默认 `20`）

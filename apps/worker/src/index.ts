@@ -33,6 +33,10 @@ const EVENTS_TABLE = "gc_events_cache";
 const SYNC_PBKDF2_ITERATIONS = 100_000;
 const SYNC_SALT_BYTES = 16;
 const SYNC_HASH_BYTES = 32; // 256-bit
+const SYNC_WRITE_IDLE_FLUSH_MS = 30_000;
+const SYNC_BUFFER_MAX_ENTRIES = 5_000;
+const SYNC_BUFFER_IDLE_EVICT_MS = 10 * 60 * 1000;
+const SYNC_BUFFER_SWEEP_INTERVAL_MS = 60 * 1000;
 
 type SyncRateBucket = {
   tokens: number;
@@ -258,6 +262,14 @@ type SyncRow = {
   updated_at: number;
 };
 
+type SyncBufferEntry = {
+  row: SyncRow;
+  dirty: boolean;
+  flushAfterMs: number;
+  version: number;
+  lastAccessAtMs: number;
+};
+
 type EventCacheRow = {
   game: GameId;
   payload: string;
@@ -268,6 +280,13 @@ type EventCacheUpdatedAtRow = {
   updated_at: number | string;
 };
 
+const syncBuffer = new Map<string, SyncBufferEntry>();
+let syncBufferLastSweepAtMs = 0;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function readSyncRow(env: Env, uuid: string): Promise<SyncRow | null> {
   if (!env.DB) return null;
   const row = (await env.DB.prepare(
@@ -276,6 +295,185 @@ async function readSyncRow(env: Env, uuid: string): Promise<SyncRow | null> {
     .bind(uuid)
     .first()) as SyncRow | null;
   return row;
+}
+
+function maybeSweepSyncBuffer(nowMs: number): void {
+  const shouldSweepByTime = nowMs - syncBufferLastSweepAtMs >= SYNC_BUFFER_SWEEP_INTERVAL_MS;
+  const shouldSweepBySize = syncBuffer.size > SYNC_BUFFER_MAX_ENTRIES;
+  if (!shouldSweepByTime && !shouldSweepBySize) return;
+  syncBufferLastSweepAtMs = nowMs;
+
+  for (const [uuid, entry] of syncBuffer.entries()) {
+    if (entry.dirty) continue;
+    if (nowMs - entry.lastAccessAtMs > SYNC_BUFFER_IDLE_EVICT_MS) {
+      syncBuffer.delete(uuid);
+    }
+  }
+
+  if (syncBuffer.size <= SYNC_BUFFER_MAX_ENTRIES) return;
+  const removable = [...syncBuffer.entries()]
+    .filter(([, entry]) => !entry.dirty)
+    .sort((a, b) => a[1].lastAccessAtMs - b[1].lastAccessAtMs);
+  const overflow = syncBuffer.size - SYNC_BUFFER_MAX_ENTRIES;
+  for (let i = 0; i < overflow; i++) {
+    const uuid = removable[i]?.[0];
+    if (!uuid) break;
+    syncBuffer.delete(uuid);
+  }
+}
+
+function getNextSyncUpdatedAt(existing: SyncRow | null): number {
+  const now = Date.now();
+  if (!existing) return now;
+  return Math.max(now, Math.trunc(existing.updated_at) + 1);
+}
+
+function markSyncRowDirty(row: SyncRow): SyncBufferEntry {
+  const now = Date.now();
+  const entry = syncBuffer.get(row.uuid);
+  if (entry) {
+    entry.row = row;
+    entry.dirty = true;
+    entry.flushAfterMs = now + SYNC_WRITE_IDLE_FLUSH_MS;
+    entry.version += 1;
+    entry.lastAccessAtMs = now;
+    return entry;
+  }
+
+  const created: SyncBufferEntry = {
+    row,
+    dirty: true,
+    flushAfterMs: now + SYNC_WRITE_IDLE_FLUSH_MS,
+    version: 1,
+    lastAccessAtMs: now,
+  };
+  syncBuffer.set(row.uuid, created);
+  maybeSweepSyncBuffer(now);
+  return created;
+}
+
+function rememberSyncRow(row: SyncRow): SyncRow {
+  const now = Date.now();
+  const entry = syncBuffer.get(row.uuid);
+  if (entry) {
+    entry.row = row;
+    entry.lastAccessAtMs = now;
+    return entry.row;
+  }
+
+  syncBuffer.set(row.uuid, {
+    row,
+    dirty: false,
+    flushAfterMs: 0,
+    version: 0,
+    lastAccessAtMs: now,
+  });
+  maybeSweepSyncBuffer(now);
+  return row;
+}
+
+async function readSyncRowWithBuffer(env: Env, uuid: string): Promise<SyncRow | null> {
+  const cached = syncBuffer.get(uuid);
+  if (cached) {
+    cached.lastAccessAtMs = Date.now();
+    return cached.row;
+  }
+
+  const row = await readSyncRow(env, uuid);
+  if (!row) return null;
+  return rememberSyncRow(row);
+}
+
+async function writeSyncRowToD1(env: Env, row: SyncRow): Promise<void> {
+  if (!env.DB) return;
+  await env.DB.prepare(
+    `INSERT INTO ${SYNC_TABLE} (uuid, password_salt, password_hash, blob, client_updated_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(uuid) DO UPDATE SET
+       password_salt = excluded.password_salt,
+       password_hash = excluded.password_hash,
+       blob = excluded.blob,
+       client_updated_at = excluded.client_updated_at,
+       updated_at = excluded.updated_at
+     WHERE excluded.updated_at >= ${SYNC_TABLE}.updated_at`
+  )
+    .bind(
+      row.uuid,
+      row.password_salt,
+      row.password_hash,
+      row.blob,
+      Math.trunc(row.client_updated_at),
+      Math.trunc(row.created_at),
+      Math.trunc(row.updated_at)
+    )
+    .run();
+}
+
+async function flushSyncRowToD1(
+  env: Env,
+  uuid: string,
+  opts?: { expectedVersion?: number; onlyIfDue?: boolean }
+): Promise<boolean> {
+  const entry = syncBuffer.get(uuid);
+  if (!entry || !entry.dirty) return false;
+  if (opts?.expectedVersion != null && opts.expectedVersion !== entry.version) return false;
+  if (opts?.onlyIfDue && Date.now() < entry.flushAfterMs) return false;
+
+  const version = entry.version;
+  const snapshot = { ...entry.row };
+  await writeSyncRowToD1(env, snapshot);
+
+  const latest = syncBuffer.get(uuid);
+  if (latest && latest.version === version) {
+    latest.dirty = false;
+    latest.flushAfterMs = 0;
+    latest.lastAccessAtMs = Date.now();
+  }
+  return true;
+}
+
+async function flushDueSyncRowsToD1(env: Env): Promise<number> {
+  if (!env.DB || syncBuffer.size === 0) return 0;
+  if (!(await ensureSyncSchema(env))) return 0;
+
+  const now = Date.now();
+  const due = [...syncBuffer.entries()]
+    .filter(([, entry]) => entry.dirty && entry.flushAfterMs <= now)
+    .map(([uuid, entry]) => ({ uuid, version: entry.version }));
+  if (due.length === 0) return 0;
+
+  let flushed = 0;
+  for (const item of due) {
+    try {
+      if (await flushSyncRowToD1(env, item.uuid, { expectedVersion: item.version, onlyIfDue: true })) {
+        flushed += 1;
+      }
+    } catch (err) {
+      console.error("Failed to flush buffered sync row to D1", { uuid: item.uuid, err });
+    }
+  }
+  maybeSweepSyncBuffer(Date.now());
+  return flushed;
+}
+
+function scheduleSyncRowFlush(env: Env, ctx: ExecutionContext, uuid: string, version: number): void {
+  ctx.waitUntil(
+    (async () => {
+      await sleepMs(SYNC_WRITE_IDLE_FLUSH_MS);
+      try {
+        await flushSyncRowToD1(env, uuid, { expectedVersion: version, onlyIfDue: true });
+      } catch (err) {
+        console.error("Delayed sync flush failed", { uuid, err });
+      }
+    })()
+  );
+}
+
+async function flushSyncRowImmediately(env: Env, uuid: string, expectedVersion: number): Promise<void> {
+  const flushedExpected = await flushSyncRowToD1(env, uuid, { expectedVersion });
+  if (!flushedExpected) {
+    await flushSyncRowToD1(env, uuid);
+  }
 }
 
 async function verifyRowPassword(row: SyncRow, password: string): Promise<boolean> {
@@ -438,7 +636,7 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Calend
   });
 }
 
-async function handleSyncApi(request: Request, env: Env): Promise<Response> {
+async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!(await ensureSyncSchema(env))) {
     return json({ code: 501, msg: "Sync store not configured (missing D1 binding)", data: null }, { status: 501 });
   }
@@ -461,7 +659,7 @@ async function handleSyncApi(request: Request, env: Env): Promise<Response> {
     if (request.method !== "POST") {
       return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
     }
-    const row = await readSyncRow(env, uuidRaw);
+    const row = await readSyncRowWithBuffer(env, uuidRaw);
     if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
     if (!(await verifyRowPassword(row, password))) {
       return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
@@ -492,12 +690,16 @@ async function handleSyncApi(request: Request, env: Env): Promise<Response> {
 
     const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
     const hash = await pbkdf2Hash(newPassword, salt);
-    const now = Date.now();
-    await env.DB!.prepare(
-      `UPDATE ${SYNC_TABLE} SET password_salt = ?, password_hash = ?, blob = ?, client_updated_at = ?, updated_at = ? WHERE uuid = ?`
-    )
-      .bind(bytesToHex(salt), bytesToHex(hash), blob, Math.trunc(clientUpdatedAt), now, uuidRaw)
-      .run();
+    const nextRow: SyncRow = {
+      ...row,
+      password_salt: bytesToHex(salt),
+      password_hash: bytesToHex(hash),
+      blob,
+      client_updated_at: Math.trunc(clientUpdatedAt),
+      updated_at: getNextSyncUpdatedAt(row),
+    };
+    const staged = markSyncRowDirty(nextRow);
+    await flushSyncRowImmediately(env, uuidRaw, staged.version);
 
     return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
   }
@@ -507,7 +709,7 @@ async function handleSyncApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "GET") {
-    const row = await readSyncRow(env, uuidRaw);
+    const row = await readSyncRowWithBuffer(env, uuidRaw);
     if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
     if (!(await verifyRowPassword(row, password))) {
       return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
@@ -540,16 +742,26 @@ async function handleSyncApi(request: Request, env: Env): Promise<Response> {
       return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
     }
 
-    const existing = await readSyncRow(env, uuidRaw);
-    const now = Date.now();
+    const existing = await readSyncRowWithBuffer(env, uuidRaw);
     if (!existing) {
       const salt = crypto.getRandomValues(new Uint8Array(SYNC_SALT_BYTES));
       const hash = await pbkdf2Hash(password, salt);
-      await env.DB!.prepare(
-        `INSERT INTO ${SYNC_TABLE} (uuid, password_salt, password_hash, blob, client_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(uuidRaw, bytesToHex(salt), bytesToHex(hash), blob, Math.trunc(clientUpdatedAt), now, now)
-        .run();
+      const now = Date.now();
+      const nextRow: SyncRow = {
+        uuid: uuidRaw,
+        password_salt: bytesToHex(salt),
+        password_hash: bytesToHex(hash),
+        blob,
+        client_updated_at: Math.trunc(clientUpdatedAt),
+        created_at: now,
+        updated_at: now,
+      };
+      const staged = markSyncRowDirty(nextRow);
+      if (force) {
+        await flushSyncRowImmediately(env, uuidRaw, staged.version);
+      } else {
+        scheduleSyncRowFlush(env, ctx, uuidRaw, staged.version);
+      }
 
       return json({ code: 201, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 201 });
     }
@@ -569,11 +781,18 @@ async function handleSyncApi(request: Request, env: Env): Promise<Response> {
       );
     }
 
-    await env.DB!.prepare(
-      `UPDATE ${SYNC_TABLE} SET blob = ?, client_updated_at = ?, updated_at = ? WHERE uuid = ?`
-    )
-      .bind(blob, Math.trunc(clientUpdatedAt), now, uuidRaw)
-      .run();
+    const nextRow: SyncRow = {
+      ...existing,
+      blob,
+      client_updated_at: Math.trunc(clientUpdatedAt),
+      updated_at: getNextSyncUpdatedAt(existing),
+    };
+    const staged = markSyncRowDirty(nextRow);
+    if (force) {
+      await flushSyncRowImmediately(env, uuidRaw, staged.version);
+    } else {
+      scheduleSyncRowFlush(env, ctx, uuidRaw, staged.version);
+    }
 
     return json({ code: 200, data: { uuid: uuidRaw, clientUpdatedAt } }, { status: 200 });
   }
@@ -647,7 +866,7 @@ function isGameId(x: unknown): x is GameId {
   return typeof x === "string" && GAMES.some((g) => g.id === x);
 }
 
-async function handleApi(request: Request, env: Env): Promise<Response> {
+async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
 
   if (request.method === "OPTIONS") {
@@ -656,6 +875,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname.startsWith("/api/sync/")) {
     if (env.DB) {
+      ctx.waitUntil(
+        flushDueSyncRowsToD1(env).catch((err) => {
+          console.error("Background flush for buffered sync rows failed", { err });
+        })
+      );
       const decision = takeSyncRateLimit(request, env);
       if (!decision.allowed) {
         return json(
@@ -667,10 +891,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           { status: 429, headers: decision.headers }
         );
       }
-      const res = await handleSyncApi(request, env);
+      const res = await handleSyncApi(request, env, ctx);
       return applyResponseHeaders(res, decision.headers);
     }
-    return handleSyncApi(request, env);
+    return handleSyncApi(request, env, ctx);
   }
 
   if (request.method !== "GET") {
@@ -731,11 +955,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api")) {
-      const res = await handleApi(request, env);
+      const res = await handleApi(request, env, ctx);
       return withCors(request, env, res);
     }
 
@@ -743,6 +967,12 @@ export default {
     return env.ASSETS.fetch(request);
   },
   async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    try {
+      await flushDueSyncRowsToD1(env);
+    } catch (err) {
+      console.error("Scheduled flush for buffered sync rows failed", { err });
+    }
+
     try {
       await refreshAllGamesToD1IfNeeded(env);
     } catch (err) {
