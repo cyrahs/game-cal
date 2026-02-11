@@ -2,6 +2,7 @@ import clsx from "clsx";
 import DOMPurify from "dompurify";
 import dayjs, { type Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
+import isoWeek from "dayjs/plugin/isoWeek";
 import utc from "dayjs/plugin/utc";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CalendarEvent, GameId } from "../../api/types";
@@ -20,6 +21,7 @@ import endfieldIcon from "../../assets/endfield.png";
 import snowbreakIcon from "../../assets/snowbreak.png";
 
 dayjs.extend(customParseFormat);
+dayjs.extend(isoWeek);
 dayjs.extend(utc);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1450,6 +1452,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   const {
     prefs,
     setShowNotStarted,
+    setShowWeekSeparators,
     toggleCompleted: toggleCompletedPref,
     toggleRecurringCompleted: toggleRecurringCompletedPref,
     addRecurringActivity,
@@ -1467,6 +1470,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   const gameMeta = GAME_META[props.gameId];
   const eventDetailVariant = EVENT_DETAIL_VARIANT_BY_GAME[props.gameId];
   const showNotStarted = prefs.timeline.showNotStarted;
+  const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const completedIdsArr = prefs.timeline.completedIdsByGame[props.gameId] ?? [];
   const completedIds = useMemo(() => new Set<string | number>(completedIdsArr), [completedIdsArr]);
   const completedRecurring = prefs.timeline.completedRecurringByGame[props.gameId] ?? {};
@@ -1601,7 +1605,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     setSelectedFrom(null);
   }, [selectedEvent, selectedId]);
 
-  const { rangeStart, rangeEnd, months } = useMemo(() => {
+  const { rangeStart, rangeEnd, months, weeks } = useMemo(() => {
     const baseMonth = now.startOf("month");
     const windowStart = baseMonth.subtract(1, "month").startOf("month");
     const windowEnd = baseMonth.add(1, "month").endOf("month");
@@ -1645,8 +1649,8 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     if (end.isBefore(todayEnd)) end = todayEnd;
     if (end.isBefore(start)) end = start;
 
-    const monthSegments: Array<{ key: string; label: string; width: number }> =
-      [];
+    const monthSegments: Array<{ key: string; label: string; width: number }> = [];
+    const weekSegments: Array<{ key: string; label: string; tooltip: string; width: number }> = [];
     // Start from the month containing "start".
     let m = start.startOf("month");
     const totalMs = Math.max(1, end.valueOf() - start.valueOf());
@@ -1665,10 +1669,28 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
       m = m.add(1, "month");
     }
 
+    let w = start.startOf("isoWeek");
+    while (w.isBefore(end) || w.isSame(end, "day")) {
+      const segStart = w.isBefore(start) ? start : w;
+      const segEnd = w.endOf("isoWeek").isAfter(end) ? end : w.endOf("isoWeek");
+      const segMs = Math.max(1, segEnd.valueOf() - segStart.valueOf());
+      const week = segStart.isoWeek();
+      const weekYear = segStart.isoWeekYear();
+
+      weekSegments.push({
+        key: `${weekYear}-W${String(week).padStart(2, "0")}`,
+        label: weekYear === now.year() ? `第${week}周` : `${weekYear}年第${week}周`,
+        tooltip: `${weekYear}年第${week}周`,
+        width: (segMs / totalMs) * 100,
+      });
+      w = w.add(1, "week");
+    }
+
     return {
       rangeStart: start,
       rangeEnd: end,
       months: monthSegments,
+      weeks: weekSegments,
     };
   }, [activeTimelineEvents, now]);
 
@@ -1715,8 +1737,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
 
   const axisHeights = useMemo(() => {
     const monthRow = 36;
-    const dayRow = 0;
-    return { monthRow, dayRow, total: monthRow + dayRow };
+    return { monthRow, total: monthRow };
   }, []);
 
   useEffect(() => {
@@ -1795,7 +1816,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   return (
     <div className="fade-in grid gap-3">
       <div className="glass shadow-ink rounded-2xl overflow-hidden relative">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
           <div className="flex items-baseline gap-3 min-w-0">
             <div className="text-sm font-semibold shrink-0">
               <img
@@ -1813,15 +1834,26 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
               </div>
             ) : null}
           </div>
-          <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-            <span>显示未开始活动</span>
-            <input
-              type="checkbox"
-              checked={showNotStarted}
-              onChange={(e) => setShowNotStarted(e.target.checked)}
-              className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-            />
-          </label>
+          <div className="flex items-center gap-3 shrink-0">
+            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
+              <span>按周分隔</span>
+              <input
+                type="checkbox"
+                checked={showWeekSeparators}
+                onChange={(e) => setShowWeekSeparators(e.target.checked)}
+                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
+              <span>显示未开始活动</span>
+              <input
+                type="checkbox"
+                checked={showNotStarted}
+                onChange={(e) => setShowNotStarted(e.target.checked)}
+                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
+              />
+            </label>
+          </div>
         </div>
 
         <div ref={hScrollRef} className="max-h-[70vh] overflow-auto">
@@ -1875,23 +1907,38 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                       {m.label}
                     </div>
                   ))}
-              </div>
+                </div>
             </div>
 
             {/* Bars */}
             <div className="relative">
               {/* Month separators */}
-              <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
-                {months.map((m, idx) => (
-                  <div
-                    key={m.key}
-                    className={clsx(
-                      idx < months.length - 1 && "border-r border-[color:var(--line)]"
-                    )}
-                    style={{ width: `${m.width}%` }}
-                  />
-                ))}
-              </div>
+              {!showWeekSeparators ? (
+                <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
+                  {months.map((m, idx) => (
+                    <div
+                      key={m.key}
+                      className={clsx(
+                        idx < months.length - 1 && "border-r border-[color:var(--line)]"
+                      )}
+                      style={{ width: `${m.width}%` }}
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {showWeekSeparators ? (
+                <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
+                  {weeks.map((w, idx) => (
+                    <div
+                      key={`week-separator-${w.key}`}
+                      className={clsx(
+                        idx < weeks.length - 1 && "border-r border-[color:var(--line)]"
+                      )}
+                      style={{ width: `${w.width}%` }}
+                    />
+                  ))}
+                </div>
+              ) : null}
 
               {timelineEvents.map((e, idx) => {
                 const isSelected = selectedId === e.id;

@@ -226,6 +226,7 @@ export type PrefsState = {
   hiddenGameIds: GameId[];
   timeline: {
     showNotStarted: boolean;
+    showWeekSeparators: boolean;
     completedIdsByGame: Partial<Record<GameId, Array<string | number>>>;
     completedRecurringByGame: Partial<Record<GameId, Record<string, string>>>;
     recurringActivitiesByGame: Partial<Record<GameId, RecurringActivity[]>>;
@@ -247,6 +248,7 @@ export type PrefsContextValue = {
   setTheme: (t: Theme) => void;
   setVisibleGameIds: (ids: GameId[]) => void;
   setShowNotStarted: (v: boolean) => void;
+  setShowWeekSeparators: (v: boolean) => void;
   toggleCompleted: (gameId: GameId, eventId: string | number) => void;
   toggleRecurringCompleted: (gameId: GameId, activityId: string, cycleKey: string) => void;
   addRecurringActivity: (gameId: GameId, activity: Omit<RecurringActivity, "id">) => void;
@@ -366,6 +368,7 @@ function makeDefaultPrefs(): PrefsState {
     hiddenGameIds: [],
     timeline: {
       showNotStarted: false,
+      showWeekSeparators: false,
       completedIdsByGame: {},
       completedRecurringByGame: {},
       recurringActivitiesByGame: cloneRecurringActivitiesByGame(DEFAULT_RECURRING_ACTIVITIES_BY_GAME),
@@ -405,6 +408,10 @@ function coercePrefs(input: unknown): PrefsState {
 
   const showNotStarted =
     typeof obj.timeline?.showNotStarted === "boolean" ? (obj.timeline.showNotStarted as boolean) : base.timeline.showNotStarted;
+  const showWeekSeparators =
+    typeof obj.timeline?.showWeekSeparators === "boolean"
+      ? (obj.timeline.showWeekSeparators as boolean)
+      : base.timeline.showWeekSeparators;
 
   const completedIdsByGame: PrefsState["timeline"]["completedIdsByGame"] = {};
   const src = obj.timeline?.completedIdsByGame;
@@ -444,7 +451,7 @@ function coercePrefs(input: unknown): PrefsState {
     theme,
     visibleGameIds,
     hiddenGameIds,
-    timeline: { showNotStarted, completedIdsByGame, completedRecurringByGame, recurringActivitiesByGame },
+    timeline: { showNotStarted, showWeekSeparators, completedIdsByGame, completedRecurringByGame, recurringActivitiesByGame },
   };
 }
 
@@ -845,6 +852,10 @@ export function PrefsProvider(props: { children: ReactNode }) {
     setPrefs((prev) => ({ ...prev, timeline: { ...prev.timeline, showNotStarted: v }, updatedAt: Date.now() }));
   }, []);
 
+  const setShowWeekSeparators = useCallback((v: boolean) => {
+    setPrefs((prev) => ({ ...prev, timeline: { ...prev.timeline, showWeekSeparators: v }, updatedAt: Date.now() }));
+  }, []);
+
   const toggleCompleted = useCallback((gameId: GameId, eventId: string | number) => {
     setPrefs((prev) => {
       const existing = prev.timeline.completedIdsByGame[gameId] ?? [];
@@ -1026,6 +1037,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setTheme,
       setVisibleGameIds,
       setShowNotStarted,
+      setShowWeekSeparators,
       toggleCompleted,
       toggleRecurringCompleted,
       addRecurringActivity,
@@ -1061,6 +1073,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setUuid,
       setVisibleGameIds,
       setShowNotStarted,
+      setShowWeekSeparators,
       syncState,
       toggleCompleted,
       toggleRecurringCompleted,
