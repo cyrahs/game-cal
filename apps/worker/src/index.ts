@@ -62,16 +62,8 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-function getLatestRefreshCutoffMs(nowMs: number): number {
-  const d = new Date(nowMs);
-  return Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-    0,
-    0,
-    0
-  );
+function isCacheStale(updatedAtMs: number, ttlMs: number, nowMs: number): boolean {
+  return nowMs - updatedAtMs >= ttlMs;
 }
 
 function getPasswordHeader(req: Request): string | null {
@@ -141,6 +133,10 @@ type EventCacheRow = {
   updated_at: number | string;
 };
 
+type EventCacheUpdatedAtRow = {
+  updated_at: number | string;
+};
+
 async function readSyncRow(env: Env, uuid: string): Promise<SyncRow | null> {
   if (!env.DB) return null;
   const row = (await env.DB.prepare(
@@ -181,6 +177,16 @@ async function readEventCacheRow(env: Env, game: GameId): Promise<EventCacheRow 
   return (await env.DB.prepare(`SELECT game, payload, updated_at FROM ${EVENTS_TABLE} WHERE game = ?`)
     .bind(game)
     .first()) as EventCacheRow | null;
+}
+
+async function readEventCacheUpdatedAt(env: Env, game: GameId): Promise<number | null> {
+  if (!env.DB) return null;
+  const row = (await env.DB.prepare(`SELECT updated_at FROM ${EVENTS_TABLE} WHERE game = ?`)
+    .bind(game)
+    .first()) as EventCacheUpdatedAtRow | null;
+  if (!row) return null;
+  const updatedAt = Number(row.updated_at);
+  return Number.isFinite(updatedAt) ? updatedAt : Number.NaN;
 }
 
 async function writeEventCacheRow(env: Env, game: GameId, payload: string, updatedAt: number): Promise<void> {
@@ -232,6 +238,34 @@ function triggerRefreshAllGames(env: Env): Promise<void> {
   return p;
 }
 
+async function shouldRefreshAllGames(env: Env, ttlMs: number): Promise<boolean> {
+  const nowMs = Date.now();
+  const checks = await Promise.all(
+    GAMES.map(async ({ id }) => {
+      const updatedAt = await readEventCacheUpdatedAt(env, id);
+      return { id, updatedAt };
+    })
+  );
+
+  for (const { updatedAt } of checks) {
+    if (updatedAt === null || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, ttlMs, nowMs)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function refreshAllGamesToD1IfNeeded(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (!(await ensureEventsSchema(env))) return false;
+
+  const ttlMs = parseCacheTtlMs(env);
+  if (!(await shouldRefreshAllGames(env, ttlMs))) return false;
+
+  await triggerRefreshAllGames(env);
+  return true;
+}
+
 async function getEventsForGameWithCache(env: Env, game: GameId): Promise<CalendarEvent[]> {
   const cacheTtlMs = parseCacheTtlMs(env);
   const memoryFallback = async () =>
@@ -239,37 +273,38 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Calend
 
   if (!env.DB) return await memoryFallback();
 
-  try {
-    if (!(await ensureEventsSchema(env))) {
+  return await cache.getOrSet(`events:d1:${game}`, cacheTtlMs, async () => {
+    try {
+      if (!(await ensureEventsSchema(env))) {
+        return await memoryFallback();
+      }
+
+      const row = await readEventCacheRow(env, game);
+
+      if (!row) {
+        await triggerRefreshAllGames(env);
+        const refreshed = await readEventCacheRow(env, game);
+        const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
+        if (parsed) return parsed;
+        return await refreshGameEventsToD1(env, game);
+      }
+
+      const parsed = decodeEventPayload(row.payload);
+      const updatedAt = Number(row.updated_at);
+      if (!parsed || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+        await triggerRefreshAllGames(env);
+        const refreshed = await readEventCacheRow(env, game);
+        const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
+        if (refreshedParsed) return refreshedParsed;
+        return await refreshGameEventsToD1(env, game);
+      }
+
+      return parsed;
+    } catch (err) {
+      console.error("D1 event cache failed, fallback to in-memory cache", { game, err });
       return await memoryFallback();
     }
-
-    const row = await readEventCacheRow(env, game);
-    const cutoff = getLatestRefreshCutoffMs(Date.now());
-
-    if (!row) {
-      await triggerRefreshAllGames(env);
-      const refreshed = await readEventCacheRow(env, game);
-      const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-      if (parsed) return parsed;
-      return await refreshGameEventsToD1(env, game);
-    }
-
-    const parsed = decodeEventPayload(row.payload);
-    const updatedAt = Number(row.updated_at);
-    if (!parsed || !Number.isFinite(updatedAt) || updatedAt < cutoff) {
-      await triggerRefreshAllGames(env);
-      const refreshed = await readEventCacheRow(env, game);
-      const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-      if (refreshedParsed) return refreshedParsed;
-      return await refreshGameEventsToD1(env, game);
-    }
-
-    return parsed;
-  } catch (err) {
-    console.error("D1 event cache failed, fallback to in-memory cache", { game, err });
-    return await memoryFallback();
-  }
+  });
 }
 
 async function handleSyncApi(request: Request, env: Env): Promise<Response> {
@@ -560,5 +595,12 @@ export default {
 
     // Static SPA assets (built from apps/web). See wrangler.jsonc "assets".
     return env.ASSETS.fetch(request);
+  },
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    try {
+      await refreshAllGamesToD1IfNeeded(env);
+    } catch (err) {
+      console.error("Scheduled refresh for D1 event cache failed", { err });
+    }
   },
 };

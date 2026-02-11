@@ -149,7 +149,8 @@ pnpm --filter @game-cal/api start
 
 - Worker + D1 时，事件缓存持久化到 `gc_events_cache`
 - 缓存不存在时会立即拉取并写入 D1
-- 每日 `00:00` UTC 后视为过期，按请求触发刷新
+- 缓存按 `CACHE_TTL_SECONDS` 过期，按请求触发刷新
+- Worker 默认每分钟定时检查一次缓存；若任一游戏缺失或超过 `CACHE_TTL_SECONDS`，会后台刷新全部游戏，降低首个 `/api/events` 请求等待
 - Node API 模式仅使用内存缓存
 
 ## 时区说明

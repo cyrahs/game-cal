@@ -5,6 +5,11 @@
   "compatibility_date": "2026-02-10",
   // Deploy-button friendly default: publish to workers.dev unless user configures routes/custom domains.
   "workers_dev": true,
+  "triggers": {
+    // Periodically check whether D1 event cache exceeded CACHE_TTL_SECONDS.
+    // Actual refresh only runs when cache is stale/missing.
+    "crons": ["* * * * *"]
+  },
   "assets": {
     "directory": "./apps/web/dist",
     "binding": "ASSETS",
