@@ -1945,6 +1945,16 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
 
                 const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
                 const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
+                const showCountdownOnly = width <= 88;
+                const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
+                const countdownUnits = Array.from(remainingLabel).reduce(
+                  (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
+                  0
+                );
+                const countdownAvailableWidth = Math.max(0, width - countdownPaddingX * 2);
+                const countdownFontSize = showCountdownOnly
+                  ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
+                  : 13;
 
                 const [colorA, colorB] = TIMELINE_BAR_GRADIENTS[idx % TIMELINE_BAR_GRADIENTS.length]!;
 
@@ -1969,9 +1979,10 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                   >
                     <div
                       className={clsx(
-                        "absolute top-2 bottom-2 px-3 py-2 overflow-hidden",
+                        "absolute top-2 bottom-2 py-2 overflow-hidden",
                         "flex items-center",
-                        "z-10 text-[12px] leading-4 shadow-sm cursor-pointer",
+                        showCountdownOnly ? "justify-center" : "px-3",
+                        "z-10 text-[13px] leading-5 shadow-sm cursor-pointer",
                         "transition-[box-shadow,filter] duration-150 ease-out",
                         "hover:shadow-md hover:brightness-105",
                         isSelected
@@ -1984,6 +1995,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                         background: `linear-gradient(90deg, ${colorA}, ${colorB})`,
                         opacity: isEnd ? 0.55 : 0.95,
                         borderRadius,
+                        ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
                       }}
                       onClick={() => {
                         // Clicking the same timeline event again should hide the detail panel.
@@ -1996,21 +2008,25 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                         setSelectedFrom("timeline");
                       }}
                     >
-                      <div className="min-w-0 flex-1">
-                        <div
-                          className={clsx(
-                            "text-slate-900 bg-transparent gc-line-clamp-2 break-words",
-                            isEnd && "line-through"
-                          )}
-                        >
-                          {e.title}
+                      {!showCountdownOnly ? (
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className={clsx(
+                              "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
+                              isEnd && "line-through"
+                            )}
+                          >
+                            {e.title}
+                          </div>
                         </div>
-                      </div>
+                      ) : null}
                       <div
                         className={clsx(
-                          "shrink-0 pl-2 font-mono tabular-nums",
+                          "leading-none font-mono tabular-nums",
+                          showCountdownOnly ? "w-full min-w-0 text-center whitespace-nowrap" : "shrink-0 pl-2 text-[13px]",
                           isUrgent ? "text-red-700 font-semibold" : "text-slate-800/70"
                         )}
+                        style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
                         aria-label={remainingAriaLabel}
                       >
                         {remainingLabel}
