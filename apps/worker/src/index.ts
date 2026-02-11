@@ -14,16 +14,39 @@ interface Env extends RuntimeEnv {
   // Optional runtime knobs (match the Node API env vars where possible).
   CACHE_TTL_SECONDS?: string;
   CORS_ORIGIN?: string; // comma-separated allowlist; omit/empty to allow all
+
+  // Sync API rate limit knobs (IP based, Worker in-memory token bucket).
+  SYNC_RATE_LIMIT_MAX?: string;
+  SYNC_RATE_LIMIT_WINDOW_SECONDS?: string;
+  SYNC_RATE_LIMIT_WRITE_COST?: string;
 }
 
 const cache = new SimpleTtlCache();
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
+const DEFAULT_SYNC_RATE_LIMIT_MAX = 20;
+const DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS = 60;
+const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 2;
+const SYNC_RATE_LIMIT_MAX_TRACKED_IPS = 20_000;
 
 const SYNC_TABLE = "gc_sync_state";
 const EVENTS_TABLE = "gc_events_cache";
 const SYNC_PBKDF2_ITERATIONS = 100_000;
 const SYNC_SALT_BYTES = 16;
 const SYNC_HASH_BYTES = 32; // 256-bit
+
+type SyncRateBucket = {
+  tokens: number;
+  updatedAtMs: number;
+};
+
+type SyncRateLimitOutcome = {
+  allowed: boolean;
+  headers: Headers;
+};
+
+const syncRateBuckets = new Map<string, SyncRateBucket>();
+let syncRateLastSweepAtMs = 0;
+
 let didInitSyncSchema = false;
 let didInitEventsSchema = false;
 let eventsRefreshAllPromise: Promise<void> | null = null;
@@ -70,6 +93,114 @@ function getPasswordHeader(req: Request): string | null {
   const raw = req.headers.get("x-gc-password") ?? req.headers.get("x-game-cal-password");
   const v = (raw ?? "").trim();
   return v ? v : null;
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw ?? String(fallback));
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.trunc(n);
+}
+
+function parseSyncRateLimitConfig(env: Env): { limit: number; windowMs: number; writeCost: number } {
+  const limit = Math.min(parsePositiveInt(env.SYNC_RATE_LIMIT_MAX, DEFAULT_SYNC_RATE_LIMIT_MAX), 10_000);
+  const windowSeconds = Math.min(
+    parsePositiveInt(env.SYNC_RATE_LIMIT_WINDOW_SECONDS, DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS),
+    60 * 60
+  );
+  const writeCost = Math.min(parsePositiveInt(env.SYNC_RATE_LIMIT_WRITE_COST, DEFAULT_SYNC_RATE_LIMIT_WRITE_COST), limit);
+  return {
+    limit,
+    windowMs: Math.trunc(windowSeconds * 1000),
+    writeCost,
+  };
+}
+
+function extractClientIp(request: Request): string {
+  const cf = (request.headers.get("cf-connecting-ip") ?? "").trim();
+  if (cf && cf.length <= 128) return cf.toLowerCase();
+
+  const xff = request.headers.get("x-forwarded-for") ?? "";
+  const first = xff.split(",")[0]?.trim() ?? "";
+  if (first && first.length <= 128) return first.toLowerCase();
+
+  const real = (request.headers.get("x-real-ip") ?? "").trim();
+  if (real && real.length <= 128) return real.toLowerCase();
+
+  return "unknown";
+}
+
+function maybeSweepSyncRateBuckets(nowMs: number, windowMs: number): void {
+  const staleAfterMs = windowMs * 3;
+  const shouldSweepByTime = nowMs - syncRateLastSweepAtMs >= windowMs;
+  const shouldSweepBySize = syncRateBuckets.size > SYNC_RATE_LIMIT_MAX_TRACKED_IPS;
+  if (!shouldSweepByTime && !shouldSweepBySize) return;
+  syncRateLastSweepAtMs = nowMs;
+
+  for (const [ip, bucket] of syncRateBuckets.entries()) {
+    if (nowMs - bucket.updatedAtMs > staleAfterMs) {
+      syncRateBuckets.delete(ip);
+    }
+  }
+
+  if (syncRateBuckets.size <= SYNC_RATE_LIMIT_MAX_TRACKED_IPS) return;
+
+  const overflow = syncRateBuckets.size - SYNC_RATE_LIMIT_MAX_TRACKED_IPS;
+  const oldest = [...syncRateBuckets.entries()].sort((a, b) => a[1].updatedAtMs - b[1].updatedAtMs);
+  for (let i = 0; i < overflow; i++) {
+    const ip = oldest[i]?.[0];
+    if (ip) syncRateBuckets.delete(ip);
+  }
+}
+
+function toSyncRateHeaders(limit: number, remaining: number, resetAtMs: number, retryAfterSeconds = 0): Headers {
+  const headers = new Headers();
+  headers.set("x-ratelimit-limit", String(limit));
+  headers.set("x-ratelimit-remaining", String(Math.max(0, remaining)));
+  headers.set("x-ratelimit-reset", String(Math.ceil(resetAtMs / 1000)));
+  if (retryAfterSeconds > 0) {
+    headers.set("retry-after", String(retryAfterSeconds));
+  }
+  return headers;
+}
+
+function applyResponseHeaders(res: Response, extra: Headers): Response {
+  if ([...extra.keys()].length === 0) return res;
+  const headers = new Headers(res.headers);
+  for (const [k, v] of extra.entries()) headers.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+function takeSyncRateLimit(request: Request, env: Env): SyncRateLimitOutcome {
+  const { limit, windowMs, writeCost } = parseSyncRateLimitConfig(env);
+  const ip = extractClientIp(request);
+  const nowMs = Date.now();
+  maybeSweepSyncRateBuckets(nowMs, windowMs);
+
+  const methodCost = request.method === "PUT" || request.method === "POST" ? writeCost : 1;
+  const refillPerMs = limit / windowMs;
+  const existing = syncRateBuckets.get(ip) ?? { tokens: limit, updatedAtMs: nowMs };
+
+  const elapsedMs = Math.max(0, nowMs - existing.updatedAtMs);
+  const tokens = Math.min(limit, existing.tokens + elapsedMs * refillPerMs);
+  const nextTokens = tokens - methodCost;
+
+  if (nextTokens < 0) {
+    const waitMs = Math.abs(nextTokens) / refillPerMs;
+    const retryAfterSeconds = Math.max(1, Math.ceil(waitMs / 1000));
+    syncRateBuckets.set(ip, { tokens, updatedAtMs: nowMs });
+    return {
+      allowed: false,
+      headers: toSyncRateHeaders(limit, Math.floor(tokens), nowMs + retryAfterSeconds * 1000, retryAfterSeconds),
+    };
+  }
+
+  syncRateBuckets.set(ip, { tokens: nextTokens, updatedAtMs: nowMs });
+  const secondsUntilFull = Math.max(1, Math.ceil(((limit - nextTokens) / refillPerMs) / 1000));
+
+  return {
+    allowed: true,
+    headers: toSyncRateHeaders(limit, Math.floor(nextTokens), nowMs + secondsUntilFull * 1000),
+  };
 }
 
 function isLikelyValidUuidKey(uuid: string): boolean {
@@ -524,6 +655,21 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname.startsWith("/api/sync/")) {
+    if (env.DB) {
+      const decision = takeSyncRateLimit(request, env);
+      if (!decision.allowed) {
+        return json(
+          {
+            code: 429,
+            msg: "Too many sync requests from this IP. Please retry later.",
+            data: null,
+          } satisfies ApiResponse<null>,
+          { status: 429, headers: decision.headers }
+        );
+      }
+      const res = await handleSyncApi(request, env);
+      return applyResponseHeaders(res, decision.headers);
+    }
     return handleSyncApi(request, env);
   }
 

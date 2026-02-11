@@ -135,6 +135,16 @@ pnpm --filter @game-cal/api start
 - Worker 无 `DB` binding：`/api/sync/*` 返回 `501`
 - Node API 模式：`/api/sync/*` 返回 `501`
 
+`/api/sync/*` 在 Worker + D1 模式下会启用基于 IP 的限流（令牌桶）：
+- 默认配额：`20` 次 / `60` 秒
+- 写请求加权：`PUT` 和 `POST` 默认消耗 `2` 个令牌（`GET` 消耗 `1` 个）
+- 超限返回：`429`，并附带 `Retry-After`、`X-RateLimit-*` 响应头
+
+可选环境变量（Worker）：
+- `SYNC_RATE_LIMIT_MAX`（默认 `20`）
+- `SYNC_RATE_LIMIT_WINDOW_SECONDS`（默认 `60`）
+- `SYNC_RATE_LIMIT_WRITE_COST`（默认 `2`）
+
 ## API 接口
 
 - `GET /api/health`
