@@ -13,7 +13,7 @@ export const GAMES: Array<{ id: GameId; name: string }> = [
   { id: "ww", name: "鸣潮" },
   { id: "zzz", name: "绝区零" },
   { id: "snowbreak", name: "尘白禁区" },
-  { id: "endfield", name: "终末地" },
+  { id: "endfield", name: "明日方舟：终末地" },
 ];
 
 export async function fetchEventsForGame(

@@ -26,7 +26,7 @@ const games: GameLink[] = [
   {
     id: "starrail",
     to: "/starrail",
-    name: "星穹铁道",
+    name: "崩坏：星穹铁道",
     icon: starrailIcon,
   },
   {
@@ -50,7 +50,7 @@ const games: GameLink[] = [
   {
     id: "endfield",
     to: "/endfield",
-    name: "终末地",
+    name: "明日方舟：终末地",
     icon: endfieldIcon,
   },
 ];

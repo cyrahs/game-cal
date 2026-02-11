@@ -612,11 +612,11 @@ export function computeRecurringWindow(
 
 const GAME_META: Record<GameId, { name: string; icon: string }> = {
   genshin: { name: "原神", icon: genshinIcon },
-  starrail: { name: "星穹铁道", icon: starrailIcon },
+  starrail: { name: "崩坏：星穹铁道", icon: starrailIcon },
   ww: { name: "鸣潮", icon: wwIcon },
   zzz: { name: "绝区零", icon: zzzIcon },
   snowbreak: { name: "尘白禁区", icon: snowbreakIcon },
-  endfield: { name: "终末地", icon: endfieldIcon },
+  endfield: { name: "明日方舟：终末地", icon: endfieldIcon },
 };
 
 export function parseDateTime(input: string): Dayjs {
