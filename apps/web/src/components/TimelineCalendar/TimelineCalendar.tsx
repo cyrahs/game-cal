@@ -2128,21 +2128,30 @@ export default function TimelineCalendar(props: {
                             </div>
                           </div>
                         ) : null}
-                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
-                          <button
-                            type="button"
-                            className={clsx(
-                              "absolute inset-0 inline-flex items-center justify-center",
-                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                              showCompleteToggle
-                                ? "opacity-100 scale-100 pointer-events-auto"
-                                : "opacity-0 scale-95 pointer-events-none"
-                            )}
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              if (e.kind === "recurring") {
-                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
-                              } else {
+	                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
+	                          <button
+	                            type="button"
+	                            className={clsx(
+	                              "absolute inline-flex items-center justify-center",
+	                              // When the bar is very short we render countdown-only text centered.
+	                              // Avoid turning the whole bar into a huge invisible button by sizing
+	                              // the hit-target to the chip only.
+	                              showCountdownOnly
+	                                ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+	                                : "inset-0",
+	                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+	                              showCompleteToggle
+	                                ? "opacity-100 scale-100 pointer-events-auto"
+	                                : "opacity-0 scale-95 pointer-events-none"
+	                            )}
+	                            style={
+	                              showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
+	                            }
+	                            onClick={(ev) => {
+	                              ev.stopPropagation();
+	                              if (e.kind === "recurring") {
+	                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
+	                              } else {
                                 toggleCompleted(e.id);
                               }
                             }}
@@ -2151,15 +2160,19 @@ export default function TimelineCalendar(props: {
                             aria-hidden={!showCompleteToggle}
                             tabIndex={showCompleteToggle ? 0 : -1}
                             disabled={!showCompleteToggle}
-                          >
-                            <span
-                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                              style={{ width: `${completeChipSize}px`, height: `${completeChipSize}px` }}
-                            >
-                              <svg
-                                className="flex-none"
-                                viewBox="0 0 24 24"
-                                fill="none"
+	                          >
+	                            <span
+	                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+	                              style={
+	                                showCountdownOnly
+	                                  ? { width: "100%", height: "100%" }
+	                                  : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
+	                              }
+	                            >
+	                              <svg
+	                                className="flex-none"
+	                                viewBox="0 0 24 24"
+	                                fill="none"
                                 stroke="currentColor"
                                 strokeWidth="3"
                                 strokeLinecap="round"
