@@ -83,9 +83,28 @@ export default function Shell() {
   const settingsRef = useRef<HTMLDivElement | null>(null);
   const recurringImportInputRef = useRef<HTMLInputElement | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [syncInputErrors, setSyncInputErrors] = useState<{ uuid?: string; password?: string }>({});
   const [recurringSettingsFeedback, setRecurringSettingsFeedback] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const timezoneLabel = useMemo(() => formatUtcOffsetLabelByDate(now.toDate()), [now]);
+
+  const handleSyncUuidChange = (value: string) => {
+    if (value.length > sync.uuidMaxLength) {
+      setSyncInputErrors((prev) => ({ ...prev, uuid: `UUID 不能超过 ${sync.uuidMaxLength} 个字符` }));
+      return;
+    }
+    setSyncInputErrors((prev) => (prev.uuid ? { ...prev, uuid: undefined } : prev));
+    sync.setUuid(value);
+  };
+
+  const handleSyncPasswordChange = (value: string) => {
+    if (value.length > sync.passwordMaxLength) {
+      setSyncInputErrors((prev) => ({ ...prev, password: `Password 不能超过 ${sync.passwordMaxLength} 个字符` }));
+      return;
+    }
+    setSyncInputErrors((prev) => (prev.password ? { ...prev, password: undefined } : prev));
+    sync.setPassword(value);
+  };
 
   const handleExportRecurringSettings = () => {
     try {
@@ -413,17 +432,25 @@ export default function Shell() {
                         <input
                           className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-xs font-mono"
                           value={sync.uuid}
-                          onChange={(e) => sync.setUuid(e.target.value)}
+                          onChange={(e) => handleSyncUuidChange(e.target.value)}
+                          minLength={sync.uuidMinLength}
+                          aria-invalid={Boolean(syncInputErrors.uuid)}
                           spellCheck={false}
                           inputMode="text"
                         />
+                        {syncInputErrors.uuid ? (
+                          <span className="text-[11px] text-red-600/80 dark:text-red-400/80">{syncInputErrors.uuid}</span>
+                        ) : null}
                       </label>
 
                       <div className="flex gap-2">
                         <button
                           type="button"
                           className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-                          onClick={() => sync.setUuid(sync.generateUuid())}
+                          onClick={() => {
+                            setSyncInputErrors((prev) => (prev.uuid ? { ...prev, uuid: undefined } : prev));
+                            sync.setUuid(sync.generateUuid());
+                          }}
                         >
                           生成 UUID
                         </button>
@@ -448,10 +475,15 @@ export default function Shell() {
                           className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-xs font-mono"
                           type={showPassword ? "text" : "password"}
                           value={sync.password}
-                          onChange={(e) => sync.setPassword(e.target.value)}
+                          onChange={(e) => handleSyncPasswordChange(e.target.value)}
+                          minLength={sync.passwordMinLength}
+                          aria-invalid={Boolean(syncInputErrors.password)}
                           spellCheck={false}
                           inputMode="text"
                         />
+                        {syncInputErrors.password ? (
+                          <span className="text-[11px] text-red-600/80 dark:text-red-400/80">{syncInputErrors.password}</span>
+                        ) : null}
                       </label>
 
                       <div className="flex gap-2">

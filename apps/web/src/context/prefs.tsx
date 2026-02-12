@@ -11,6 +11,10 @@ const SYNC_CACHE_KEY = "gc.sync.cache";
 const THEME_KEY = "gc.theme";
 const AUTO_PULL_INTERVAL_MS = 30 * 60 * 1000;
 const ACTIVE_AUTO_PULL_DEDUPE_MS = 3000;
+const SYNC_UUID_MIN_LENGTH = 8;
+const SYNC_UUID_MAX_LENGTH = 64;
+const SYNC_PASSWORD_MIN_LENGTH = 1;
+const SYNC_PASSWORD_MAX_LENGTH = 128;
 
 const ALL_GAME_IDS: GameId[] = [
   "genshin",
@@ -260,6 +264,10 @@ export type PrefsContextValue = {
   sync: {
     uuid: string;
     password: string;
+    uuidMinLength: number;
+    uuidMaxLength: number;
+    passwordMinLength: number;
+    passwordMaxLength: number;
     setUuid: (uuid: string) => void;
     setPassword: (password: string) => void;
     generateUuid: () => string;
@@ -478,7 +486,7 @@ async function syncRequest<T>(
 export function PrefsProvider(props: { children: ReactNode }) {
   const [uuid, setUuidState] = useState(() => {
     const raw = (safeLsGet(SYNC_UUID_KEY) ?? "").trim();
-    if (raw && raw.length <= 64) return raw;
+    if (raw && raw.length <= SYNC_UUID_MAX_LENGTH) return raw;
     const next = randomUuid();
     safeLsSet(SYNC_UUID_KEY, next);
     return next;
@@ -486,7 +494,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
 
   const [password, setPasswordState] = useState(() => {
     const raw = (safeLsGet(SYNC_PASSWORD_KEY) ?? "").trim();
-    if (raw) return raw;
+    if (raw && raw.length <= SYNC_PASSWORD_MAX_LENGTH) return raw;
     const next = randomPassword();
     safeLsSet(SYNC_PASSWORD_KEY, next);
     return next;
@@ -1048,6 +1056,10 @@ export function PrefsProvider(props: { children: ReactNode }) {
       sync: {
         uuid,
         password,
+        uuidMinLength: SYNC_UUID_MIN_LENGTH,
+        uuidMaxLength: SYNC_UUID_MAX_LENGTH,
+        passwordMinLength: SYNC_PASSWORD_MIN_LENGTH,
+        passwordMaxLength: SYNC_PASSWORD_MAX_LENGTH,
         setUuid,
         setPassword,
         generateUuid: randomUuid,

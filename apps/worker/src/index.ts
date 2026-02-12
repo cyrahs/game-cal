@@ -38,6 +38,9 @@ const EVENTS_TABLE = "gc_events_cache";
 const SYNC_PBKDF2_ITERATIONS = 100_000;
 const SYNC_SALT_BYTES = 16;
 const SYNC_HASH_BYTES = 32; // 256-bit
+const SYNC_UUID_MIN_LENGTH = 8;
+const SYNC_UUID_MAX_LENGTH = 64;
+const SYNC_PASSWORD_MAX_LENGTH = 128;
 const SYNC_WRITE_IDLE_FLUSH_MS = 30_000;
 const SYNC_BUFFER_MAX_ENTRIES = 5_000;
 const SYNC_BUFFER_IDLE_EVICT_MS = 10 * 60 * 1000;
@@ -104,6 +107,14 @@ function getPasswordHeader(req: Request): string | null {
   const raw = req.headers.get("x-gc-password") ?? req.headers.get("x-game-cal-password");
   const v = (raw ?? "").trim();
   return v ? v : null;
+}
+
+function validateSyncPassword(password: string): string | null {
+  if (!password.trim()) return "Missing header: x-gc-password";
+  if (password.length > SYNC_PASSWORD_MAX_LENGTH) {
+    return `Password too long (max ${SYNC_PASSWORD_MAX_LENGTH} chars)`;
+  }
+  return null;
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -289,11 +300,13 @@ function takeSyncD1RateLimit(request: Request, env: Env): SyncRateLimitOutcome {
   };
 }
 
-function isLikelyValidUuidKey(uuid: string): boolean {
+function validateSyncUuidKey(uuid: string): string | null {
   // Keep this fairly permissive (it's also part of the URL path), but avoid abuse.
   const v = uuid.trim();
-  if (v.length < 8 || v.length > 64) return false;
-  return /^[0-9a-z-]+$/i.test(v);
+  if (v.length < SYNC_UUID_MIN_LENGTH) return `UUID too short (min ${SYNC_UUID_MIN_LENGTH} chars)`;
+  if (v.length > SYNC_UUID_MAX_LENGTH) return `UUID too long (max ${SYNC_UUID_MAX_LENGTH} chars)`;
+  if (!/^[0-9a-z-]+$/i.test(v)) return "Invalid uuid";
+  return null;
 }
 
 async function pbkdf2Hash(password: string, salt: Uint8Array): Promise<Uint8Array> {
@@ -728,13 +741,18 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
   const mainMatch = /^\/api\/sync\/([^/]+)$/.exec(url.pathname);
 
   const uuidRaw = decodeURIComponent((rotateMatch?.[1] ?? mainMatch?.[1] ?? "").trim());
-  if (!uuidRaw || !isLikelyValidUuidKey(uuidRaw)) {
-    return json({ code: 400, msg: "Invalid uuid", data: null }, { status: 400 });
+  const uuidError = validateSyncUuidKey(uuidRaw);
+  if (!uuidRaw || uuidError) {
+    return json({ code: 400, msg: uuidError ?? "Invalid uuid", data: null }, { status: 400 });
   }
 
   const password = getPasswordHeader(request);
   if (!password) {
     return json({ code: 400, msg: "Missing header: x-gc-password", data: null }, { status: 400 });
+  }
+  const passwordError = validateSyncPassword(password);
+  if (passwordError) {
+    return json({ code: 400, msg: passwordError, data: null }, { status: 400 });
   }
 
   if (rotateMatch) {
@@ -765,6 +783,11 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
 
     if (!newPassword.trim()) {
       return respondRotate(json({ code: 400, msg: "Missing body.newPassword", data: null }, { status: 400 }));
+    }
+    if (newPassword.length > SYNC_PASSWORD_MAX_LENGTH) {
+      return respondRotate(
+        json({ code: 400, msg: `newPassword too long (max ${SYNC_PASSWORD_MAX_LENGTH} chars)`, data: null }, { status: 400 })
+      );
     }
     if (!blob) {
       return respondRotate(json({ code: 400, msg: "Missing body.blob", data: null }, { status: 400 }));
