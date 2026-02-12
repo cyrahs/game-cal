@@ -693,7 +693,8 @@ function formatVersionTimelineLabel(version: GameVersionInfo, now: Dayjs): Versi
   const endLabel = end.format("MM/DD HH:mm");
   const rawVersion = version.version.trim();
   if (!rawVersion) return null;
-  const remainingDays = Math.max(0, Math.ceil((end.valueOf() - now.valueOf()) / DAY_MS));
+  // Floor to avoid showing "1d" when less than 24h remains.
+  const remainingDays = Math.max(0, Math.floor((end.valueOf() - now.valueOf()) / DAY_MS));
   return {
     versionTitle: `${rawVersion}版本`,
     endLabel,
