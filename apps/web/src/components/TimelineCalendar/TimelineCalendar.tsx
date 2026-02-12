@@ -1445,6 +1445,7 @@ export default function TimelineCalendar(props: {
   const [dayWidth, setDayWidth] = useState(26); // px per day
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
   const [selectedFrom, setSelectedFrom] = useState<"timeline" | "list" | null>(null);
+  const [hoveredTimelineEventId, setHoveredTimelineEventId] = useState<string | number | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
@@ -1483,6 +1484,7 @@ export default function TimelineCalendar(props: {
   useEffect(() => {
     setSelectedId(null);
     setSelectedFrom(null);
+    setHoveredTimelineEventId(null);
     setIsRecurringSettingsOpen(false);
     setRecurringForm(makeRecurringFormState(dayjs()));
     setRecurringFormError(null);
@@ -1972,7 +1974,8 @@ export default function TimelineCalendar(props: {
 
                 {timelineEvents.map((e, idx) => {
                   const isSelected = selectedId === e.id;
-                  const showCompleteToggle = isSelected && selectedFrom === "timeline";
+                  const isHovered = hoveredTimelineEventId === e.id;
+                  const showCompleteToggle = (isSelected && selectedFrom === "timeline") || isHovered;
                   const isEnd = now.isAfter(e._e);
                   const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
                   const remainingDays = Math.floor(remainingMs / DAY_MS);
@@ -2064,6 +2067,8 @@ export default function TimelineCalendar(props: {
                           setSelectedId(e.id);
                           setSelectedFrom("timeline");
                         }}
+                        onMouseEnter={() => setHoveredTimelineEventId(e.id)}
+                        onMouseLeave={() => setHoveredTimelineEventId(null)}
                       >
                         {!showCountdownOnly ? (
                           <div className="min-w-0 flex-1">
