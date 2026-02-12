@@ -1,5 +1,6 @@
 {
- "name": "App",
+ "name": "Game Calendar",
+ "short_name": "Game Calendar",
  "icons": [
   {
    "src": "\/android-icon-36x36.png",
