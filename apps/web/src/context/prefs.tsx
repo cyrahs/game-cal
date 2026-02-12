@@ -226,6 +226,7 @@ export type PrefsState = {
   v: 1;
   updatedAt: number;
   theme: Theme;
+  gameOrderIds: GameId[];
   visibleGameIds: GameId[];
   hiddenGameIds: GameId[];
   timeline: {
@@ -250,6 +251,7 @@ type SyncState = {
 export type PrefsContextValue = {
   prefs: PrefsState;
   setTheme: (t: Theme) => void;
+  setGameOrderIds: (ids: GameId[]) => void;
   setVisibleGameIds: (ids: GameId[]) => void;
   setShowNotStarted: (v: boolean) => void;
   setShowWeekSeparators: (v: boolean) => void;
@@ -372,6 +374,7 @@ function makeDefaultPrefs(): PrefsState {
     v: 1,
     updatedAt: 0,
     theme: getInitialTheme(),
+    gameOrderIds: [...ALL_GAME_IDS],
     visibleGameIds: [...ALL_GAME_IDS],
     hiddenGameIds: [],
     timeline: {
@@ -397,22 +400,83 @@ function coercePrefs(input: unknown): PrefsState {
   // Theme is local-only and should never be restored from synced payloads.
   const theme: Theme = base.theme;
 
-  let hiddenGameIds = base.hiddenGameIds;
+  const hiddenSet = new Set<GameId>();
   if (Array.isArray(obj.hiddenGameIds)) {
-    const hiddenSet = new Set<GameId>();
     for (const item of obj.hiddenGameIds) {
       if (typeof item !== "string") continue;
       if (!ALL_GAME_ID_SET.has(item as GameId)) continue;
       hiddenSet.add(item as GameId);
     }
-    hiddenGameIds = ALL_GAME_IDS.filter((id) => hiddenSet.has(id));
   }
-  const hiddenSet = new Set<GameId>(hiddenGameIds);
-  let visibleGameIds = ALL_GAME_IDS.filter((id) => !hiddenSet.has(id));
+
+  let visibleInputIds: GameId[] = [];
+  let visibleInputSet: Set<GameId> | null = null;
+  if (Array.isArray(obj.visibleGameIds)) {
+    visibleInputSet = new Set<GameId>();
+    for (const item of obj.visibleGameIds) {
+      if (typeof item !== "string") continue;
+      if (!ALL_GAME_ID_SET.has(item as GameId)) continue;
+      const gameId = item as GameId;
+      if (visibleInputSet.has(gameId)) continue;
+      visibleInputSet.add(gameId);
+      visibleInputIds.push(gameId);
+    }
+  }
+
+  let gameOrderIds: GameId[] = [];
+  if (Array.isArray(obj.gameOrderIds)) {
+    const seen = new Set<GameId>();
+    for (const item of obj.gameOrderIds) {
+      if (typeof item !== "string") continue;
+      if (!ALL_GAME_ID_SET.has(item as GameId)) continue;
+      const gameId = item as GameId;
+      if (seen.has(gameId)) continue;
+      seen.add(gameId);
+      gameOrderIds.push(gameId);
+    }
+  }
+
+  if (gameOrderIds.length === 0) {
+    const seen = new Set<GameId>();
+    for (const gameId of visibleInputIds) {
+      if (seen.has(gameId)) continue;
+      seen.add(gameId);
+      gameOrderIds.push(gameId);
+    }
+    for (const gameId of ALL_GAME_IDS) {
+      if (seen.has(gameId) || hiddenSet.has(gameId)) continue;
+      seen.add(gameId);
+      gameOrderIds.push(gameId);
+    }
+    for (const gameId of ALL_GAME_IDS) {
+      if (seen.has(gameId)) continue;
+      seen.add(gameId);
+      gameOrderIds.push(gameId);
+    }
+  } else {
+    const seen = new Set<GameId>(gameOrderIds);
+    for (const gameId of ALL_GAME_IDS) {
+      if (seen.has(gameId)) continue;
+      seen.add(gameId);
+      gameOrderIds.push(gameId);
+    }
+  }
+
+  let visibleSet: Set<GameId>;
+  if (visibleInputSet && visibleInputSet.size > 0) {
+    visibleSet = visibleInputSet;
+  } else if (hiddenSet.size > 0) {
+    visibleSet = new Set(gameOrderIds.filter((id) => !hiddenSet.has(id)));
+  } else {
+    visibleSet = new Set(base.visibleGameIds);
+  }
+
+  let visibleGameIds = gameOrderIds.filter((id) => visibleSet.has(id));
   if (visibleGameIds.length === 0) {
-    visibleGameIds = base.visibleGameIds;
-    hiddenGameIds = base.hiddenGameIds;
+    visibleGameIds = [...gameOrderIds];
   }
+  const visibleFinalSet = new Set<GameId>(visibleGameIds);
+  const hiddenGameIds = gameOrderIds.filter((id) => !visibleFinalSet.has(id));
 
   const showNotStarted =
     typeof obj.timeline?.showNotStarted === "boolean" ? (obj.timeline.showNotStarted as boolean) : base.timeline.showNotStarted;
@@ -457,6 +521,7 @@ function coercePrefs(input: unknown): PrefsState {
     v: 1,
     updatedAt,
     theme,
+    gameOrderIds,
     visibleGameIds,
     hiddenGameIds,
     timeline: { showNotStarted, showWeekSeparators, completedIdsByGame, completedRecurringByGame, recurringActivitiesByGame },
@@ -847,12 +912,47 @@ export function PrefsProvider(props: { children: ReactNode }) {
     setPrefs((prev) => (prev.theme === t ? prev : { ...prev, theme: t }));
   }, []);
 
-  const setVisibleGameIds = useCallback((ids: GameId[]) => {
-    const filtered = ALL_GAME_IDS.filter((id) => ids.includes(id));
+  const setGameOrderIds = useCallback((ids: GameId[]) => {
+    const ordered: GameId[] = [];
+    const orderedSet = new Set<GameId>();
+    for (const id of ids) {
+      if (!ALL_GAME_ID_SET.has(id)) continue;
+      if (orderedSet.has(id)) continue;
+      orderedSet.add(id);
+      ordered.push(id);
+    }
+    for (const id of ALL_GAME_IDS) {
+      if (orderedSet.has(id)) continue;
+      orderedSet.add(id);
+      ordered.push(id);
+    }
+
     setPrefs((prev) => {
-      if (filtered.length === 0) return prev;
-      const hiddenGameIds = ALL_GAME_IDS.filter((id) => !filtered.includes(id));
-      return { ...prev, visibleGameIds: filtered, hiddenGameIds, updatedAt: Date.now() };
+      if (ordered.length === 0) return prev;
+      const visibleSet = new Set(prev.visibleGameIds);
+      let visibleGameIds = ordered.filter((id) => visibleSet.has(id));
+      if (visibleGameIds.length === 0) visibleGameIds = [ordered[0]!];
+      const visibleFinalSet = new Set<GameId>(visibleGameIds);
+      const hiddenGameIds = ordered.filter((id) => !visibleFinalSet.has(id));
+      return { ...prev, gameOrderIds: ordered, visibleGameIds, hiddenGameIds, updatedAt: Date.now() };
+    });
+  }, []);
+
+  const setVisibleGameIds = useCallback((ids: GameId[]) => {
+    const visibleSet = new Set<GameId>();
+    for (const id of ids) {
+      if (!ALL_GAME_ID_SET.has(id)) continue;
+      if (visibleSet.has(id)) continue;
+      visibleSet.add(id);
+    }
+
+    setPrefs((prev) => {
+      if (visibleSet.size === 0) return prev;
+      const gameOrderIds = prev.gameOrderIds.length > 0 ? prev.gameOrderIds : [...ALL_GAME_IDS];
+      const visibleGameIds = gameOrderIds.filter((id) => visibleSet.has(id));
+      if (visibleGameIds.length === 0) return prev;
+      const hiddenGameIds = gameOrderIds.filter((id) => !visibleSet.has(id));
+      return { ...prev, gameOrderIds, visibleGameIds, hiddenGameIds, updatedAt: Date.now() };
     });
   }, []);
 
@@ -1043,6 +1143,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
     () => ({
       prefs,
       setTheme,
+      setGameOrderIds,
       setVisibleGameIds,
       setShowNotStarted,
       setShowWeekSeparators,
@@ -1082,6 +1183,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       rotatePassword,
       setPassword,
       setTheme,
+      setGameOrderIds,
       setUuid,
       setVisibleGameIds,
       setShowNotStarted,

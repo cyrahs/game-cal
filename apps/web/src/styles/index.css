@@ -116,6 +116,15 @@ html.dark body::before {
   animation: fadeIn 260ms ease-out both;
 }
 
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 .gc-fade-truncate-1 {
   white-space: nowrap;
   overflow: hidden;

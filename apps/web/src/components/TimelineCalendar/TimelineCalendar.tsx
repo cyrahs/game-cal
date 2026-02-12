@@ -2192,8 +2192,8 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                 setIsRecurringSettingsOpen(true);
                 setRecurringFormError(null);
               }}
-              aria-label={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
-              title={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
+              aria-label={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
+              title={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
               aria-haspopup="dialog"
               aria-expanded={isRecurringSettingsOpen}
             >
