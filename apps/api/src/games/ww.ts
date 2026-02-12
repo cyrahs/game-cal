@@ -1,60 +1,56 @@
 import { fetchJson } from "../lib/fetch.js";
-import { toIsoWithSourceOffset } from "../lib/time.js";
+import { unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent } from "../types.js";
 
-type KuroWikiGameData = {
-  code: number;
-  msg: string;
-  data?: {
-    contentJson?: {
-      sideModules?: Array<{
-        title: string;
-        content: Array<{
-          title: string;
-          contentUrl?: string;
-          linkConfig: {
-            linkUrl?: string;
-            entryId?: string;
-          };
-          countDown?: {
-            dateRange: [string, string];
-          };
-        }>;
-        more?: {
-          linkConfig?: {
-            catalogueId?: number;
-          };
-        };
-      }>;
-    };
-  };
+type WwOfficialNoticeItem = {
+  id?: string | number;
+  tabTitle?: string;
+  startTimeMs?: string | number;
+  endTimeMs?: string | number;
+  category?: string | number;
+  tag?: string | number;
+  permanent?: string | number;
+  tabBanner?: string | null;
+  foldBanner?: string | null;
+  content?: string;
 };
 
-const KURO_HOME_DEFAULT = "https://api.kurobbs.com/wiki/core/homepage/getPage";
-const KURO_CATALOGUE_DEFAULT =
-  "https://api.kurobbs.com/wiki/core/catalogue/item/getPage";
-const MC_WIKI_TYPE = "9";
-const TARGET_TITLE = "版本活动";
+type WwOfficialNoticeResponse = {
+  game?: WwOfficialNoticeItem[];
+  activity?: WwOfficialNoticeItem[];
+  recommend?: WwOfficialNoticeItem[];
+};
+
+const WW_NOTICE_DEFAULT =
+  "https://aki-gm-resources-back.aki-game.com/gamenotice/G152/76402e5b20be2c39f095a152090afddc/zh-Hans.json";
 const WW_SOURCE_TZ_OFFSET = "+08:00";
+const WW_INCLUDED_CATEGORIES = new Set<number>([2, 3]);
 
-type KuroCatalogueResponse = {
-  code: number;
-  msg: string;
-  data?: {
-    results?: {
-      records?: Array<
-        | {
-            entryId?: number;
-            content?: {
-              contentUrl?: string;
-            };
-          }
-        | null
-      >;
-    };
-  };
-};
+const WW_IGNORE_TITLE_WORDS = [
+  "回归系统",
+  "回馈系统",
+  "快速体验",
+  "签到工具",
+  "版本活动笔记",
+  "版本内容说明",
+  "已知问题",
+  "更新说明",
+  "调整公告",
+  "反馈",
+  "防沉迷",
+  "公平运营",
+  "社区资讯",
+];
+
+const WW_PROMOTION_TITLE_WORDS = [
+  "限时上架",
+  "折扣上架",
+  "商城礼包",
+  "礼包",
+  "周度演算卡",
+  "先约电台",
+];
 
 function stableHash64(input: string): string {
   // FNV-1a 64-bit. Fast, deterministic, and works in both Node and Workers.
@@ -70,69 +66,109 @@ function stableHash64(input: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-function stableEventIdFromTitleAndEntryId(title: string, entryId: string): string {
-  return stableHash64(`${title}|${entryId}`);
-}
-
 function stableEventIdFromTitleAndStartTime(title: string, startTime: string): string {
   return stableHash64(`${title}|${startTime}`);
+}
+
+function parseMs(input: string | number | undefined): number | null {
+  if (input == null) return null;
+  const n = typeof input === "number" ? input : Number(input);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.trunc(n);
+}
+
+function parseIntLike(input: string | number | undefined): number | null {
+  if (input == null) return null;
+  const n = typeof input === "number" ? input : Number(input);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function msToIsoWithSourceOffset(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  return unixSecondsToIsoWithSourceOffset(seconds, WW_SOURCE_TZ_OFFSET);
+}
+
+function pickBanner(item: WwOfficialNoticeItem): string | undefined {
+  const tab = item.tabBanner?.trim();
+  if (tab) return tab;
+  const fold = item.foldBanner?.trim();
+  if (fold) return fold;
+  return undefined;
+}
+
+function normalizeTitle(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+function shouldIgnoreWwItem(
+  item: WwOfficialNoticeItem,
+  opts: { title: string }
+): boolean {
+  const category = parseIntLike(item.category);
+  if (category == null || !WW_INCLUDED_CATEGORIES.has(category)) return true;
+
+  const permanent = parseIntLike(item.permanent);
+  if (permanent === 1) return true;
+
+  const normalizedTitle = normalizeTitle(opts.title);
+  if (WW_IGNORE_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
+  if (WW_PROMOTION_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
+
+  return false;
 }
 
 export async function fetchWwEvents(
   env: RuntimeEnv = {}
 ): Promise<CalendarEvent[]> {
-  const url = env.KURO_WIKI_HOME_URL ?? KURO_HOME_DEFAULT;
-  const res = await fetchJson<KuroWikiGameData>(url, {
-    method: "POST",
-    headers: { Wiki_type: MC_WIKI_TYPE },
+  const url = env.WW_NOTICE_API_URL ?? WW_NOTICE_DEFAULT;
+  const res = await fetchJson<WwOfficialNoticeResponse>(url, {
     timeoutMs: 12_000,
   });
 
-  const sideModules = res.data?.contentJson?.sideModules ?? [];
-  const target = sideModules.find((m) => m.title === TARGET_TITLE);
-  if (!target) return [];
+  const merged = [
+    ...(res.game ?? []),
+    ...(res.activity ?? []),
+    ...(res.recommend ?? []),
+  ];
 
-  const catalogueId = target.more?.linkConfig?.catalogueId;
-  const imgMap = new Map<string, string>();
-  if (catalogueId) {
-    const catalogueUrl =
-      env.KURO_WIKI_CATALOGUE_URL ?? KURO_CATALOGUE_DEFAULT;
-    const catalogueRes = await fetchJson<KuroCatalogueResponse>(
-      `${catalogueUrl}?catalogueId=${catalogueId}&page=1&limit=1000`,
-      {
-        method: "POST",
-        headers: {
-          Wiki_type: MC_WIKI_TYPE,
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        timeoutMs: 12_000,
-      }
-    ).catch(() => null);
+  const deduped = new Map<string, CalendarEvent>();
 
-    const records = catalogueRes?.data?.results?.records ?? [];
-    for (const r of records) {
-      const entryId = r?.entryId;
-      const img = r?.content?.contentUrl;
-      if (entryId && img) imgMap.set(String(entryId), img);
+  for (const item of merged) {
+    const title = item.tabTitle?.trim();
+    if (!title) continue;
+
+    const startMs = parseMs(item.startTimeMs);
+    const endMs = parseMs(item.endTimeMs);
+    if (startMs == null || endMs == null || endMs <= startMs) continue;
+    if (shouldIgnoreWwItem(item, { title })) continue;
+
+    const idText = String(item.id ?? "").trim();
+    const fallbackId = stableEventIdFromTitleAndStartTime(title, String(startMs));
+    const id = idText || fallbackId;
+
+    const event: CalendarEvent = {
+      id,
+      title,
+      start_time: msToIsoWithSourceOffset(startMs),
+      end_time: msToIsoWithSourceOffset(endMs),
+      banner: pickBanner(item),
+      content: item.content,
+    };
+
+    const prev = deduped.get(id);
+    if (!prev) {
+      deduped.set(id, event);
+      continue;
     }
+
+    // Prefer richer entries when the same id appears in multiple sections.
+    deduped.set(id, {
+      ...prev,
+      banner: prev.banner ?? event.banner,
+      content: prev.content ?? event.content,
+    });
   }
 
-  return target.content
-    .filter((c) => Boolean(c.countDown?.dateRange?.[0]) && Boolean(c.countDown?.dateRange?.[1]))
-    .map((c) => {
-      const [start_time, end_time] = c.countDown!.dateRange;
-      // Kuro Wiki's entryId is essentially the announcement id; multiple events can share it.
-      // Hash title + entryId to keep ids stable but unique within the list.
-      const id = c.linkConfig.entryId
-        ? stableEventIdFromTitleAndEntryId(c.title, c.linkConfig.entryId)
-        : stableEventIdFromTitleAndStartTime(c.title, start_time);
-      return {
-        id,
-        title: c.title,
-        start_time: toIsoWithSourceOffset(start_time, WW_SOURCE_TZ_OFFSET),
-        end_time: toIsoWithSourceOffset(end_time, WW_SOURCE_TZ_OFFSET),
-        banner: (c.linkConfig.entryId && imgMap.get(c.linkConfig.entryId)) ?? c.contentUrl,
-        linkUrl: c.linkConfig.linkUrl,
-      };
-    });
+  return [...deduped.values()];
 }

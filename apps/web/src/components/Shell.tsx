@@ -68,7 +68,7 @@ const DATA_SOURCE_BY_GAME: Record<GameId, string> = {
   genshin: "米哈游公告 API",
   starrail: "米哈游公告 API",
   zzz: "米哈游公告 API",
-  ww: "库洛 Wiki API",
+  ww: "库洛公告 API",
   snowbreak: "西山居公告 API",
   endfield: "鹰角公告 API",
 };

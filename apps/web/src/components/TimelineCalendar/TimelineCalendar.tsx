@@ -669,7 +669,7 @@ type Rgb = { r: number; g: number; b: number };
 type Rgba = Rgb & { a: number };
 type Hsl = { h: number; s: number; l: number };
 
-type EventDetailVariant = "titleBanner" | "sideImage" | "none";
+type EventDetailVariant = "titleBanner" | "none";
 
 const DARK_ANN_BASE_BG: Rgb = { r: 11, g: 16, b: 32 }; // matches --bg0 in dark mode (approx)
 const MIN_ANN_TEXT_CONTRAST = 4.5;
@@ -679,7 +679,7 @@ const EVENT_DETAIL_VARIANT_BY_GAME: Record<GameId, EventDetailVariant> = {
   genshin: "titleBanner",
   starrail: "titleBanner",
   zzz: "titleBanner",
-  ww: "sideImage",
+  ww: "titleBanner",
   snowbreak: "none",
   endfield: "none",
 };
@@ -976,67 +976,6 @@ function EventDetail(props: {
     return { kind: "html" as const, html: themedHtml };
   }, [props.event.content, theme]);
 
-  if (props.variant === "sideImage") {
-    return (
-      <div
-        className={clsx(
-          "p-4 grid gap-3 items-start",
-          showBanner && "md:grid-cols-[260px_1fr]"
-        )}
-      >
-        {showBanner ? (
-          <div className="rounded-xl overflow-hidden border border-[color:var(--line)] bg-[color:var(--tile)] self-start">
-            <img
-              src={props.event.banner}
-              alt={props.event.title}
-              className="block w-full h-auto"
-              referrerPolicy="no-referrer"
-            />
-          </div>
-        ) : null}
-        <div className="min-w-0">
-          <div className="text-xs text-[color:var(--muted)] font-mono mb-2">
-            {formatRange(props.event.start_time, props.event.end_time)}
-          </div>
-          <div
-            className={clsx(
-              "text-base font-semibold leading-snug",
-              isDimmed && "opacity-60",
-              shouldStrike && "line-through"
-            )}
-          >
-            {props.event.title}
-          </div>
-          {props.event.linkUrl ? (
-            <a
-              className="mt-2 inline-block text-sm text-[color:var(--accent)] hover:underline"
-              href={props.event.linkUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              打开活动详情
-            </a>
-          ) : renderedContent ? null : (
-            <div className="mt-2 text-xs text-[color:var(--muted)]">无详情链接</div>
-          )}
-          {renderedContent ? (
-            renderedContent.kind === "html" ? (
-              <div
-                className="mt-3 text-sm text-[color:var(--ink2)] event-ann-content"
-                // Content is sanitized above.
-                dangerouslySetInnerHTML={{ __html: renderedContent.html }}
-              />
-            ) : (
-              <div className="mt-3 text-sm text-[color:var(--ink2)] whitespace-pre-wrap">
-                {renderedContent.text}
-              </div>
-            )
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="p-4 grid gap-3">
       <div className="text-xs text-[color:var(--muted)] font-mono">
@@ -1057,7 +996,7 @@ function EventDetail(props: {
           <img
             src={props.event.banner}
             alt={props.event.title}
-            className="block max-h-[120px] md:max-h-[160px] lg:max-h-[180px] w-auto max-w-full h-auto object-contain object-left"
+            className="block max-h-[180px] md:max-h-[240px] lg:max-h-[270px] w-auto max-w-full h-auto object-contain object-left"
             referrerPolicy="no-referrer"
           />
         </div>

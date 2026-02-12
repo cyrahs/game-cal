@@ -7,8 +7,7 @@ export interface RuntimeEnv {
   ZZZ_ACTIVITY_API_URL?: string;
   ZZZ_CONTENT_API_URL?: string;
   SNOWBREAK_ANNOUNCE_API_URL?: string;
-  KURO_WIKI_HOME_URL?: string;
-  KURO_WIKI_CATALOGUE_URL?: string;
+  WW_NOTICE_API_URL?: string;
 
   // Endfield (Hypergryph bulletin) overrides (optional).
   // If ENDFIELD_CODE is set, we won't scrape the webview bundle to discover it.

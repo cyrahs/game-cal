@@ -71,9 +71,8 @@ Upstream override URLs (optional):
 - `STARRAIL_CONTENT_API_URL`
 - `ZZZ_ACTIVITY_API_URL`
 - `ZZZ_CONTENT_API_URL`
-- Wuthering Waves uses Kuro Wiki APIs:
-  - `KURO_WIKI_HOME_URL`
-  - `KURO_WIKI_CATALOGUE_URL`
+- Wuthering Waves official notice JSON:
+  - `WW_NOTICE_API_URL`
 
 Notes:
 - The API imports `dotenv/config`, so `.env` is loaded from the process working directory.
