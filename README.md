@@ -108,7 +108,7 @@ pnpm --filter @game-cal/api start
 环境变量（见 `.env.example`）：
 - `PORT`（默认 `8787`）
 - `HOST`（默认 `0.0.0.0`）
-- `CACHE_TTL_SECONDS`（默认 `86400`）
+- `CACHE_TTL_SECONDS`（默认 `28800`）
 - `CORS_ORIGIN`（可选，逗号分隔）
 - 可选上游覆盖地址：
   - `GENSHIN_API_URL`

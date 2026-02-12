@@ -59,7 +59,7 @@ Implemented in `apps/api/src/index.ts`:
 Primary configuration knobs:
 - `PORT` (default `8787`)
 - `HOST` (default `0.0.0.0`)
-- `CACHE_TTL_SECONDS` (default `86400`)
+- `CACHE_TTL_SECONDS` (default `28800`)
 - `CORS_ORIGIN` (optional; comma-separated list; omit/empty to allow all)
 
 Cloudflare D1 note:

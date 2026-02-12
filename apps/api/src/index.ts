@@ -16,7 +16,7 @@ const __dirname = path.dirname(__filename);
 const server = Fastify({ logger: true });
 
 const cache = new SimpleTtlCache();
-const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
+const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 8;
 
 function parseCacheTtlMs(): number {
   const raw = process.env.CACHE_TTL_SECONDS;

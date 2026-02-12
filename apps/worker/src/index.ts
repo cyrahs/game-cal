@@ -25,7 +25,7 @@ interface Env extends RuntimeEnv {
 }
 
 const cache = new SimpleTtlCache();
-const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
+const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 8;
 const DEFAULT_SYNC_RATE_LIMIT_MAX = 120;
 const DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS = 60;
 const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 1;

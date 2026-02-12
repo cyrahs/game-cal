@@ -16,7 +16,7 @@ services:
       - HOST=0.0.0.0
       
       # Cache configuration (seconds)
-      - CACHE_TTL_SECONDS=86400
+      - CACHE_TTL_SECONDS=28800
       
       # CORS configuration (comma-separated origins, or leave empty for all)
       # - CORS_ORIGIN=https://example.com,https://app.example.com
