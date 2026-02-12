@@ -1996,6 +1996,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
 
                 {timelineEvents.map((e, idx) => {
                   const isSelected = selectedId === e.id;
+                  const showCompleteToggle = isSelected && selectedFrom === "timeline";
                   const isEnd = now.isAfter(e._e);
                   const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
                   const remainingDays = Math.floor(remainingMs / DAY_MS);
@@ -2033,6 +2034,8 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                   const countdownFontSize = showCountdownOnly
                     ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
                     : 13;
+                  const completeChipSize = showCountdownOnly ? clamp(width - 4, 8, 24) : 24;
+                  const completeIconSize = clamp(completeChipSize * 0.58, 6, 14);
 
                   const barColor = timelineColorAt(idx, timelineBarColorStartOffset);
 
@@ -2098,16 +2101,67 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                             </div>
                           </div>
                         ) : null}
-                        <div
-                          className={clsx(
-                            "leading-none font-mono tabular-nums font-medium",
-                            showCountdownOnly ? "w-full min-w-0 text-center whitespace-nowrap" : "shrink-0 pl-2 text-[13px]",
-                            isUrgent ? "text-red-700" : "text-slate-800/70"
-                          )}
-                          style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
-                          aria-label={remainingAriaLabel}
-                        >
-                          {remainingLabel}
+                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
+                          <button
+                            type="button"
+                            className={clsx(
+                              "absolute inset-0 inline-flex items-center justify-center",
+                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                              showCompleteToggle
+                                ? "opacity-100 scale-100 pointer-events-auto"
+                                : "opacity-0 scale-95 pointer-events-none"
+                            )}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              if (e.kind === "recurring") {
+                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
+                              } else {
+                                toggleCompleted(e.id);
+                              }
+                            }}
+                            aria-label={`标记${e.title}为已完成`}
+                            title="标记为已完成"
+                            aria-hidden={!showCompleteToggle}
+                            tabIndex={showCompleteToggle ? 0 : -1}
+                            disabled={!showCompleteToggle}
+                          >
+                            <span
+                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                              style={{ width: `${completeChipSize}px`, height: `${completeChipSize}px` }}
+                            >
+                              <svg
+                                className="flex-none"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
+                                aria-hidden="true"
+                              >
+                                <path d="M5 12.5l4.2 4.2L19 7" />
+                              </svg>
+                            </span>
+                          </button>
+                          <div
+                            className={clsx(
+                              "leading-none font-mono tabular-nums font-medium",
+                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                              showCountdownOnly
+                                ? "w-full min-w-0 text-center whitespace-nowrap"
+                                : "text-[13px]",
+                              isUrgent ? "text-red-700" : "text-slate-800/70",
+                              showCompleteToggle
+                                ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
+                                : "opacity-100 scale-100 translate-y-0"
+                            )}
+                            style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
+                            aria-label={remainingAriaLabel}
+                            aria-hidden={showCompleteToggle}
+                          >
+                            {remainingLabel}
+                          </div>
                         </div>
                       </div>
                     </div>
