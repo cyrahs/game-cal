@@ -2,6 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type MihoyoAnnItem = {
   ann_id: number;
@@ -177,12 +178,14 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
 
   const filtered = list
     .filter((item) => item.start_time && item.end_time)
-    .filter((item) => !IGNORE_ANN_IDS.has(item.ann_id))
     .filter((item) => {
+      const title = item.title ?? "";
+      if (isGachaEventTitle("starrail", title)) return true;
+      if (IGNORE_ANN_IDS.has(item.ann_id)) return false;
       // Allowlist wins over broad ignore rules.
-      if (INCLUDE_WORDS.some((w) => item.title.includes(w))) return true;
-      if (IGNORE_WORDS.some((w) => item.title.includes(w))) return false;
-      if (IGNORE_SUFFIXES.some((s) => item.title.endsWith(s))) return false;
+      if (INCLUDE_WORDS.some((w) => title.includes(w))) return true;
+      if (IGNORE_WORDS.some((w) => title.includes(w))) return false;
+      if (IGNORE_SUFFIXES.some((s) => title.endsWith(s))) return false;
       return true;
     });
 
@@ -205,11 +208,13 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
 
   return filtered.map((item) => {
     const contentItem = contentById.get(item.ann_id);
+    const title = item.title ?? "";
     return {
       id: item.ann_id,
-      title: item.title,
+      title,
       start_time: toIsoWithSourceOffset(item.start_time!, STARRAIL_SOURCE_TZ_OFFSET),
       end_time: toIsoWithSourceOffset(item.end_time!, STARRAIL_SOURCE_TZ_OFFSET),
+      is_gacha: isGachaEventTitle("starrail", title),
       banner: item.banner ?? contentItem?.banner,
       content: contentItem?.content ?? item.content,
     };

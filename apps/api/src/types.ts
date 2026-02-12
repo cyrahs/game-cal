@@ -13,6 +13,7 @@ export interface CalendarEvent {
   start_time: string;
   // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00"
   end_time: string;
+  is_gacha?: boolean;
   banner?: string;
   content?: string;
   linkUrl?: string;

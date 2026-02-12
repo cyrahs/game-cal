@@ -2,6 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type MihoyoNapActivity = {
   activity_id?: string;
@@ -96,6 +97,11 @@ type ContentCandidate = {
   content?: string;
 };
 
+type ParsedTimeRange = {
+  startIso: string | null;
+  endIso: string | null;
+};
+
 function pickBestCandidate(
   activityTitle: string,
   candidates: ContentCandidate[]
@@ -134,6 +140,107 @@ function pickBestCandidate(
   }
 
   return best;
+}
+
+function normalizeDateTimeCandidate(input: string | undefined): string | null {
+  const source = (input ?? "").replace(/\s+/g, "").trim();
+  if (!source) return null;
+
+  const m = /^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(source);
+  if (!m) return null;
+
+  const yyyy = m[1]!;
+  const mo = String(Number(m[2]!)).padStart(2, "0");
+  const dd = String(Number(m[3]!)).padStart(2, "0");
+  const hh = String(Number(m[4]!)).padStart(2, "0");
+  const mi = m[5]!;
+  const ss = m[6] ? m[6] : "00";
+  return `${yyyy}-${mo}-${dd} ${hh}:${mi}:${ss}`;
+}
+
+function extractTimeRangeFromContentHtml(html: string): ParsedTimeRange {
+  const text = stripHtml(html);
+  if (!text) return { startIso: null, endIso: null };
+
+  const range =
+    /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
+      text
+    );
+  if (range) {
+    const start = normalizeDateTimeCandidate(range[1]);
+    const end = normalizeDateTimeCandidate(range[2]);
+    return {
+      startIso: start ? toIsoWithSourceOffset(start, ZZZ_SOURCE_TZ_OFFSET) : null,
+      endIso: end ? toIsoWithSourceOffset(end, ZZZ_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  const all: string[] = [];
+  const seen = new Set<string>();
+  const re = /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g;
+  for (const m of text.matchAll(re)) {
+    const v = normalizeDateTimeCandidate(m[1]);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    all.push(v);
+  }
+  if (all.length === 0) return { startIso: null, endIso: null };
+  if (all.length === 1) {
+    return {
+      startIso: null,
+      endIso: toIsoWithSourceOffset(all[0]!, ZZZ_SOURCE_TZ_OFFSET),
+    };
+  }
+
+  return {
+    startIso: toIsoWithSourceOffset(all[0]!, ZZZ_SOURCE_TZ_OFFSET),
+    endIso: toIsoWithSourceOffset(all[1]!, ZZZ_SOURCE_TZ_OFFSET),
+  };
+}
+
+function parseGachaEventsFromAnnContent(
+  items: MihoyoNapAnnContentItem[],
+  opts: { fallbackStartIso: string | null }
+): CalendarEvent[] {
+  const out = new Map<string, CalendarEvent>();
+
+  for (const it of items) {
+    const title = stripHtml(it.title);
+    if (!isGachaEventTitle("zzz", title)) continue;
+
+    const { startIso, endIso } = extractTimeRangeFromContentHtml(it.content ?? "");
+    const resolvedStart = startIso ?? opts.fallbackStartIso;
+    if (!resolvedStart || !endIso) continue;
+
+    const sMs = Date.parse(resolvedStart);
+    const eMs = Date.parse(endIso);
+    if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) continue;
+
+    const id = `zzz-gacha:${it.ann_id ?? normalizeTitleKey(title)}`;
+    const prev = out.get(id);
+    const next: CalendarEvent = {
+      id,
+      title,
+      start_time: resolvedStart,
+      end_time: endIso,
+      is_gacha: true,
+      banner: (it.banner?.trim() || it.img?.trim() || undefined) ?? undefined,
+      content: it.content,
+    };
+    if (!prev) {
+      out.set(id, next);
+      continue;
+    }
+    out.set(id, {
+      ...prev,
+      banner: prev.banner ?? next.banner,
+      content: prev.content ?? next.content,
+      start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
+      end_time: Date.parse(prev.end_time) >= Date.parse(next.end_time) ? prev.end_time : next.end_time,
+    });
+  }
+
+  return [...out.values()];
 }
 
 type ZzzVersionNotice = {
@@ -220,22 +327,35 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
   const activityApiUrl =
     env.ZZZ_ACTIVITY_API_URL ?? ZZZ_DEFAULT_ACTIVITY_API;
   const contentApiUrl = env.ZZZ_CONTENT_API_URL ?? ZZZ_DEFAULT_CONTENT_API;
+  const listApiUrl = env.ZZZ_API_URL ?? ZZZ_DEFAULT_LIST_API;
 
-  const [activityRes, contentRes] = await Promise.all([
+  const [activityRes, contentRes, listRes] = await Promise.all([
     fetchJson<MihoyoNapActivityListResponse>(activityApiUrl, {
       timeoutMs: 12_000,
     }),
     fetchJson<MihoyoNapAnnContentResponse>(contentApiUrl, {
       timeoutMs: 12_000,
     }).catch(() => null),
+    fetchJson<MihoyoNapAnnListResponse>(listApiUrl, {
+      timeoutMs: 12_000,
+    }).catch(() => null),
   ]);
 
+  const categories = listRes?.data?.list ?? [];
+  const noticeCategory =
+    categories.find((c) => c.type_id === 3) ??
+    categories.find((c) => c.type_label.includes("游戏公告"));
+  const versionNotice = pickCurrentVersionNotice(noticeCategory?.list ?? []);
+  const fallbackStartIso = versionNotice?.startIso ?? null;
+
   const candidates: ContentCandidate[] = [];
+  const contentItems: MihoyoNapAnnContentItem[] = [];
   if (contentRes) {
     const items: MihoyoNapAnnContentItem[] = [
       ...(contentRes.data?.list ?? []),
       ...(contentRes.data?.pic_list ?? []),
     ];
+    contentItems.push(...items);
 
     for (const it of items) {
       const titleText = stripHtml(it.title);
@@ -255,8 +375,7 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
   }
 
   const list = activityRes.data?.activity_list ?? [];
-
-  return list
+  const normalEvents = list
     .filter((a) => Boolean(a?.name) && Boolean(a?.start_time) && Boolean(a?.end_time))
     .flatMap((a): CalendarEvent[] => {
       const s = Number(a.start_time);
@@ -264,18 +383,35 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return [];
 
       const id = a.activity_id ?? `${a.name}:${a.start_time}`;
+      const title = a.name!;
       const matched = candidates.length > 0 ? pickBestCandidate(a.name!, candidates) : null;
       return [
         {
           id,
-          title: a.name!,
+          title,
           start_time: unixSecondsToIsoWithSourceOffset(a.start_time!, ZZZ_SOURCE_TZ_OFFSET),
           end_time: unixSecondsToIsoWithSourceOffset(a.end_time!, ZZZ_SOURCE_TZ_OFFSET),
+          is_gacha: isGachaEventTitle("zzz", title),
           banner: matched?.banner,
           content: matched?.content,
         },
       ];
     });
+
+  const gachaEvents = parseGachaEventsFromAnnContent(contentItems, { fallbackStartIso });
+
+  const merged = new Map<string, CalendarEvent>();
+  for (const event of [...normalEvents, ...gachaEvents]) {
+    merged.set(String(event.id), event);
+  }
+
+  return [...merged.values()].sort((a, b) => {
+    const sDiff = Date.parse(a.start_time) - Date.parse(b.start_time);
+    if (sDiff !== 0) return sDiff;
+    const eDiff = Date.parse(a.end_time) - Date.parse(b.end_time);
+    if (eDiff !== 0) return eDiff;
+    return String(a.id).localeCompare(String(b.id), "zh-Hans-CN");
+  });
 }
 
 export async function fetchZzzCurrentVersion(env: RuntimeEnv = {}): Promise<GameVersionInfo | null> {

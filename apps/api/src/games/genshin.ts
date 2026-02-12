@@ -2,6 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type MihoyoAnnItem = {
   ann_id: number;
@@ -163,8 +164,12 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
 
   const filtered = list
     .filter((item) => item.start_time && item.end_time)
-    .filter((item) => !IGNORE_ANN_IDS.has(item.ann_id))
-    .filter((item) => IGNORE_WORDS.every((w) => !item.title.includes(w)));
+    .filter((item) => {
+      const title = item.title ?? "";
+      if (isGachaEventTitle("genshin", title)) return true;
+      if (IGNORE_ANN_IDS.has(item.ann_id)) return false;
+      return IGNORE_WORDS.every((w) => !title.includes(w));
+    });
 
   // getAnnContent includes the full (HTML) announcement body but does not include
   // reliable structured start/end fields, so we merge it with getAnnList by ann_id.
@@ -185,11 +190,13 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
 
   return filtered.map((item) => {
     const contentItem = contentById.get(item.ann_id);
+    const title = item.title ?? "";
     return {
       id: item.ann_id,
-      title: item.title,
+      title,
       start_time: toIsoWithSourceOffset(item.start_time!, GENSHIN_SOURCE_TZ_OFFSET),
       end_time: toIsoWithSourceOffset(item.end_time!, GENSHIN_SOURCE_TZ_OFFSET),
+      is_gacha: isGachaEventTitle("genshin", title),
       banner: item.banner ?? contentItem?.banner,
       content: contentItem?.content ?? item.content,
     };

@@ -2,6 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type WwOfficialNoticeItem = {
   id?: string | number;
@@ -124,6 +125,7 @@ function shouldIgnoreWwItem(
   if (permanent === 1) return true;
 
   const normalizedTitle = normalizeTitle(opts.title);
+  if (isGachaEventTitle("ww", normalizedTitle)) return false;
   if (WW_IGNORE_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
   if (WW_PROMOTION_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
 
@@ -214,6 +216,7 @@ export async function fetchWwEvents(
       title,
       start_time: msToIsoWithSourceOffset(startMs),
       end_time: msToIsoWithSourceOffset(endMs),
+      is_gacha: isGachaEventTitle("ww", title),
       banner: pickBanner(item),
       content: item.content,
     };

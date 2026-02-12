@@ -649,6 +649,30 @@ function normalizeEventTitle(input: string): string {
   return input.replace(/\\[rnt]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function isGachaEventTitle(gameId: GameId, title: string): boolean {
+  const normalized = title.trim();
+  if (!normalized) return false;
+
+  switch (gameId) {
+    case "endfield":
+      return normalized.includes("特许寻访");
+    case "starrail":
+      return normalized.includes("跃迁");
+    case "genshin":
+      return normalized.includes("祈愿");
+    case "ww":
+      return normalized.includes("唤取");
+    case "snowbreak":
+      return normalized.includes("共鸣开启");
+    case "zzz":
+      return normalized.includes("限时频段") || normalized.includes("独家频段");
+    default: {
+      const _exhaustive: never = gameId;
+      return _exhaustive;
+    }
+  }
+}
+
 function formatRange(s: string, e: string) {
   const sd = parseDateTime(s);
   const ed = parseDateTime(e);
@@ -1436,6 +1460,7 @@ export default function TimelineCalendar(props: {
     prefs,
     setShowNotStarted,
     setShowWeekSeparators,
+    setShowGacha,
     toggleCompleted: toggleCompletedPref,
     toggleRecurringCompleted: toggleRecurringCompletedPref,
     addRecurringActivity,
@@ -1456,6 +1481,7 @@ export default function TimelineCalendar(props: {
   const eventDetailVariant = EVENT_DETAIL_VARIANT_BY_GAME[props.gameId];
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
+  const showGacha = prefs.timeline.showGacha;
   const completedIdsArr = prefs.timeline.completedIdsByGame[props.gameId] ?? [];
   const completedIds = useMemo(() => new Set<string | number>(completedIdsArr), [completedIdsArr]);
   const completedRecurring = prefs.timeline.completedRecurringByGame[props.gameId] ?? {};
@@ -1529,19 +1555,30 @@ export default function TimelineCalendar(props: {
       .map((e) => {
         const s = parseDateTime(e.start_time);
         const ed = parseDateTime(e.end_time);
-        return { ...e, kind: "upstream" as const, title: normalizeEventTitle(e.title), _s: s, _e: ed };
+        const title = normalizeEventTitle(e.title);
+        return {
+          ...e,
+          kind: "upstream" as const,
+          title,
+          is_gacha: Boolean(e.is_gacha) || isGachaEventTitle(props.gameId, title),
+          _s: s,
+          _e: ed,
+        };
       })
       .filter((e) => e._s.isValid() && e._e.isValid() && e._e.isAfter(e._s));
     return items;
-  }, [props.events]);
+  }, [props.events, props.gameId]);
 
   const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now), [parsedUpstream, now]);
 
   const visibleUpstreamSorted = useMemo(() => {
-    if (showNotStarted) return sortedUpstream;
     const nowMs = now.valueOf();
-    return sortedUpstream.filter((e) => nowMs >= e._s.valueOf());
-  }, [sortedUpstream, showNotStarted, now]);
+    return sortedUpstream.filter((e) => {
+      if (!showGacha && e.is_gacha) return false;
+      if (showNotStarted) return true;
+      return nowMs >= e._s.valueOf();
+    });
+  }, [sortedUpstream, showGacha, showNotStarted, now]);
 
   const parsedRecurring = useMemo(() => {
     if (recurringDefs.length === 0) return [] as ParsedRecurringEvent[];
@@ -1873,6 +1910,15 @@ export default function TimelineCalendar(props: {
                 type="checkbox"
                 checked={showWeekSeparators}
                 onChange={(e) => setShowWeekSeparators(e.target.checked)}
+                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
+              <span>显示卡池</span>
+              <input
+                type="checkbox"
+                checked={showGacha}
+                onChange={(e) => setShowGacha(e.target.checked)}
                 className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
               />
             </label>

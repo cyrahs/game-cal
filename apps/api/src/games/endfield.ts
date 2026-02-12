@@ -2,6 +2,7 @@ import { fetchJson, fetchText } from "../lib/fetch.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { CalendarEvent } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type HypergryphAggregateItem = {
   cid?: string;
@@ -211,13 +212,15 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
       const sMs = Date.parse(startIso);
       const eMs = Date.parse(endIso);
       if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) return [];
+      const title = normalizeTitle(it.title) || it.cid || "活动";
 
       return [
         {
           id: it.cid ?? `${normalizeTitle(it.title)}:${it.startAt ?? startIso}`,
-          title: normalizeTitle(it.title) || it.cid || "活动",
+          title,
           start_time: startIso,
           end_time: endIso,
+          is_gacha: isGachaEventTitle("endfield", title),
           banner: extractFirstImgSrc(html),
           content: html,
         },

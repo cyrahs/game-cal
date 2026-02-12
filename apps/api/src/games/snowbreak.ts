@@ -5,6 +5,7 @@ import {
 } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
+import { isGachaEventTitle } from "./gacha.js";
 
 type SnowbreakAnnItem = {
   id?: number | string;
@@ -302,6 +303,7 @@ function buildEventTitle(baseTitle: string, prefix: string): string {
 
 function isWantedSnowbreakActivityTitle(title: string): boolean {
   if (!title) return false;
+  if (isGachaEventTitle("snowbreak", title)) return true;
   if (SNOWBREAK_ACTIVITY_EXCLUDE_WORDS.some((w) => title.includes(w))) return false;
   return SNOWBREAK_ACTIVITY_INCLUDE_WORDS.some((w) => title.includes(w));
 }
@@ -386,6 +388,55 @@ function buildSnowbreakVersionCandidates(list: SnowbreakAnnItem[]): SnowbreakVer
     .filter((x) => x.startSeconds > 0 && x.endSeconds > x.startSeconds);
 }
 
+function extractSnowbreakGachaEventsFromAnnouncements(list: SnowbreakAnnItem[]): CalendarEvent[] {
+  const out = new Map<string, CalendarEvent>();
+
+  for (const item of list) {
+    const title = normalizeTitle(
+      parseLocalizedText(item.title) || parseLocalizedText(item.left_title)
+    );
+    if (!title || !isGachaEventTitle("snowbreak", title)) continue;
+
+    const startSeconds = parsePositiveIntLike(item.start_time);
+    const endSeconds = parsePositiveIntLike(item.end_time);
+    if (startSeconds == null || endSeconds == null || endSeconds <= startSeconds) continue;
+
+    const startIso = unixSecondsToIsoWithSourceOffset(startSeconds, SNOWBREAK_SOURCE_TZ_OFFSET);
+    const endIso = unixSecondsToIsoWithSourceOffset(endSeconds, SNOWBREAK_SOURCE_TZ_OFFSET);
+    const contentHtml = parseLocalizedText(item.content);
+    const numericId = parsePositiveIntLike(item.id);
+    const id =
+      numericId != null
+        ? `snowbreak-gacha:${numericId}`
+        : `snowbreak-gacha:${stableEventId(title, startIso, endIso)}`;
+
+    const prev = out.get(id);
+    const next: CalendarEvent = {
+      id,
+      title,
+      start_time: startIso,
+      end_time: endIso,
+      is_gacha: true,
+      banner: extractFirstImgSrc(contentHtml),
+      content: contentHtml || undefined,
+    };
+    if (!prev) {
+      out.set(id, next);
+      continue;
+    }
+
+    out.set(id, {
+      ...prev,
+      banner: prev.banner ?? next.banner,
+      content: prev.content ?? next.content,
+      start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
+      end_time: Date.parse(prev.end_time) >= Date.parse(next.end_time) ? prev.end_time : next.end_time,
+    });
+  }
+
+  return [...out.values()];
+}
+
 function extractEventsFromBlocks(
   blocks: ParsedBlock[],
   opts: {
@@ -433,6 +484,7 @@ function extractEventsFromBlocks(
         title,
         start_time: startIso,
         end_time: endIso,
+        is_gacha: isGachaEventTitle("snowbreak", title),
         banner: block.banner,
         content: blockContent,
       });
@@ -460,48 +512,74 @@ export async function fetchSnowbreakEvents(
 
   const list = Array.isArray(res.announce) ? res.announce : [];
   if (list.length === 0) return [];
+  const gachaEvents = extractSnowbreakGachaEventsFromAnnouncements(list);
 
   const versionCandidates = buildSnowbreakVersionCandidates(list);
   const target = [...versionCandidates].sort((a, b) => b.startSeconds - a.startSeconds)[0];
+  const versionEvents: CalendarEvent[] = [];
 
-  if (!target) return [];
+  if (target) {
+    const contentHtml = parseLocalizedText(target.item.content);
+    if (contentHtml) {
+      const anchorSeconds =
+        target.endSeconds > 0
+          ? target.endSeconds
+          : target.startSeconds > 0
+            ? target.startSeconds
+            : Math.trunc(Date.now() / 1000);
+      const anchorDate = new Date(anchorSeconds * 1000);
 
-  const contentHtml = parseLocalizedText(target.item.content);
-  if (!contentHtml) return [];
+      const lines = tokenizeAnnouncementLines(contentHtml);
+      const blocks = parseBlocks(lines);
+      versionEvents.push(
+        ...extractEventsFromBlocks(blocks, {
+          anchorYear: anchorDate.getUTCFullYear(),
+          anchorMonth: anchorDate.getUTCMonth() + 1,
+          anchorDay: anchorDate.getUTCDate(),
+          sourceTzOffset: SNOWBREAK_SOURCE_TZ_OFFSET,
+        })
+      );
+    }
 
-  const anchorSeconds =
-    target.endSeconds > 0
-      ? target.endSeconds
-      : target.startSeconds > 0
-        ? target.startSeconds
-        : Math.trunc(Date.now() / 1000);
-  const anchorDate = new Date(anchorSeconds * 1000);
-
-  const lines = tokenizeAnnouncementLines(contentHtml);
-  const blocks = parseBlocks(lines);
-  const events = extractEventsFromBlocks(blocks, {
-    anchorYear: anchorDate.getUTCFullYear(),
-    anchorMonth: anchorDate.getUTCMonth() + 1,
-    anchorDay: anchorDate.getUTCDate(),
-    sourceTzOffset: SNOWBREAK_SOURCE_TZ_OFFSET,
-  });
-
-  const start = target.startSeconds;
-  const end = target.endSeconds;
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-    return events;
+    const start = target.startSeconds;
+    const end = target.endSeconds;
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      const contentHtml = parseLocalizedText(target.item.content);
+      versionEvents.push({
+        id: `snowbreak-ann:${target.item.id ?? `${start}:${end}`}`,
+        title: target.title || SNOWBREAK_VERSION_NOTICE_SUFFIX,
+        start_time: unixSecondsToIsoWithSourceOffset(start, SNOWBREAK_SOURCE_TZ_OFFSET),
+        end_time: unixSecondsToIsoWithSourceOffset(end, SNOWBREAK_SOURCE_TZ_OFFSET),
+        is_gacha: isGachaEventTitle("snowbreak", target.title),
+        banner: extractFirstImgSrc(contentHtml),
+        content: contentHtml || undefined,
+      });
+    }
   }
 
-  const announcementEvent: CalendarEvent = {
-    id: `snowbreak-ann:${target.item.id ?? `${start}:${end}`}`,
-    title: target.title || SNOWBREAK_VERSION_NOTICE_SUFFIX,
-    start_time: unixSecondsToIsoWithSourceOffset(start, SNOWBREAK_SOURCE_TZ_OFFSET),
-    end_time: unixSecondsToIsoWithSourceOffset(end, SNOWBREAK_SOURCE_TZ_OFFSET),
-    banner: extractFirstImgSrc(contentHtml),
-    content: contentHtml,
-  };
+  const merged = new Map<string, CalendarEvent>();
+  for (const event of [...versionEvents, ...gachaEvents]) {
+    const key = `${event.title}|${event.start_time}|${event.end_time}`;
+    if (!merged.has(key)) {
+      merged.set(key, event);
+      continue;
+    }
+    const prev = merged.get(key)!;
+    merged.set(key, {
+      ...prev,
+      is_gacha: prev.is_gacha || event.is_gacha,
+      banner: prev.banner ?? event.banner,
+      content: prev.content ?? event.content,
+    });
+  }
 
-  return [...events, announcementEvent];
+  return [...merged.values()].sort((a, b) => {
+    const sDiff = Date.parse(a.start_time) - Date.parse(b.start_time);
+    if (sDiff !== 0) return sDiff;
+    const eDiff = Date.parse(a.end_time) - Date.parse(b.end_time);
+    if (eDiff !== 0) return eDiff;
+    return String(a.title).localeCompare(String(b.title), "zh-Hans-CN");
+  });
 }
 
 export async function fetchSnowbreakCurrentVersion(
