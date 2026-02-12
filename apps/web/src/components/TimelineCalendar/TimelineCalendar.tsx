@@ -1929,7 +1929,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                   ? `${remainingMinutes}分`
                   : showHours
                     ? `${remainingHours}h`
-                    : `${remainingDays}天`;
+                    : `${remainingDays}d`;
                 const remainingAriaLabel = showMinutes
                   ? `剩余${remainingMinutes}分钟`
                   : showHours
@@ -2022,9 +2022,9 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                       ) : null}
                       <div
                         className={clsx(
-                          "leading-none font-mono tabular-nums",
+                          "leading-none font-mono tabular-nums font-medium",
                           showCountdownOnly ? "w-full min-w-0 text-center whitespace-nowrap" : "shrink-0 pl-2 text-[13px]",
-                          isUrgent ? "text-red-700 font-semibold" : "text-slate-800/70"
+                          isUrgent ? "text-red-700" : "text-slate-800/70"
                         )}
                         style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
                         aria-label={remainingAriaLabel}
