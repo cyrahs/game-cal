@@ -1,7 +1,7 @@
 import { SimpleTtlCache } from "../../api/src/lib/cache.js";
 import type { RuntimeEnv } from "../../api/src/lib/runtimeEnv.js";
-import { GAMES, fetchEventsForGame } from "../../api/src/games/index.js";
-import type { ApiResponse, CalendarEvent, GameId } from "../../api/src/types.js";
+import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "../../api/src/games/index.js";
+import type { ApiResponse, CalendarEvent, GameId, GameVersionInfo } from "../../api/src/types.js";
 
 interface Env extends RuntimeEnv {
   // Workers Assets binding (see wrangler.jsonc assets.binding).
@@ -731,6 +731,22 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Calend
   });
 }
 
+type GameSnapshotData = {
+  events: CalendarEvent[];
+  version: GameVersionInfo | null;
+};
+
+async function getGameSnapshotWithCache(env: Env, game: GameId): Promise<GameSnapshotData> {
+  const cacheTtlMs = parseCacheTtlMs(env);
+  return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
+    const [events, version] = await Promise.all([
+      getEventsForGameWithCache(env, game),
+      fetchCurrentVersionForGame(game, env),
+    ]);
+    return { events, version };
+  });
+}
+
 async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!(await ensureSyncSchema(env))) {
     return json({ code: 501, msg: "Sync store not configured (missing D1 binding)", data: null }, { status: 501 });
@@ -1028,6 +1044,28 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     return json({ code: 200, data: GAMES } satisfies ApiResponse<typeof GAMES>);
   }
 
+  if (url.pathname === "/api/version") {
+    const game = url.searchParams.get("game");
+    if (!game) {
+      return json({ code: 400, msg: "Missing query param: game", data: null } satisfies ApiResponse<null>, {
+        status: 400,
+      });
+    }
+    if (!isGameId(game)) {
+      return json({ code: 400, msg: `Unsupported game: ${game}`, data: null } satisfies ApiResponse<null>, {
+        status: 400,
+      });
+    }
+
+    const cacheTtlMs = parseCacheTtlMs(env);
+    const snapshot = await getGameSnapshotWithCache(env, game);
+    const data = snapshot.version;
+
+    return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
+      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+    });
+  }
+
   if (url.pathname === "/api/events") {
     const game = url.searchParams.get("game");
     if (!game) {
@@ -1042,7 +1080,26 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     }
 
     const cacheTtlMs = parseCacheTtlMs(env);
-    const data = await getEventsForGameWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game);
+    const data = snapshot.events;
+
+    return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
+      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+    });
+  }
+
+  const versionMatch = /^\/api\/version\/([^/]+)$/.exec(url.pathname);
+  if (versionMatch) {
+    const game = versionMatch[1]!;
+    if (!isGameId(game)) {
+      return json({ code: 400, msg: `Unsupported game: ${game}`, data: null } satisfies ApiResponse<null>, {
+        status: 400,
+      });
+    }
+
+    const cacheTtlMs = parseCacheTtlMs(env);
+    const snapshot = await getGameSnapshotWithCache(env, game);
+    const data = snapshot.version;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
       headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
@@ -1059,7 +1116,8 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     }
 
     const cacheTtlMs = parseCacheTtlMs(env);
-    const data = await getEventsForGameWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game);
+    const data = snapshot.events;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
       headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },

@@ -18,6 +18,17 @@ export interface CalendarEvent {
   linkUrl?: string;
 }
 
+export interface GameVersionInfo {
+  game: GameId;
+  version: string;
+  // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00"
+  start_time: string;
+  // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00"
+  end_time: string;
+  ann_id?: number;
+  title?: string;
+}
+
 export interface ApiResponse<T> {
   code: number;
   msg?: string;

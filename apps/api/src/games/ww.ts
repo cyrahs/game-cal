@@ -1,7 +1,7 @@
 import { fetchJson } from "../lib/fetch.js";
 import { unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
-import type { CalendarEvent } from "../types.js";
+import type { CalendarEvent, GameVersionInfo } from "../types.js";
 
 type WwOfficialNoticeItem = {
   id?: string | number;
@@ -50,6 +50,18 @@ const WW_PROMOTION_TITLE_WORDS = [
   "礼包",
   "周度演算卡",
   "先约电台",
+];
+
+const WW_VERSION_NOTICE_INCLUDE_WORDS = [
+  "版本内容说明",
+  "版本更新说明",
+  "版本更新公告",
+];
+
+const WW_VERSION_NOTICE_EXCLUDE_WORDS = [
+  "版本活动笔记",
+  "已知问题",
+  "维护预告",
 ];
 
 function stableHash64(input: string): string {
@@ -118,6 +130,56 @@ function shouldIgnoreWwItem(
   return false;
 }
 
+function isWwVersionNoticeTitle(title: string): boolean {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return false;
+  if (WW_VERSION_NOTICE_EXCLUDE_WORDS.some((w) => normalized.includes(w))) return false;
+  return WW_VERSION_NOTICE_INCLUDE_WORDS.some((w) => normalized.includes(w));
+}
+
+function extractWwVersionLabel(title: string): string | null {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return null;
+
+  const quoted = /[「“"]([^「」”"]+)[」”"]/.exec(normalized);
+  if (quoted?.[1]) return `「${quoted[1].trim()}」`;
+
+  const numeric = /(\d+(?:\.\d+)+)\s*版本/.exec(normalized);
+  if (numeric?.[1]) return numeric[1];
+
+  const fromVPrefix = /\bV(\d+(?:\.\d+)+)\b/i.exec(normalized);
+  if (fromVPrefix?.[1]) return fromVPrefix[1];
+
+  return null;
+}
+
+type WwVersionNotice = {
+  item: WwOfficialNoticeItem;
+  title: string;
+  startMs: number;
+  endMs: number;
+  startIso: string;
+  endIso: string;
+};
+
+function pickCurrentWwVersionNotice(items: WwVersionNotice[]): WwVersionNotice | null {
+  if (items.length === 0) return null;
+
+  const nowMs = Date.now();
+  const active = items
+    .filter((x) => x.startMs <= nowMs && nowMs < x.endMs)
+    .sort((a, b) => b.startMs - a.startMs);
+  if (active.length > 0) return active[0]!;
+
+  const upcoming = items
+    .filter((x) => x.startMs > nowMs)
+    .sort((a, b) => a.startMs - b.startMs);
+  if (upcoming.length > 0) return upcoming[0]!;
+
+  const recentPast = items.sort((a, b) => b.endMs - a.endMs);
+  return recentPast[0] ?? null;
+}
+
 export async function fetchWwEvents(
   env: RuntimeEnv = {}
 ): Promise<CalendarEvent[]> {
@@ -171,4 +233,61 @@ export async function fetchWwEvents(
   }
 
   return [...deduped.values()];
+}
+
+export async function fetchWwCurrentVersion(env: RuntimeEnv = {}): Promise<GameVersionInfo | null> {
+  const url = env.WW_NOTICE_API_URL ?? WW_NOTICE_DEFAULT;
+  const res = await fetchJson<WwOfficialNoticeResponse>(url, {
+    timeoutMs: 12_000,
+  });
+
+  const merged = [
+    ...(res.game ?? []),
+    ...(res.activity ?? []),
+    ...(res.recommend ?? []),
+  ];
+
+  const deduped = new Map<string, WwVersionNotice>();
+  for (const item of merged) {
+    const rawTitle = item.tabTitle?.trim();
+    if (!rawTitle) continue;
+
+    const title = normalizeTitle(rawTitle);
+    if (!isWwVersionNoticeTitle(title)) continue;
+
+    const startMs = parseMs(item.startTimeMs);
+    const endMs = parseMs(item.endTimeMs);
+    if (startMs == null || endMs == null || endMs <= startMs) continue;
+
+    const idText = String(item.id ?? "").trim();
+    const key = idText || `${title}|${startMs}|${endMs}`;
+
+    deduped.set(key, {
+      item,
+      title,
+      startMs,
+      endMs,
+      startIso: msToIsoWithSourceOffset(startMs),
+      endIso: msToIsoWithSourceOffset(endMs),
+    });
+  }
+
+  const notice = pickCurrentWwVersionNotice([...deduped.values()]);
+  if (!notice) return null;
+
+  const version = extractWwVersionLabel(notice.title);
+  if (!version) return null;
+
+  const idNum = parseIntLike(notice.item.id);
+  const info: GameVersionInfo = {
+    game: "ww",
+    version,
+    start_time: notice.startIso,
+    end_time: notice.endIso,
+    title: notice.title,
+  };
+  if (idNum != null && idNum > 0) {
+    info.ann_id = idNum;
+  }
+  return info;
 }

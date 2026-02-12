@@ -4,7 +4,7 @@ import {
   unixSecondsToIsoWithSourceOffset,
 } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
-import type { CalendarEvent } from "../types.js";
+import type { CalendarEvent, GameVersionInfo } from "../types.js";
 
 type SnowbreakAnnItem = {
   id?: number | string;
@@ -38,6 +38,7 @@ type ParsedBlock = {
 const SNOWBREAK_DEFAULT_ANNOUNCE_API =
   "https://cbjq-content.xoyocdn.com/ob202307/webfile/mainland/announce/config/pc_jinshan-pc_jinshan.json";
 const SNOWBREAK_SOURCE_TZ_OFFSET = "+08:00";
+const SNOWBREAK_VERSION_NOTICE_SUFFIX = "限时活动公告";
 
 const SNOWBREAK_ACTIVITY_INCLUDE_WORDS = [
   "玩法",
@@ -321,6 +322,70 @@ function stableEventId(title: string, startTime: string, endTime: string): strin
   return stableHash64(`${title}|${startTime}|${endTime}`);
 }
 
+function parsePositiveIntLike(input: unknown): number | null {
+  if (input == null) return null;
+  const n = typeof input === "number" ? input : Number(input);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.trunc(n);
+}
+
+function floorSecondsToMinute(seconds: number): number {
+  return Math.floor(seconds / 60) * 60;
+}
+
+type SnowbreakVersionNotice = {
+  item: SnowbreakAnnItem;
+  title: string;
+  startSeconds: number;
+  endSeconds: number;
+};
+
+function pickCurrentSnowbreakVersionNotice(items: SnowbreakVersionNotice[]): SnowbreakVersionNotice | null {
+  if (items.length === 0) return null;
+
+  const nowSeconds = Math.trunc(Date.now() / 1000);
+  const active = items
+    .filter((x) => x.startSeconds <= nowSeconds && nowSeconds < x.endSeconds)
+    .sort((a, b) => b.startSeconds - a.startSeconds);
+  if (active.length > 0) return active[0]!;
+
+  const upcoming = items
+    .filter((x) => x.startSeconds > nowSeconds)
+    .sort((a, b) => a.startSeconds - b.startSeconds);
+  if (upcoming.length > 0) return upcoming[0]!;
+
+  const recentPast = items.sort((a, b) => b.endSeconds - a.endSeconds);
+  return recentPast[0] ?? null;
+}
+
+function extractSnowbreakVersionLabel(title: string): string | null {
+  const normalized = normalizeTitle(title);
+  if (!normalized) return null;
+
+  const quoted = /[「“"]([^「」”"]+)[」”"]/.exec(normalized);
+  if (quoted?.[1]) return `「${quoted[1].trim()}」`;
+
+  const numeric = /(\d+(?:\.\d+)+)\s*版本/.exec(normalized);
+  if (numeric?.[1]) return numeric[1];
+
+  const trimmed = normalizeTitle(
+    normalized.replace(new RegExp(`${SNOWBREAK_VERSION_NOTICE_SUFFIX}$`), "")
+  );
+  return trimmed || null;
+}
+
+function buildSnowbreakVersionCandidates(list: SnowbreakAnnItem[]): SnowbreakVersionNotice[] {
+  return list
+    .map((it) => ({
+      item: it,
+      title: normalizeTitle(parseLocalizedText(it.title)),
+      startSeconds: parsePositiveIntLike(it.start_time) ?? 0,
+      endSeconds: parsePositiveIntLike(it.end_time) ?? 0,
+    }))
+    .filter((x) => x.title.endsWith(SNOWBREAK_VERSION_NOTICE_SUFFIX))
+    .filter((x) => x.startSeconds > 0 && x.endSeconds > x.startSeconds);
+}
+
 function extractEventsFromBlocks(
   blocks: ParsedBlock[],
   opts: {
@@ -396,13 +461,8 @@ export async function fetchSnowbreakEvents(
   const list = Array.isArray(res.announce) ? res.announce : [];
   if (list.length === 0) return [];
 
-  const target = list
-    .map((it) => ({
-      item: it,
-      title: normalizeTitle(parseLocalizedText(it.title)),
-    }))
-    .filter((x) => x.title.endsWith("限时活动公告"))
-    .sort((a, b) => Number(b.item.start_time ?? 0) - Number(a.item.start_time ?? 0))[0];
+  const versionCandidates = buildSnowbreakVersionCandidates(list);
+  const target = [...versionCandidates].sort((a, b) => b.startSeconds - a.startSeconds)[0];
 
   if (!target) return [];
 
@@ -410,10 +470,10 @@ export async function fetchSnowbreakEvents(
   if (!contentHtml) return [];
 
   const anchorSeconds =
-    Number(target.item.end_time) > 0
-      ? Number(target.item.end_time)
-      : Number(target.item.start_time) > 0
-        ? Number(target.item.start_time)
+    target.endSeconds > 0
+      ? target.endSeconds
+      : target.startSeconds > 0
+        ? target.startSeconds
         : Math.trunc(Date.now() / 1000);
   const anchorDate = new Date(anchorSeconds * 1000);
 
@@ -426,15 +486,15 @@ export async function fetchSnowbreakEvents(
     sourceTzOffset: SNOWBREAK_SOURCE_TZ_OFFSET,
   });
 
-  const start = Number(target.item.start_time);
-  const end = Number(target.item.end_time);
+  const start = target.startSeconds;
+  const end = target.endSeconds;
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
     return events;
   }
 
   const announcementEvent: CalendarEvent = {
     id: `snowbreak-ann:${target.item.id ?? `${start}:${end}`}`,
-    title: target.title || "限时活动公告",
+    title: target.title || SNOWBREAK_VERSION_NOTICE_SUFFIX,
     start_time: unixSecondsToIsoWithSourceOffset(start, SNOWBREAK_SOURCE_TZ_OFFSET),
     end_time: unixSecondsToIsoWithSourceOffset(end, SNOWBREAK_SOURCE_TZ_OFFSET),
     banner: extractFirstImgSrc(contentHtml),
@@ -442,4 +502,38 @@ export async function fetchSnowbreakEvents(
   };
 
   return [...events, announcementEvent];
+}
+
+export async function fetchSnowbreakCurrentVersion(
+  env: RuntimeEnv = {}
+): Promise<GameVersionInfo | null> {
+  const announceApiUrl =
+    env.SNOWBREAK_ANNOUNCE_API_URL ?? SNOWBREAK_DEFAULT_ANNOUNCE_API;
+  const res = await fetchJson<SnowbreakAnnResponse>(announceApiUrl, {
+    timeoutMs: 12_000,
+  });
+
+  const list = Array.isArray(res.announce) ? res.announce : [];
+  if (list.length === 0) return null;
+
+  const target = pickCurrentSnowbreakVersionNotice(buildSnowbreakVersionCandidates(list));
+  if (!target) return null;
+
+  const version = extractSnowbreakVersionLabel(target.title);
+  if (!version) return null;
+
+  const roundedEndSeconds = floorSecondsToMinute(target.endSeconds);
+  const info: GameVersionInfo = {
+    game: "snowbreak",
+    version,
+    start_time: unixSecondsToIsoWithSourceOffset(target.startSeconds, SNOWBREAK_SOURCE_TZ_OFFSET),
+    end_time: unixSecondsToIsoWithSourceOffset(roundedEndSeconds, SNOWBREAK_SOURCE_TZ_OFFSET),
+    title: target.title,
+  };
+
+  const annId = parsePositiveIntLike(target.item.id);
+  if (annId != null) {
+    info.ann_id = annId;
+  }
+  return info;
 }

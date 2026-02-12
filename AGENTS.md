@@ -46,8 +46,10 @@ Container defaults:
 Implemented in `apps/api/src/index.ts`:
 - `GET /api/health`
 - `GET /api/games`
-- `GET /api/events?game=genshin|starrail|ww|zzz|endfield`
-- `GET /api/events/:game` (`genshin|starrail|ww|zzz|endfield`)
+- `GET /api/events?game=genshin|starrail|ww|zzz|snowbreak|endfield`
+- `GET /api/events/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`)
+- `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
+- `GET /api/version/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`; `genshin`/`starrail`/`ww`/`zzz`/`snowbreak` return non-null data)
 - `GET /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `PUT /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `POST /api/sync/:uuid/rotate` (always `501` in Node API; supported in Worker + D1 binding)
@@ -69,6 +71,7 @@ Upstream override URLs (optional):
 - `GENSHIN_CONTENT_API_URL`
 - `STARRAIL_API_URL`
 - `STARRAIL_CONTENT_API_URL`
+- `ZZZ_API_URL`
 - `ZZZ_ACTIVITY_API_URL`
 - `ZZZ_CONTENT_API_URL`
 - Wuthering Waves official notice JSON:

@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SimpleTtlCache } from "./lib/cache.js";
 import type { RuntimeEnv } from "./lib/runtimeEnv.js";
-import { GAMES, fetchEventsForGame } from "./games/index.js";
+import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "./games/index.js";
 import type { ApiResponse, GameId } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,6 +69,32 @@ function isGameId(x: unknown): x is GameId {
   return typeof x === "string" && GAMES.some((g) => g.id === x);
 }
 
+type GameSnapshotData = {
+  events: Awaited<ReturnType<typeof fetchEventsForGame>>;
+  version: Awaited<ReturnType<typeof fetchCurrentVersionForGame>>;
+};
+
+async function getGameSnapshotData(game: GameId): Promise<GameSnapshotData> {
+  return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
+    const runtimeEnv = process.env as unknown as RuntimeEnv;
+    const [events, version] = await Promise.all([
+      fetchEventsForGame(game, runtimeEnv),
+      fetchCurrentVersionForGame(game, runtimeEnv),
+    ]);
+    return { events, version };
+  });
+}
+
+async function getEventsData(game: GameId) {
+  const snapshot = await getGameSnapshotData(game);
+  return snapshot.events;
+}
+
+async function getVersionData(game: GameId) {
+  const snapshot = await getGameSnapshotData(game);
+  return snapshot.version;
+}
+
 server.get<{
   Params: { game: string };
 }>("/api/events/:game", async (req, reply): Promise<ApiResponse<any>> => {
@@ -78,9 +104,7 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: [] };
   }
 
-  const data = await cache.getOrSet(`events:${game}`, cacheTtlMs, () =>
-    fetchEventsForGame(game, process.env as unknown as RuntimeEnv)
-  );
+  const data = await getEventsData(game);
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
   return { code: 200, data };
@@ -99,9 +123,41 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: [] };
   }
 
-  const data = await cache.getOrSet(`events:${game}`, cacheTtlMs, () =>
-    fetchEventsForGame(game, process.env as unknown as RuntimeEnv)
-  );
+  const data = await getEventsData(game);
+
+  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  return { code: 200, data };
+});
+
+server.get<{
+  Params: { game: string };
+}>("/api/version/:game", async (req, reply): Promise<ApiResponse<any>> => {
+  const game = req.params.game;
+  if (!isGameId(game)) {
+    reply.code(400);
+    return { code: 400, msg: `Unsupported game: ${game}`, data: null };
+  }
+
+  const data = await getVersionData(game);
+
+  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  return { code: 200, data };
+});
+
+server.get<{
+  Querystring: { game?: string };
+}>("/api/version", async (req, reply): Promise<ApiResponse<any>> => {
+  const game = req.query.game;
+  if (!game) {
+    reply.code(400);
+    return { code: 400, msg: "Missing query param: game", data: null };
+  }
+  if (!isGameId(game)) {
+    reply.code(400);
+    return { code: 400, msg: `Unsupported game: ${game}`, data: null };
+  }
+
+  const data = await getVersionData(game);
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
   return { code: 200, data };

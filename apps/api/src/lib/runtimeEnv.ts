@@ -4,6 +4,7 @@ export interface RuntimeEnv {
   GENSHIN_CONTENT_API_URL?: string;
   STARRAIL_API_URL?: string;
   STARRAIL_CONTENT_API_URL?: string;
+  ZZZ_API_URL?: string;
   ZZZ_ACTIVITY_API_URL?: string;
   ZZZ_CONTENT_API_URL?: string;
   SNOWBREAK_ANNOUNCE_API_URL?: string;

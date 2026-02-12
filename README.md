@@ -115,6 +115,7 @@ pnpm --filter @game-cal/api start
   - `GENSHIN_CONTENT_API_URL`
   - `STARRAIL_API_URL`
   - `STARRAIL_CONTENT_API_URL`
+  - `ZZZ_API_URL`
   - `ZZZ_ACTIVITY_API_URL`
   - `ZZZ_CONTENT_API_URL`
   - `SNOWBREAK_ANNOUNCE_API_URL`
@@ -158,17 +159,19 @@ pnpm --filter @game-cal/api start
 - `GET /api/games`
 - `GET /api/events?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/events/:game`（`genshin|starrail|ww|zzz|snowbreak|endfield`）
+- `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
+- `GET /api/version/:game`（`genshin|starrail|ww|zzz|snowbreak|endfield`；当前原神 / 星铁 / 鸣潮 / 绝区零 / 尘白禁区返回版本数据，其它游戏返回 `null`）
 - `GET /api/sync/:uuid`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 - `PUT /api/sync/:uuid`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 - `POST /api/sync/:uuid/rotate`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 
-## 事件缓存策略
+## 缓存策略
 
-- Worker + D1 时，事件缓存持久化到 `gc_events_cache`
-- 缓存不存在时会立即拉取并写入 D1
-- 缓存按 `CACHE_TTL_SECONDS` 过期，按请求触发刷新
-- Worker 默认每分钟定时检查一次缓存；若任一游戏缺失或超过 `CACHE_TTL_SECONDS`，会后台刷新全部游戏，降低首个 `/api/events` 请求等待
-- Node API 模式仅使用内存缓存
+- 同一游戏下，`/api/events*` 与 `/api/version*` 共享同一份快照缓存（同一次刷新、同一 TTL）。
+- 缓存按 `CACHE_TTL_SECONDS` 过期，按请求触发刷新。
+- Worker + D1 时，事件底层缓存仍持久化在 `gc_events_cache`，缺失或过期时会拉取并回写 D1。
+- Worker 默认每分钟定时检查一次事件底层缓存；若任一游戏缺失或超过 `CACHE_TTL_SECONDS`，会后台刷新全部游戏，降低冷启动等待。
+- Node API 模式使用进程内存缓存。
 
 ## 时区说明
 

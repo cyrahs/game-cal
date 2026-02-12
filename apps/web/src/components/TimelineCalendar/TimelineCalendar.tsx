@@ -5,8 +5,9 @@ import customParseFormat from "dayjs/plugin/customParseFormat";
 import isoWeek from "dayjs/plugin/isoWeek";
 import utc from "dayjs/plugin/utc";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CalendarEvent, GameId } from "../../api/types";
+import type { CalendarEvent, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
+import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import {
   type RecurringActivity,
   type RecurringRule,
@@ -653,6 +654,27 @@ function formatRange(s: string, e: string) {
   const ed = parseDateTime(e);
   if (!sd.isValid() || !ed.isValid()) return `${s} ~ ${e}`;
   return `${sd.format("MM/DD HH:mm")} ~ ${ed.format("MM/DD HH:mm")}`;
+}
+
+type VersionTimelineLabelParts = {
+  versionTitle: string;
+  endLabel: string;
+  remainingLabel: string;
+};
+
+function formatVersionTimelineLabel(version: GameVersionInfo, now: Dayjs): VersionTimelineLabelParts | null {
+  const end = dayjs(version.end_time);
+  if (!end.isValid()) return null;
+
+  const endLabel = end.format("MM/DD HH:mm");
+  const rawVersion = version.version.trim();
+  if (!rawVersion) return null;
+  const remainingDays = Math.max(0, Math.ceil((end.valueOf() - now.valueOf()) / DAY_MS));
+  return {
+    versionTitle: `${rawVersion}版本`,
+    endLabel,
+    remainingLabel: `${remainingDays}d`,
+  };
 }
 
 function preprocessAnnContent(input: string): string {
@@ -1405,7 +1427,11 @@ function parseRecurringForm(form: RecurringFormState): { value: Omit<RecurringAc
   };
 }
 
-export default function TimelineCalendar(props: { events: CalendarEvent[]; gameId: GameId }) {
+export default function TimelineCalendar(props: {
+  events: CalendarEvent[];
+  gameId: GameId;
+  currentVersionState: UseCurrentVersionState;
+}) {
   const {
     prefs,
     setShowNotStarted,
@@ -1437,6 +1463,10 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     () => formatFixedUtcOffset(getRecurringTzOffsetMinutes(props.gameId)),
     [props.gameId]
   );
+  const versionTimelineLabel = useMemo(() => {
+    if (props.currentVersionState.status !== "success" || !props.currentVersionState.data) return null;
+    return formatVersionTimelineLabel(props.currentVersionState.data, now);
+  }, [props.currentVersionState, now]);
 
   const toggleCompleted = (eventId: string | number) => toggleCompletedPref(props.gameId, eventId);
   const toggleRecurringCompleted = (activityId: string, cycleKey: string) =>
@@ -1814,20 +1844,23 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     <div className="fade-in grid gap-3">
       <div className="glass shadow-ink rounded-2xl overflow-hidden relative">
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
-          <div className="flex items-baseline gap-3 min-w-0">
-            <div className="text-sm font-semibold shrink-0">
+          <div className="flex items-center gap-0.5 min-w-0">
+            <div className="flex items-center gap-2 shrink-0">
               <img
                 src={gameMeta.icon}
                 alt=""
                 aria-hidden="true"
-                className="inline-block w-5 h-5 object-contain rounded-md mr-2 align-text-bottom"
+                className="w-5 h-5 object-contain rounded-md"
                 referrerPolicy="no-referrer"
               />
-              {gameMeta.name}
+              <div className="text-sm font-semibold leading-none">
+                <span className="text-base leading-none">{gameMeta.name}</span>
+              </div>
             </div>
-            {!isTimelineEmpty ? (
-              <div className="text-xs text-[color:var(--muted)] font-mono">
-                {rangeStart.format("YYYY/MM/DD")} ~ {rangeEnd.format("YYYY/MM/DD")}
+            {versionTimelineLabel ? (
+              <div className="text-xs text-[color:var(--muted)] min-w-0 truncate leading-none translate-y-[3px]">
+                <span>{versionTimelineLabel.versionTitle}</span>
+                <span className="font-mono"> ~ {versionTimelineLabel.endLabel} ({versionTimelineLabel.remainingLabel})</span>
               </div>
             ) : null}
           </div>
