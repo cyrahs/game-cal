@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import dayjs from "dayjs";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import genshinIcon from "../assets/genshin.png";
 import starrailIcon from "../assets/starrail.png";
@@ -56,6 +56,14 @@ const games: GameLink[] = [
 ];
 
 const allGameIds = games.map((g) => g.id);
+const DATA_SOURCE_BY_GAME: Record<GameId, string> = {
+  genshin: "米哈游公告 API",
+  starrail: "米哈游公告 API",
+  zzz: "米哈游公告 API",
+  ww: "库洛 Wiki API",
+  snowbreak: "西山居公告 API",
+  endfield: "鹰角公告 API",
+};
 
 function formatUtcOffsetLabelByDate(date: Date): string {
   const mins = -date.getTimezoneOffset();
@@ -68,6 +76,7 @@ function formatUtcOffsetLabelByDate(date: Date): string {
 }
 
 export default function Shell() {
+  const location = useLocation();
   const { prefs, setTheme, setVisibleGameIds, sync, exportRecurringSettings, importRecurringSettings } = usePrefs();
   const genshinEvents = useEvents("genshin");
   const starrailEvents = useEvents("starrail");
@@ -87,6 +96,12 @@ export default function Shell() {
   const [recurringSettingsFeedback, setRecurringSettingsFeedback] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const timezoneLabel = useMemo(() => formatUtcOffsetLabelByDate(now.toDate()), [now]);
+  const currentGameId = useMemo<GameId>(() => {
+    const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
+    const matched = games.find((g) => g.to === normalizedPath);
+    return matched?.id ?? "genshin";
+  }, [location.pathname]);
+  const currentDataSource = DATA_SOURCE_BY_GAME[currentGameId];
 
   const handleSyncUuidChange = (value: string) => {
     if (value.length > sync.uuidMaxLength) {
@@ -253,9 +268,9 @@ export default function Shell() {
     <div className="min-h-screen relative">
       <div className="max-w-[1200px] mx-auto px-4 py-6">
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div className="flex flex-col">
-            <div className="text-2xl font-semibold tracking-tight">Game Calendar</div>
-            <div className="text-sm text-[color:var(--muted)]">活动日历 ({timezoneLabel})</div>
+          <div className="flex items-end gap-2">
+            <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
+            <div className="text-xs text-[color:var(--muted)] leading-none">{timezoneLabel}</div>
           </div>
 
           <nav className="flex items-center gap-2">
@@ -299,6 +314,27 @@ export default function Shell() {
                 </NavLink>
               ))}
 
+            {games.some((g) => visibleGameIdSet.has(g.id)) ? (
+              <span aria-hidden="true" className="mx-1 h-5 w-px bg-[color:var(--line)]" />
+            ) : null}
+
+            <a
+              href="https://github.com/cyrahs/game-cal"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="GitHub"
+              title="GitHub"
+              className={clsx(
+                "glass w-9 h-9 rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                "hover:border-[color:var(--ink)]"
+              )}
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+              </svg>
+            </a>
+
             <button
               type="button"
               className={clsx(
@@ -316,7 +352,7 @@ export default function Shell() {
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth="2"
-                    d="M12 3v2m0 14v2m9-9h-2M5 12H3m15.364-6.364-1.414 1.414M7.05 16.95l-1.414 1.414m0-11.314 1.414 1.414m11.314 11.314 1.414 1.414M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"
+                    d="M12 3v1m0 16v1m-8-9H3m3.314-5.686L5.5 5.5m12.186.814L18.5 5.5M6.314 17.69l-.814.81m12.186-.81l.814.81M21 12h-1m-4 0a4 4 0 1 1-8 0 4 4 0 1 1 8 0z"
                   />
                 </svg>
               ) : (
@@ -325,7 +361,7 @@ export default function Shell() {
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth="2"
-                    d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79Z"
+                    d="M3.32 11.684a9 9 0 0 0 9 9c3.787 0 7.028-2.339 8.357-5.651a8.99 8.99 0 0 1-3.357.651 9 9 0 0 1-9-9 9.05 9.05 0 0 1 .644-3.353C5.656 4.66 3.32 7.899 3.32 11.684z"
                   />
                 </svg>
               )}
@@ -347,18 +383,12 @@ export default function Shell() {
                 aria-expanded={isSettingsOpen}
                 aria-controls="gc-settings"
               >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeLinejoin="round">
+                  <circle cx="16" cy="16" r="4" strokeWidth="2" />
                   <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
                     strokeWidth="2"
-                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065Z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                    strokeMiterlimit="10"
+                    d="M27.758 10.366l-1-1.732a2 2 0 0 0-2.732-.732l-.526.304c-2 1.154-4.5-.289-4.5-2.598V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v.608c0 2.309-2.5 3.753-4.5 2.598l-.526-.304a2 2 0 0 0-2.732.732l-1 1.732a2 2 0 0 0 .732 2.732l.526.304c2 1.155 2 4.041 0 5.196l-.526.304a2 2 0 0 0-.732 2.732l1 1.732a2 2 0 0 0 2.732.732l.526-.304c2-1.155 4.5.289 4.5 2.598V27a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-.608c0-2.309 2.5-3.753 4.5-2.598l.526.304a2 2 0 0 0 2.732-.732l1-1.732a2 2 0 0 0-.732-2.732l-.526-.304c-2-1.155-2-4.041 0-5.196l.526-.304a2 2 0 0 0 .732-2.732z"
                   />
                 </svg>
               </button>
@@ -638,18 +668,8 @@ export default function Shell() {
 
         <footer className="mt-10 pb-6 text-xs text-[color:var(--muted)]">
           <div className="flex items-center justify-between gap-3">
-            <span>
-              数据来源: 米哈游公告 API / 库洛 Wiki API / 西山居公告 API / 鹰角公告 API。 仅供学习参考。{" "}
-              <a
-                href="https://github.com/cyrahs/game-cal"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline underline-offset-2 hover:text-[color:var(--ink)]"
-              >
-                GitHub
-              </a>
-            </span>
-            <span className="shrink-0 text-right font-mono" title={`build ${buildCommit}`}>
+            <span>数据来源: {currentDataSource}</span>
+            <span className="shrink-0 font-mono" title={`build ${buildCommit}`}>
               build {buildCommitShort}
             </span>
           </div>

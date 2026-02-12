@@ -29,18 +29,32 @@ const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
-const TIMELINE_BAR_GRADIENTS = [
-  ["#73869B", "#8193A6"],
-  ["#71ADDC", "#83B9E2"],
-  ["#83ACBB", "#94B9C6"],
-  ["#B4D27C", "#C1DB93"],
-  ["#DEAC7C", "#E6BC93"],
-  ["#AB5548", "#BC6A5F"],
-  ["#83ACBB", "#71ADDC"],
-  ["#73869B", "#83ACBB"],
-  ["#B4D27C", "#DEAC7C"],
-  ["#DEAC7C", "#C98363"],
+const TIMELINE_BAR_COLORS = [
+  "#71ADDC",
+  "#B4D27C",
+  "#DEAC7C",
+  "#83ACBB",
+  "#84bab8",
+  "#D6C0A6",
+  "#93B5CF",
+  "#7ebc70",
+  "#C9A68B"
 ] as const;
+
+function hashString(value: string): number {
+  let h = 0;
+  for (let i = 0; i < value.length; i++) {
+    h = (h * 31 + value.charCodeAt(i)) | 0;
+  }
+  return h >>> 0;
+}
+
+function timelineColorAt(index: number, startOffset: number): string {
+  const len = TIMELINE_BAR_COLORS.length;
+  const normalizedStart = ((startOffset % len) + len) % len;
+  const colorIndex = (index + normalizedStart) % len;
+  return TIMELINE_BAR_COLORS[colorIndex]!;
+}
 
 type ParsedEvent = CalendarEvent & { _s: Dayjs; _e: Dayjs };
 type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream" };
@@ -944,7 +958,8 @@ function EventDetail(props: {
 }) {
   const theme = useTheme();
   const isEnd = props.now.isAfter(props.event._e);
-  const isStrike = props.checked || isEnd;
+  const isDimmed = props.checked || isEnd;
+  const shouldStrike = isEnd && !props.checked;
   const hasBanner = Boolean(props.event.banner);
   const showBanner = props.variant !== "none" && hasBanner;
   const renderedContent = useMemo(() => {
@@ -986,7 +1001,8 @@ function EventDetail(props: {
           <div
             className={clsx(
               "text-base font-semibold leading-snug",
-              isStrike && "opacity-60 line-through"
+              isDimmed && "opacity-60",
+              shouldStrike && "line-through"
             )}
           >
             {props.event.title}
@@ -1029,7 +1045,8 @@ function EventDetail(props: {
       <div
         className={clsx(
           "text-base font-semibold leading-snug",
-          isStrike && "opacity-60 line-through"
+          isDimmed && "opacity-60",
+          shouldStrike && "line-through"
         )}
       >
         {props.event.title}
@@ -1085,7 +1102,8 @@ function EventListRow(props: {
   onToggleCompleted: () => void;
 }) {
   const isEnd = props.now.isAfter(props.event._e);
-  const isStrike = props.checked || isEnd;
+  const isDimmed = props.checked || isEnd;
+  const shouldStrike = isEnd && !props.checked;
 
   return (
     <div
@@ -1107,7 +1125,13 @@ function EventListRow(props: {
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className={clsx("text-sm font-semibold leading-snug", isStrike && "opacity-70 line-through")}>
+        <div
+          className={clsx(
+            "text-sm font-semibold leading-snug",
+            isDimmed && "opacity-70",
+            shouldStrike && "line-through"
+          )}
+        >
           {props.event.title}
         </div>
         <div className="mt-1 text-[11px] text-[color:var(--muted)] font-mono">
@@ -1311,6 +1335,20 @@ function makeRecurringFormStateFromActivity(activity: RecurringActivity): Recurr
   };
 }
 
+function isRecurringFormStateEqual(a: RecurringFormState, b: RecurringFormState): boolean {
+  return (
+    a.title === b.title &&
+    a.kind === b.kind &&
+    a.monthlyDay === b.monthlyDay &&
+    a.weeklyWeekday === b.weeklyWeekday &&
+    a.time === b.time &&
+    a.intervalStartDate === b.intervalStartDate &&
+    a.intervalDays === b.intervalDays &&
+    a.durationDays === b.durationDays &&
+    a.customCron === b.customCron
+  );
+}
+
 function buildCronFromForm(form: RecurringFormState): string {
   if (form.kind === "cron") return form.customCron;
 
@@ -1443,6 +1481,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
+  const [pendingDeleteRecurringId, setPendingDeleteRecurringId] = useState<string | null>(null);
   const gameMeta = GAME_META[props.gameId];
   const eventDetailVariant = EVENT_DETAIL_VARIANT_BY_GAME[props.gameId];
   const showNotStarted = prefs.timeline.showNotStarted;
@@ -1465,7 +1504,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 60_000);
     return () => clearInterval(t);
-	  }, []);
+  }, []);
 
   // When switching games, reset UI state.
   useEffect(() => {
@@ -1475,7 +1514,29 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     setRecurringForm(makeRecurringFormState(dayjs()));
     setRecurringFormError(null);
     setEditingRecurringId(null);
+    setPendingDeleteRecurringId(null);
   }, [props.gameId]);
+
+  useEffect(() => {
+    if (!pendingDeleteRecurringId) return;
+
+    const clearPendingDelete = (e: MouseEvent | TouchEvent) => {
+      const target = e.target;
+      if (!(target instanceof Element)) {
+        setPendingDeleteRecurringId(null);
+        return;
+      }
+      if (target.closest("[data-recurring-delete-id]")) return;
+      setPendingDeleteRecurringId(null);
+    };
+
+    document.addEventListener("mousedown", clearPendingDelete);
+    document.addEventListener("touchstart", clearPendingDelete, { passive: true });
+    return () => {
+      document.removeEventListener("mousedown", clearPendingDelete);
+      document.removeEventListener("touchstart", clearPendingDelete);
+    };
+  }, [pendingDeleteRecurringId]);
 
   const toggleSelectedFromList = (eventId: string | number) => {
     // Mirror the timeline behavior: clicking the same list item again closes the detail panel.
@@ -1676,6 +1737,12 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     );
   }, [activeTimelineEvents, rangeStart, rangeEnd]);
 
+  // Start from an arbitrary (but stable) palette color per game; keep palette order unchanged.
+  const timelineBarColorStartOffset = useMemo(
+    () => hashString(props.gameId) % TIMELINE_BAR_COLORS.length,
+    [props.gameId]
+  );
+
   const isTimelineEmpty = activeTimelineEvents.length === 0;
 
   // If the detail panel was opened by clicking the timeline, and that event becomes completed
@@ -1758,6 +1825,15 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
   const recurringDefinitionsSorted = useMemo(() => {
     return [...recurringDefs].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
   }, [recurringDefs]);
+  const editingTargetActivity = useMemo(
+    () => (editingRecurringId ? recurringDefs.find((a) => a.id === editingRecurringId) ?? null : null),
+    [editingRecurringId, recurringDefs]
+  );
+  const hasUnsavedEditingChanges = useMemo(() => {
+    if (!editingTargetActivity) return false;
+    const originalForm = makeRecurringFormStateFromActivity(editingTargetActivity);
+    return !isRecurringFormStateEqual(recurringForm, originalForm);
+  }, [editingTargetActivity, recurringForm]);
 
   const recurringCronPreview = useMemo(() => buildCronFromForm(recurringForm), [recurringForm]);
   const recurringCronValidationError = useMemo(() => {
@@ -1773,13 +1849,14 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
     setEditingRecurringId(null);
     setRecurringForm(makeRecurringFormState(dayjs()));
     setRecurringFormError(null);
+    setPendingDeleteRecurringId(null);
   };
 
-  const handleSubmitRecurring = () => {
+  const handleSubmitRecurring = (): boolean => {
     const { value, error } = parseRecurringForm(recurringForm);
     if (!value || error) {
       setRecurringFormError(error ?? "循环活动参数不合法");
-      return;
+      return false;
     }
     if (editingRecurringId) {
       updateRecurringActivity(props.gameId, editingRecurringId, value);
@@ -1787,6 +1864,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
       addRecurringActivity(props.gameId, value);
     }
     resetRecurringForm();
+    return true;
   };
 
   return (
@@ -1884,159 +1962,159 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                     </div>
                   ))}
                 </div>
-            </div>
+              </div>
 
-            {/* Bars */}
-            <div className="relative">
-              {/* Month separators */}
-              {!showWeekSeparators ? (
-                <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
-                  {months.map((m, idx) => (
+              {/* Bars */}
+              <div className="relative">
+                {/* Month separators */}
+                {!showWeekSeparators ? (
+                  <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
+                    {months.map((m, idx) => (
+                      <div
+                        key={m.key}
+                        className={clsx(
+                          idx < months.length - 1 && "border-r border-[color:var(--line)]"
+                        )}
+                        style={{ width: `${m.width}%` }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {showWeekSeparators ? (
+                  <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
+                    {weeks.map((w, idx) => (
+                      <div
+                        key={`week-separator-${w.key}`}
+                        className={clsx(
+                          idx < weeks.length - 1 && "border-r border-[color:var(--line)]"
+                        )}
+                        style={{ width: `${w.width}%` }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+
+                {timelineEvents.map((e, idx) => {
+                  const isSelected = selectedId === e.id;
+                  const isEnd = now.isAfter(e._e);
+                  const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
+                  const remainingDays = Math.floor(remainingMs / DAY_MS);
+                  const remainingHours = Math.floor(remainingMs / HOUR_MS);
+                  const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
+                  const showMinutes = !isEnd && remainingMs < HOUR_MS;
+                  const showHours = !isEnd && remainingMs < DAY_MS && !showMinutes;
+                  const remainingLabel = showMinutes
+                    ? `${remainingMinutes}分`
+                    : showHours
+                      ? `${remainingHours}h`
+                      : `${remainingDays}d`;
+                  const remainingAriaLabel = showMinutes
+                    ? `剩余${remainingMinutes}分钟`
+                    : showHours
+                      ? `剩余${remainingHours}小时`
+                      : `剩余${remainingDays}天`;
+                  const isUrgent = isUrgentByRemainingMs(e.kind, remainingMs);
+
+                  const isTruncatedStart = e._s.isBefore(rangeStart);
+                  const isTruncatedEnd = e._e.isAfter(rangeEnd);
+
+                  const startMs = Math.max(e._s.valueOf(), rangeStart.valueOf());
+                  const endMs = Math.min(e._e.valueOf(), rangeEnd.valueOf());
+
+                  const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
+                  const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
+                  const showCountdownOnly = width <= 88;
+                  const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
+                  const countdownUnits = Array.from(remainingLabel).reduce(
+                    (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
+                    0
+                  );
+                  const countdownAvailableWidth = Math.max(0, width - countdownPaddingX * 2);
+                  const countdownFontSize = showCountdownOnly
+                    ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
+                    : 13;
+
+                  const barColor = timelineColorAt(idx, timelineBarColorStartOffset);
+
+                  // Determine border radius based on truncation
+                  let borderRadius = "0.75rem"; // rounded-xl
+                  if (isTruncatedStart && isTruncatedEnd) {
+                    borderRadius = "0";
+                  } else if (isTruncatedStart) {
+                    borderRadius = "0 0.75rem 0.75rem 0";
+                  } else if (isTruncatedEnd) {
+                    borderRadius = "0.75rem 0 0 0.75rem";
+                  }
+
+                  return (
                     <div
-                      key={m.key}
+                      key={String(e.id)}
                       className={clsx(
-                        idx < months.length - 1 && "border-r border-[color:var(--line)]"
+                        "relative border-b border-[color:var(--line)]",
+                        "hover:bg-white/20 dark:hover:bg-transparent"
                       )}
-                      style={{ width: `${m.width}%` }}
-                    />
-                  ))}
-                </div>
-              ) : null}
-              {showWeekSeparators ? (
-                <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
-                  {weeks.map((w, idx) => (
-                    <div
-                      key={`week-separator-${w.key}`}
-                      className={clsx(
-                        idx < weeks.length - 1 && "border-r border-[color:var(--line)]"
-                      )}
-                      style={{ width: `${w.width}%` }}
-                    />
-                  ))}
-                </div>
-              ) : null}
-
-              {timelineEvents.map((e, idx) => {
-                const isSelected = selectedId === e.id;
-                const isEnd = now.isAfter(e._e);
-                const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
-                const remainingDays = Math.floor(remainingMs / DAY_MS);
-                const remainingHours = Math.floor(remainingMs / HOUR_MS);
-                const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
-                const showMinutes = !isEnd && remainingMs < HOUR_MS;
-                const showHours = !isEnd && remainingMs < DAY_MS && !showMinutes;
-                const remainingLabel = showMinutes
-                  ? `${remainingMinutes}分`
-                  : showHours
-                    ? `${remainingHours}h`
-                    : `${remainingDays}d`;
-                const remainingAriaLabel = showMinutes
-                  ? `剩余${remainingMinutes}分钟`
-                  : showHours
-                    ? `剩余${remainingHours}小时`
-                    : `剩余${remainingDays}天`;
-                const isUrgent = isUrgentByRemainingMs(e.kind, remainingMs);
-
-                const isTruncatedStart = e._s.isBefore(rangeStart);
-                const isTruncatedEnd = e._e.isAfter(rangeEnd);
-
-                const startMs = Math.max(e._s.valueOf(), rangeStart.valueOf());
-                const endMs = Math.min(e._e.valueOf(), rangeEnd.valueOf());
-
-                const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
-                const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
-                const showCountdownOnly = width <= 88;
-                const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
-                const countdownUnits = Array.from(remainingLabel).reduce(
-                  (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
-                  0
-                );
-                const countdownAvailableWidth = Math.max(0, width - countdownPaddingX * 2);
-                const countdownFontSize = showCountdownOnly
-                  ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
-                  : 13;
-
-                const [colorA, colorB] = TIMELINE_BAR_GRADIENTS[idx % TIMELINE_BAR_GRADIENTS.length]!;
-
-                // Determine border radius based on truncation
-                let borderRadius = "0.75rem"; // rounded-xl
-                if (isTruncatedStart && isTruncatedEnd) {
-                  borderRadius = "0";
-                } else if (isTruncatedStart) {
-                  borderRadius = "0 0.75rem 0.75rem 0";
-                } else if (isTruncatedEnd) {
-                  borderRadius = "0.75rem 0 0 0.75rem";
-                }
-
-                return (
-                  <div
-                    key={String(e.id)}
-                    className={clsx(
-                      "relative border-b border-[color:var(--line)]",
-                      "hover:bg-white/20 dark:hover:bg-transparent"
-                    )}
-                    style={{ height: 56 }}
-                  >
-                    <div
-                      className={clsx(
-                        "absolute top-2 bottom-2 py-2 overflow-hidden",
-                        "flex items-center",
-                        showCountdownOnly ? "justify-center" : "px-3",
-                        "z-10 text-[13px] leading-5 shadow-sm cursor-pointer",
-                        "transition-[box-shadow,filter] duration-150 ease-out",
-                        "hover:shadow-md hover:brightness-105",
-                        isSelected
-                          ? "ring-2 ring-[color:var(--ring)]"
-                          : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
-                      )}
-                      style={{
-                        left,
-                        width,
-                        background: `linear-gradient(90deg, ${colorA}, ${colorB})`,
-                        opacity: isEnd ? 0.55 : 0.95,
-                        borderRadius,
-                        ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
-                      }}
-                      onClick={() => {
-                        // Clicking the same timeline event again should hide the detail panel.
-                        if (selectedId === e.id && selectedFrom === "timeline") {
-                          setSelectedId(null);
-                          setSelectedFrom(null);
-                          return;
-                        }
-                        setSelectedId(e.id);
-                        setSelectedFrom("timeline");
-                      }}
+                      style={{ height: 56 }}
                     >
-                      {!showCountdownOnly ? (
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className={clsx(
-                              "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
-                              isEnd && "line-through"
-                            )}
-                          >
-                            {e.title}
-                          </div>
-                        </div>
-                      ) : null}
                       <div
                         className={clsx(
-                          "leading-none font-mono tabular-nums font-medium",
-                          showCountdownOnly ? "w-full min-w-0 text-center whitespace-nowrap" : "shrink-0 pl-2 text-[13px]",
-                          isUrgent ? "text-red-700" : "text-slate-800/70"
+                          "absolute top-2 bottom-2 py-2 overflow-hidden",
+                          "flex items-center",
+                          showCountdownOnly ? "justify-center" : "px-3",
+                          "z-10 text-[13px] leading-5 shadow-sm cursor-pointer",
+                          "transition-[box-shadow,filter] duration-150 ease-out",
+                          "hover:shadow-md hover:brightness-105",
+                          isSelected
+                            ? "ring-2 ring-[color:var(--ring)]"
+                            : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
                         )}
-                        style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
-                        aria-label={remainingAriaLabel}
+                        style={{
+                          left,
+                          width,
+                          backgroundColor: barColor,
+                          opacity: isEnd ? 0.55 : 0.95,
+                          borderRadius,
+                          ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
+                        }}
+                        onClick={() => {
+                          // Clicking the same timeline event again should hide the detail panel.
+                          if (selectedId === e.id && selectedFrom === "timeline") {
+                            setSelectedId(null);
+                            setSelectedFrom(null);
+                            return;
+                          }
+                          setSelectedId(e.id);
+                          setSelectedFrom("timeline");
+                        }}
                       >
-                        {remainingLabel}
+                        {!showCountdownOnly ? (
+                          <div className="min-w-0 flex-1">
+                            <div
+                              className={clsx(
+                                "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
+                                isEnd && "line-through"
+                              )}
+                            >
+                              {e.title}
+                            </div>
+                          </div>
+                        ) : null}
+                        <div
+                          className={clsx(
+                            "leading-none font-mono tabular-nums font-medium",
+                            showCountdownOnly ? "w-full min-w-0 text-center whitespace-nowrap" : "shrink-0 pl-2 text-[13px]",
+                            isUrgent ? "text-red-700" : "text-slate-800/70"
+                          )}
+                          style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
+                          aria-label={remainingAriaLabel}
+                        >
+                          {remainingLabel}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </div>
           )}
         </div>
       </div>
@@ -2080,7 +2158,7 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
 
       <div className="grid gap-3 md:grid-cols-2">
         <EventListPanel
-          title="所有活动"
+          title="限时活动"
           events={activeUpstreamEvents}
           emptyText="暂无未完成活动"
           checked={false}
@@ -2090,250 +2168,240 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
           onToggleCompleted={(event) => toggleCompleted(event.id)}
         />
 
-          <div className="glass shadow-ink rounded-2xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)] flex items-center justify-between gap-3">
+        <div className="glass shadow-ink rounded-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)] flex items-center justify-between gap-3">
+            <div className="flex items-end gap-2 min-w-0">
               <div className="text-sm font-semibold">循环活动</div>
-              <button
-                type="button"
-                className={clsx(
-                  "inline-flex items-center justify-center rounded-md transition-colors",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isRecurringSettingsOpen ? "text-[color:var(--accent)]" : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-                )}
-                onClick={() => {
-                  if (isRecurringSettingsOpen) {
-                    setIsRecurringSettingsOpen(false);
-                    resetRecurringForm();
-                    return;
-                  }
-                  setIsRecurringSettingsOpen(true);
-                  setRecurringFormError(null);
-                }}
-                aria-label={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
-                title={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
-                aria-haspopup="dialog"
-                aria-expanded={isRecurringSettingsOpen}
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065Z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
-                  />
-                </svg>
-              </button>
+              {editingRecurringId ? (
+                <div className="text-xs text-[color:var(--accent)] whitespace-nowrap leading-none">正在编辑循环活动</div>
+              ) : null}
             </div>
-            {isRecurringSettingsOpen ? (
-              <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]/40">
-                <form
-                  className="grid gap-3"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleSubmitRecurring();
-                  }}
-                >
-                  {editingRecurringId ? (
-                    <div className="text-xs text-[color:var(--accent)]">正在编辑循环活动</div>
-                  ) : null}
+            <button
+              type="button"
+              className={clsx(
+                "inline-flex items-center justify-center rounded-md transition-colors",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                isRecurringSettingsOpen ? "text-[color:var(--accent)]" : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+              )}
+              onClick={() => {
+                if (isRecurringSettingsOpen) {
+                  setIsRecurringSettingsOpen(false);
+                  resetRecurringForm();
+                  return;
+                }
+                setIsRecurringSettingsOpen(true);
+                setRecurringFormError(null);
+              }}
+              aria-label={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
+              title={isRecurringSettingsOpen ? "关闭循环活动设置" : "打开循环活动设置"}
+              aria-haspopup="dialog"
+              aria-expanded={isRecurringSettingsOpen}
+            >
+              <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeLinejoin="round">
+                <circle cx="16" cy="16" r="4" strokeWidth="2" />
+                <path
+                  strokeWidth="2"
+                  strokeMiterlimit="10"
+                  d="M27.758 10.366l-1-1.732a2 2 0 0 0-2.732-.732l-.526.304c-2 1.154-4.5-.289-4.5-2.598V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v.608c0 2.309-2.5 3.753-4.5 2.598l-.526-.304a2 2 0 0 0-2.732.732l-1 1.732a2 2 0 0 0 .732 2.732l.526.304c2 1.155 2 4.041 0 5.196l-.526.304a2 2 0 0 0-.732 2.732l1 1.732a2 2 0 0 0 2.732.732l.526-.304c2-1.155 4.5.289 4.5 2.598V27a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-.608c0-2.309 2.5-3.753 4.5-2.598l.526.304a2 2 0 0 0 2.732-.732l1-1.732a2 2 0 0 0-.732-2.732l-.526-.304c-2-1.155-2-4.041 0-5.196l.526-.304a2 2 0 0 0 .732-2.732z"
+                />
+              </svg>
+            </button>
+          </div>
+          {isRecurringSettingsOpen ? (
+            <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]/40">
+              <form
+                className="grid gap-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSubmitRecurring();
+                }}
+              >
+                <div className="grid gap-2 md:grid-cols-2">
+                  <label className="grid gap-1">
+                    <span className="text-xs text-[color:var(--muted)]">活动名称</span>
+                    <input
+                      id="event_title"
+                      name="event_title"
+                      type="text"
+                      value={recurringForm.title}
+                      onChange={(e) => {
+                        setRecurringForm((prev) => ({ ...prev, title: e.target.value }));
+                        if (recurringFormError) setRecurringFormError(null);
+                      }}
+                      placeholder="例如：深境螺旋"
+                      className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
+                    />
+                  </label>
 
-                  <div className="grid gap-2 md:grid-cols-2">
+                  <label className="grid gap-1">
+                    <span className="text-xs text-[color:var(--muted)]">刷新时间（{recurringTzLabel}）</span>
+                    <input
+                      type="time"
+                      value={recurringForm.time}
+                      disabled={recurringForm.kind === "cron"}
+                      onChange={(e) => {
+                        setRecurringForm((prev) => ({ ...prev, time: e.target.value }));
+                        if (recurringFormError) setRecurringFormError(null);
+                      }}
+                      className={clsx(
+                        "w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm",
+                        recurringForm.kind === "cron" && "opacity-70 cursor-not-allowed"
+                      )}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-2">
+                  <label className={clsx("grid gap-1", recurringForm.kind === "cron" && "md:col-span-2")}>
+                    <span className="text-xs text-[color:var(--muted)]">循环方式</span>
+                    <select
+                      value={recurringForm.kind}
+                      onChange={(e) => {
+                        const kind = e.target.value as RecurringFormRuleKind;
+                        setRecurringForm((prev) => {
+                          if (kind !== "cron") return { ...prev, kind };
+                          const nextCron = prev.customCron.trim() ? prev.customCron : buildCronFromForm(prev);
+                          return { ...prev, kind, customCron: nextCron };
+                        });
+                        if (recurringFormError) setRecurringFormError(null);
+                      }}
+                      className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
+                    >
+                      <option value="monthly">每月</option>
+                      <option value="weekly">每周</option>
+                      <option value="interval">固定天数</option>
+                      <option value="cron">自定义 Cron</option>
+                    </select>
+                  </label>
+
+                  {recurringForm.kind === "monthly" ? (
                     <label className="grid gap-1">
-                      <span className="text-xs text-[color:var(--muted)]">活动名称</span>
+                      <span className="text-xs text-[color:var(--muted)]">每月几号</span>
                       <input
-                        id="event_title"
-                        name="event_title"
-                        type="text"
-                        value={recurringForm.title}
+                        type="number"
+                        min="1"
+                        max="31"
+                        value={recurringForm.monthlyDay}
                         onChange={(e) => {
-                          setRecurringForm((prev) => ({ ...prev, title: e.target.value }));
+                          setRecurringForm((prev) => ({ ...prev, monthlyDay: e.target.value }));
                           if (recurringFormError) setRecurringFormError(null);
                         }}
-                        placeholder="例如：深境螺旋"
                         className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
                       />
                     </label>
-
+                  ) : recurringForm.kind === "weekly" ? (
                     <label className="grid gap-1">
-                      <span className="text-xs text-[color:var(--muted)]">刷新时间（{recurringTzLabel}）</span>
-                      <input
-                        type="time"
-                        value={recurringForm.time}
-                        disabled={recurringForm.kind === "cron"}
-                        onChange={(e) => {
-                          setRecurringForm((prev) => ({ ...prev, time: e.target.value }));
-                          if (recurringFormError) setRecurringFormError(null);
-                        }}
-                        className={clsx(
-                          "w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm",
-                          recurringForm.kind === "cron" && "opacity-70 cursor-not-allowed"
-                        )}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="grid gap-2 md:grid-cols-2">
-                    <label className={clsx("grid gap-1", recurringForm.kind === "cron" && "md:col-span-2")}>
-                      <span className="text-xs text-[color:var(--muted)]">循环方式</span>
+                      <span className="text-xs text-[color:var(--muted)]">每周几</span>
                       <select
-                        value={recurringForm.kind}
+                        value={recurringForm.weeklyWeekday}
                         onChange={(e) => {
-                          const kind = e.target.value as RecurringFormRuleKind;
-                          setRecurringForm((prev) => {
-                            if (kind !== "cron") return { ...prev, kind };
-                            const nextCron = prev.customCron.trim() ? prev.customCron : buildCronFromForm(prev);
-                            return { ...prev, kind, customCron: nextCron };
-                          });
+                          setRecurringForm((prev) => ({ ...prev, weeklyWeekday: e.target.value }));
                           if (recurringFormError) setRecurringFormError(null);
                         }}
                         className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
                       >
-                        <option value="monthly">每月</option>
-                        <option value="weekly">每周</option>
-                        <option value="interval">固定天数</option>
-                        <option value="cron">自定义 Cron</option>
+                        {WEEKDAY_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={String(opt.value)}>
+                            {opt.label}
+                          </option>
+                        ))}
                       </select>
                     </label>
-
-                    {recurringForm.kind === "monthly" ? (
-                      <label className="grid gap-1">
-                        <span className="text-xs text-[color:var(--muted)]">每月几号</span>
-                        <input
-                          type="number"
-                          min="1"
-                          max="31"
-                          value={recurringForm.monthlyDay}
-                          onChange={(e) => {
-                            setRecurringForm((prev) => ({ ...prev, monthlyDay: e.target.value }));
-                            if (recurringFormError) setRecurringFormError(null);
-                          }}
-                          className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
-                        />
-                      </label>
-                    ) : recurringForm.kind === "weekly" ? (
-                      <label className="grid gap-1">
-                        <span className="text-xs text-[color:var(--muted)]">每周几</span>
-                        <select
-                          value={recurringForm.weeklyWeekday}
-                          onChange={(e) => {
-                            setRecurringForm((prev) => ({ ...prev, weeklyWeekday: e.target.value }));
-                            if (recurringFormError) setRecurringFormError(null);
-                          }}
-                          className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
-                        >
-                          {WEEKDAY_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={String(opt.value)}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : recurringForm.kind === "interval" ? (
-                      <label className="grid gap-1">
-                        <span className="text-xs text-[color:var(--muted)]">开始日期</span>
-                        <input
-                          type="date"
-                          value={recurringForm.intervalStartDate}
-                          onChange={(e) => {
-                            setRecurringForm((prev) => ({ ...prev, intervalStartDate: e.target.value }));
-                            if (recurringFormError) setRecurringFormError(null);
-                          }}
-                          className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
-                        />
-                      </label>
-                    ) : null}
-                  </div>
-
-                  <div className="grid gap-2 md:grid-cols-2">
-                    {recurringForm.kind === "interval" ? (
-                      <label className="grid gap-1">
-                        <span className="text-xs text-[color:var(--muted)]">循环天数</span>
-                        <input
-                          type="number"
-                          min="1"
-                          max="3650"
-                          value={recurringForm.intervalDays}
-                          onChange={(e) => {
-                            setRecurringForm((prev) => ({ ...prev, intervalDays: e.target.value }));
-                            if (recurringFormError) setRecurringFormError(null);
-                          }}
-                          className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
-                        />
-                      </label>
-                    ) : (
-                      <label className="grid gap-1">
-                        <span className="text-xs text-[color:var(--muted)]">Cron表达式</span>
-                        <input
-                          type="text"
-                          value={recurringCronPreview}
-                          readOnly={recurringForm.kind !== "cron"}
-                          placeholder="例如：0 4 * * 1"
-                          onChange={(e) => {
-                            if (recurringForm.kind !== "cron") return;
-                            const nextCron = e.target.value;
-                            setRecurringForm((prev) => {
-                              const nextTime = deriveTimeFromCronExpression(nextCron);
-                              if (!nextTime) return { ...prev, customCron: nextCron };
-                              return { ...prev, customCron: nextCron, time: nextTime };
-                            });
-                            if (recurringFormError) setRecurringFormError(null);
-                          }}
-                          className={clsx(
-                            "w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm font-mono",
-                            recurringForm.kind === "cron" && recurringCronValidationError && "border-red-400",
-                            recurringForm.kind !== "cron" && "opacity-70 cursor-not-allowed"
-                          )}
-                        />
-                      </label>
-                    )}
-
+                  ) : recurringForm.kind === "interval" ? (
                     <label className="grid gap-1">
-                      <span className="text-xs text-[color:var(--muted)]">持续天数（可选）</span>
+                      <span className="text-xs text-[color:var(--muted)]">开始日期</span>
                       <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        value={recurringForm.durationDays}
-                        placeholder="留空为连续循环"
+                        type="date"
+                        value={recurringForm.intervalStartDate}
                         onChange={(e) => {
-                          setRecurringForm((prev) => ({ ...prev, durationDays: e.target.value }));
+                          setRecurringForm((prev) => ({ ...prev, intervalStartDate: e.target.value }));
                           if (recurringFormError) setRecurringFormError(null);
                         }}
                         className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
                       />
                     </label>
-                  </div>
-
-                  {recurringForm.kind === "cron" && recurringCronValidationError ? (
-                    <div className="text-[11px] text-red-500">{recurringCronValidationError}</div>
                   ) : null}
+                </div>
 
-                  <div className="text-[11px] text-[color:var(--muted)]">
+                <div className="grid gap-2 md:grid-cols-2">
+                  {recurringForm.kind === "interval" ? (
+                    <label className="grid gap-1">
+                      <span className="text-xs text-[color:var(--muted)]">循环天数</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="3650"
+                        value={recurringForm.intervalDays}
+                        onChange={(e) => {
+                          setRecurringForm((prev) => ({ ...prev, intervalDays: e.target.value }));
+                          if (recurringFormError) setRecurringFormError(null);
+                        }}
+                        className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
+                      />
+                    </label>
+                  ) : (
+                    <label className="grid gap-1">
+                      <span className="text-xs text-[color:var(--muted)]">Cron表达式</span>
+                      <input
+                        type="text"
+                        value={recurringCronPreview}
+                        readOnly={recurringForm.kind !== "cron"}
+                        placeholder="例如：0 4 * * 1"
+                        onChange={(e) => {
+                          if (recurringForm.kind !== "cron") return;
+                          const nextCron = e.target.value;
+                          setRecurringForm((prev) => {
+                            const nextTime = deriveTimeFromCronExpression(nextCron);
+                            if (!nextTime) return { ...prev, customCron: nextCron };
+                            return { ...prev, customCron: nextCron, time: nextTime };
+                          });
+                          if (recurringFormError) setRecurringFormError(null);
+                        }}
+                        className={clsx(
+                          "w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm font-mono",
+                          recurringForm.kind === "cron" && recurringCronValidationError && "border-red-400",
+                          recurringForm.kind !== "cron" && "opacity-70 cursor-not-allowed"
+                        )}
+                      />
+                    </label>
+                  )}
+
+                  <label className="grid gap-1">
+                    <span className="text-xs text-[color:var(--muted)]">持续天数（可选）</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="3650"
+                      value={recurringForm.durationDays}
+                      placeholder="留空为连续循环"
+                      onChange={(e) => {
+                        setRecurringForm((prev) => ({ ...prev, durationDays: e.target.value }));
+                        if (recurringFormError) setRecurringFormError(null);
+                      }}
+                      className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
+                    />
+                  </label>
+                </div>
+
+                {recurringForm.kind === "cron" && recurringCronValidationError ? (
+                  <div className="text-[11px] text-red-500">{recurringCronValidationError}</div>
+                ) : null}
+
+                <div className="grid gap-2 md:grid-cols-[3fr_1fr] md:items-start">
+                  <div className="min-w-0 text-left text-[11px] text-[color:var(--muted)] break-words md:pr-2 md:min-h-[36px] md:flex md:items-center">
                     {recurringForm.kind === "interval"
-                      ? `自 ${recurringForm.intervalStartDate || "（未设置）"} 起每 ${
-                          recurringForm.intervalDays || "N"
-                        } 天 ${recurringForm.time || "00:00"} 刷新（${recurringTzLabel}）`
+                      ? `自 ${recurringForm.intervalStartDate || "（未设置）"} 起每 ${recurringForm.intervalDays || "N"
+                      } 天 ${recurringForm.time || "00:00"} 刷新（${recurringTzLabel}）`
                       : recurringCronPreview
                         ? formatCronHumanReadable(recurringCronPreview)
                         : "（空）"}
                   </div>
-
-                  {recurringFormError ? (
-                    <div className="text-xs text-red-500">{recurringFormError}</div>
-                  ) : null}
-
-                  <div className="flex justify-end gap-2">
+                  <div className="flex items-center gap-2 md:justify-end">
                     {editingRecurringId ? (
                       <button
                         type="button"
                         onClick={resetRecurringForm}
-                        className="px-3 py-2 rounded-xl text-sm border border-[color:var(--line)] transition hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]"
+                        className="px-3 py-2 rounded-xl text-sm border border-[color:var(--line)] transition hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)] whitespace-nowrap"
                       >
                         取消
                       </button>
@@ -2342,7 +2410,8 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                       type="submit"
                       disabled={isRecurringSubmitDisabled}
                       className={clsx(
-                        "px-3 py-2 rounded-xl text-sm border border-[color:var(--line)] transition",
+                        "px-3 py-2 rounded-xl text-sm border border-[color:var(--line)] transition whitespace-nowrap",
+                        !editingRecurringId && "w-full",
                         "hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]",
                         isRecurringSubmitDisabled && "opacity-50 cursor-not-allowed hover:border-[color:var(--line)] hover:bg-transparent"
                       )}
@@ -2350,86 +2419,119 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
                       {editingRecurringId ? "保存" : "添加循环活动"}
                     </button>
                   </div>
-                </form>
+                </div>
 
-                <div className="mt-3 pt-3 border-t border-[color:var(--line)] grid gap-2">
-                  <div className="text-xs text-[color:var(--muted)]">已配置项目</div>
-                  {recurringDefinitionsSorted.length > 0 ? (
-                    recurringDefinitionsSorted.map((activity) => (
-                      <div
-                        key={activity.id}
-                        className="rounded-xl border border-[color:var(--line)] px-2 py-2 flex items-start justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium break-words">{activity.title}</div>
-                          <div className="text-[11px] text-[color:var(--muted)] mt-1">
-                            {formatRecurringRule(props.gameId, activity.rule, activity.durationDays)}
-                          </div>
-                        </div>
-                        <div className="shrink-0 flex items-center gap-2">
-                          <button
-                            type="button"
-                            className={clsx(
-                              "text-xs px-2 py-1 rounded-lg border border-[color:var(--line)] transition",
-                              "hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]",
-                              editingRecurringId === activity.id && "border-[color:var(--accent)] text-[color:var(--accent)]"
-                            )}
-                            onClick={() => {
-                              setIsRecurringSettingsOpen(true);
-                              setEditingRecurringId(activity.id);
-                              setRecurringForm(makeRecurringFormStateFromActivity(activity));
-                              setRecurringFormError(null);
-                            }}
-                          >
-                            修改
-                          </button>
-                          <button
-                            type="button"
-                            className="text-xs px-2 py-1 rounded-lg border border-[color:var(--line)] hover:border-red-400 hover:text-red-500 transition"
-                            onClick={() => {
-                              if (editingRecurringId === activity.id) resetRecurringForm();
-                              removeRecurringActivity(props.gameId, activity.id);
-                            }}
-                          >
-                            删除
-                          </button>
+                {recurringFormError ? (
+                  <div className="text-xs text-red-500">{recurringFormError}</div>
+                ) : null}
+              </form>
+
+              <div className="mt-3 pt-3 border-t border-[color:var(--line)] grid gap-2">
+                <div className="text-xs text-[color:var(--muted)]">已配置项目</div>
+                {recurringDefinitionsSorted.length > 0 ? (
+                  recurringDefinitionsSorted.map((activity) => (
+                    <div
+                      key={activity.id}
+                      className="rounded-xl border border-[color:var(--line)] px-2 py-2 flex items-start justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium break-words">{activity.title}</div>
+                        <div className="text-[11px] text-[color:var(--muted)] mt-1">
+                          {formatRecurringRule(props.gameId, activity.rule, activity.durationDays)}
                         </div>
                       </div>
-                    ))
-                  ) : (
-                    <div className="text-xs text-[color:var(--muted)]">当前游戏尚未配置循环活动</div>
-                  )}
-                </div>
+                      <div className="shrink-0 flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={clsx(
+                            "text-xs px-2 py-1 rounded-lg border transition",
+                            editingRecurringId === activity.id
+                              ? "border-[color:var(--accent)] text-[color:var(--accent)] bg-[color:var(--tile)]/40"
+                              : "border-[color:var(--line)] hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]"
+                          )}
+                          onClick={() => {
+                            setIsRecurringSettingsOpen(true);
+                            if (editingRecurringId === activity.id) {
+                              if (!hasUnsavedEditingChanges) {
+                                resetRecurringForm();
+                                return;
+                              }
+                              const shouldSave = window.confirm(
+                                "检测到未保存修改，是否先保存？\n点击“确定”保存并退出，点击“取消”直接退出。"
+                              );
+                              if (!shouldSave) {
+                                resetRecurringForm();
+                                return;
+                              }
+                              void handleSubmitRecurring();
+                              return;
+                            }
+                            setEditingRecurringId(activity.id);
+                            setRecurringForm(makeRecurringFormStateFromActivity(activity));
+                            setRecurringFormError(null);
+                            setPendingDeleteRecurringId(null);
+                          }}
+                        >
+                          修改
+                        </button>
+                        <button
+                          type="button"
+                          data-recurring-delete-id={activity.id}
+                          className={clsx(
+                            "text-xs px-2 py-1 rounded-lg border transition",
+                            pendingDeleteRecurringId === activity.id
+                              ? "border-red-500 text-red-500 bg-red-500/10 hover:bg-red-500/15"
+                              : "border-[color:var(--line)] hover:border-red-400 hover:text-red-500"
+                          )}
+                          onClick={() => {
+                            if (pendingDeleteRecurringId !== activity.id) {
+                              setPendingDeleteRecurringId(activity.id);
+                              return;
+                            }
+                            if (editingRecurringId === activity.id) resetRecurringForm();
+                            removeRecurringActivity(props.gameId, activity.id);
+                            setPendingDeleteRecurringId(null);
+                          }}
+                        >
+                          {pendingDeleteRecurringId === activity.id ? "确认" : "删除"}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-xs text-[color:var(--muted)]">当前游戏尚未配置循环活动</div>
+                )}
               </div>
-            ) : null}
-            <div className="divide-y divide-[color:var(--line)]">
-              {activeRecurringEvents.length > 0 ? (
-                activeRecurringEvents.map((event) => (
-                  <EventListRow
-                    key={String(event.id)}
-                    event={event}
-                    checked={false}
-                    isSelected={selectedId === event.id}
-                    now={now}
-                    onSelect={() => {
-                      toggleSelectedFromList(event.id);
-                    }}
-                    onToggleCompleted={() => toggleRecurringCompleted(event.recurringActivityId, event.cycleKey)}
-                  />
-                ))
-              ) : (
-                <div className="p-4 text-xs text-[color:var(--muted)]">
-                  暂无未完成循环活动
-                </div>
-              )}
             </div>
+          ) : null}
+          <div className="divide-y divide-[color:var(--line)]">
+            {activeRecurringEvents.length > 0 ? (
+              activeRecurringEvents.map((event) => (
+                <EventListRow
+                  key={String(event.id)}
+                  event={event}
+                  checked={false}
+                  isSelected={selectedId === event.id}
+                  now={now}
+                  onSelect={() => {
+                    toggleSelectedFromList(event.id);
+                  }}
+                  onToggleCompleted={() => toggleRecurringCompleted(event.recurringActivityId, event.cycleKey)}
+                />
+              ))
+            ) : (
+              <div className="p-4 text-xs text-[color:var(--muted)]">
+                暂无未完成循环活动
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       {completedUpstreamEvents.length > 0 || completedRecurringEvents.length > 0 ? (
         <div className="grid gap-3 md:grid-cols-2">
           <EventListPanel
-            title="已完成活动"
+            title="已完成限时活动"
             titleClassName="text-[color:var(--ink2)]"
             events={completedUpstreamEvents}
             emptyText="暂无已完成活动"
