@@ -1037,6 +1037,7 @@ function EventListRow(props: {
   checked: boolean;
   isSelected: boolean;
   now: Dayjs;
+  showBottomDivider?: boolean;
   onSelect: () => void;
   onToggleCompleted: () => void;
 }) {
@@ -1049,7 +1050,9 @@ function EventListRow(props: {
       className={clsx(
         "p-3 flex items-start gap-3 cursor-pointer transition-colors",
         props.checked && "opacity-60",
-        props.isSelected ? "bg-indigo-50/50 dark:bg-indigo-500/10" : "hover:bg-white/50 dark:hover:bg-white/5"
+        props.isSelected ? "bg-indigo-50/50 dark:bg-indigo-500/10" : "hover:bg-white/50 dark:hover:bg-white/5",
+        props.showBottomDivider
+          && "relative after:pointer-events-none after:absolute after:left-0 after:right-0 after:-bottom-px after:border-b after:border-[color:var(--line)]"
       )}
       onClick={props.onSelect}
     >
@@ -1112,13 +1115,14 @@ function EventListPanel<T extends ParsedEvent>(props: {
 
       <div className="divide-y divide-[color:var(--line)]">
         {props.events.length > 0 ? (
-          props.events.map((event) => (
+          props.events.map((event, idx) => (
             <EventListRow
               key={String(event.id)}
               event={event}
               checked={props.checked}
               isSelected={props.selectedId === event.id}
               now={props.now}
+              showBottomDivider={idx === props.events.length - 1}
               onSelect={() => {
                 props.onSelect(event.id);
               }}
@@ -2499,13 +2503,14 @@ export default function TimelineCalendar(props: { events: CalendarEvent[]; gameI
           ) : null}
           <div className="divide-y divide-[color:var(--line)]">
             {activeRecurringEvents.length > 0 ? (
-              activeRecurringEvents.map((event) => (
+              activeRecurringEvents.map((event, idx) => (
                 <EventListRow
                   key={String(event.id)}
                   event={event}
                   checked={false}
                   isSelected={selectedId === event.id}
                   now={now}
+                  showBottomDivider={idx === activeRecurringEvents.length - 1}
                   onSelect={() => {
                     toggleSelectedFromList(event.id);
                   }}
