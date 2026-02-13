@@ -680,6 +680,21 @@ function formatRange(s: string, e: string) {
   return `${sd.format("MM/DD HH:mm")} ~ ${ed.format("MM/DD HH:mm")}`;
 }
 
+function formatRemainingTimeLabel(end: Dayjs, now: Dayjs): string | null {
+  const remainingMs = end.valueOf() - now.valueOf();
+  if (remainingMs <= 0) return null;
+
+  const remainingDays = Math.floor(remainingMs / DAY_MS);
+  const remainingHours = Math.floor(remainingMs / HOUR_MS);
+  const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
+  const showMinutes = remainingMs < HOUR_MS;
+  const showHours = remainingMs < DAY_MS && !showMinutes;
+
+  if (showMinutes) return `${remainingMinutes}m`;
+  if (showHours) return `${remainingHours}h`;
+  return `${remainingDays}d`;
+}
+
 type VersionTimelineLabelParts = {
   versionTitle: string;
   endLabel: string;
@@ -1009,6 +1024,7 @@ function EventDetail(props: {
   const shouldStrike = isEnd && !props.checked;
   const hasBanner = Boolean(props.event.banner);
   const showBanner = props.variant !== "none" && hasBanner;
+  const remainingLabel = formatRemainingTimeLabel(props.event._e, props.now);
   const renderedContent = useMemo(() => {
     const raw = props.event.content;
     if (!raw) return null;
@@ -1027,6 +1043,7 @@ function EventDetail(props: {
     <div className="p-4 grid gap-3">
       <div className="text-xs text-[color:var(--muted)] font-mono">
         {formatRange(props.event.start_time, props.event.end_time)}
+        {remainingLabel ? <span>{` (${remainingLabel})`}</span> : null}
       </div>
       <div
         className={clsx(
