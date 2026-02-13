@@ -149,3 +149,19 @@ No automated test suite is currently configured. Before opening a PR, prefer:
 - Use `pnpm` (not npm/yarn). Keep `pnpm-lock.yaml` consistent.
 - Do not commit secrets or local `.env` files.
 - Prefer small, focused diffs; update docs when behavior changes.
+
+## Commit Message
+
+- Follow Conventional-style terse subjects with a required type prefix in lowercase:
+  - `feat:` 新功能
+  - `fix:` 问题修复
+  - `chore:` 维护/依赖/脚手架相关变更
+  - `refactor:` 重构
+  - `docs:` 文档更新
+  - `test:` 测试相关
+  - `build:` 构建/打包配置
+- Use format: `<type>: <简短、说明性描述>`
+- Keep描述控制在一行内，避免过度堆砌；
+- 示例：
+  - `fix: update Starrail announcement filters`
+  - `feat: display update time`
