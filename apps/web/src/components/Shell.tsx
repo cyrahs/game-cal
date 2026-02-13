@@ -115,7 +115,6 @@ export default function Shell() {
   const visibleGameIds = prefs.visibleGameIds;
   const gameOrderIds = prefs.gameOrderIds;
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
-  const buildCommitShort = buildCommit === "unknown" ? "unknown" : buildCommit.slice(0, 12);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("games");
   const settingsRef = useRef<HTMLDivElement | null>(null);
@@ -134,6 +133,25 @@ export default function Shell() {
     return matched?.id ?? "genshin";
   }, [location.pathname]);
   const currentDataSource = DATA_SOURCE_BY_GAME[currentGameId];
+  const currentUpstreamUpdatedAtLabel = (() => {
+    const state =
+      currentGameId === "genshin"
+        ? genshinEvents
+        : currentGameId === "starrail"
+          ? starrailEvents
+          : currentGameId === "zzz"
+            ? zzzEvents
+            : currentGameId === "ww"
+              ? wwEvents
+              : currentGameId === "snowbreak"
+                ? snowbreakEvents
+                : endfieldEvents;
+
+    if (state.status !== "success") return null;
+    const d = dayjs(state.updatedAtMs);
+    if (!d.isValid()) return null;
+    return `更新于 ${d.format("MM/DD HH:mm")}`;
+  })();
 
   const handleSyncUuidChange = (value: string) => {
     if (value.length > sync.uuidMaxLength) {
@@ -869,10 +887,15 @@ export default function Shell() {
         </main>
 
         <footer className="mt-10 pb-6 text-xs text-[color:var(--muted)]">
-          <div className="flex items-center justify-between gap-3">
-            <span>数据来源: {currentDataSource}</span>
-            <span className="shrink-0 font-mono" title={`build ${buildCommit}`}>
-              build {buildCommitShort}
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1">
+            <span className="min-w-0">数据来源: {currentDataSource}</span>
+            {currentUpstreamUpdatedAtLabel ? (
+              <span className="min-w-0 font-mono text-[11px]">
+                {currentUpstreamUpdatedAtLabel}
+              </span>
+            ) : null}
+            <span className="min-w-0 font-mono text-[11px]" title={`build ${buildCommit}`}>
+              build {buildCommit}
             </span>
           </div>
         </footer>

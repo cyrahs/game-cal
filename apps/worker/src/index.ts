@@ -45,6 +45,7 @@ const SYNC_WRITE_IDLE_FLUSH_MS = 30_000;
 const SYNC_BUFFER_MAX_ENTRIES = 5_000;
 const SYNC_BUFFER_IDLE_EVICT_MS = 10 * 60 * 1000;
 const SYNC_BUFFER_SWEEP_INTERVAL_MS = 60 * 1000;
+const UPDATED_AT_HEADER = "x-gc-updated-at";
 
 type SyncRateBucket = {
   tokens: number;
@@ -633,10 +634,16 @@ function decodeEventPayload(payload: string): CalendarEvent[] | null {
   }
 }
 
-async function refreshGameEventsToD1(env: Env, game: GameId): Promise<CalendarEvent[]> {
+type EventsWithUpdatedAt = {
+  events: CalendarEvent[];
+  updatedAtMs: number;
+};
+
+async function refreshGameEventsToD1(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
   const events = await fetchEventsForGame(game, env);
-  await writeEventCacheRow(env, game, JSON.stringify(events), Date.now());
-  return events;
+  const updatedAtMs = Date.now();
+  await writeEventCacheRow(env, game, JSON.stringify(events), updatedAtMs);
+  return { events, updatedAtMs };
 }
 
 async function refreshAllGamesToD1(env: Env): Promise<void> {
@@ -690,10 +697,13 @@ async function refreshAllGamesToD1IfNeeded(env: Env): Promise<boolean> {
   return true;
 }
 
-async function getEventsForGameWithCache(env: Env, game: GameId): Promise<CalendarEvent[]> {
+async function getEventsForGameWithCache(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
   const cacheTtlMs = parseCacheTtlMs(env);
   const memoryFallback = async () =>
-    await cache.getOrSet(`events:${game}`, cacheTtlMs, () => fetchEventsForGame(game, env));
+    await cache.getOrSet(`events:${game}`, cacheTtlMs, async () => {
+      const events = await fetchEventsForGame(game, env);
+      return { events, updatedAtMs: Date.now() };
+    });
 
   if (!env.DB) return await memoryFallback();
 
@@ -709,21 +719,25 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Calend
         await triggerRefreshAllGames(env);
         const refreshed = await readEventCacheRow(env, game);
         const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        if (parsed) return parsed;
+        const updatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
+        if (parsed && Number.isFinite(updatedAt) && updatedAt > 0) return { events: parsed, updatedAtMs: updatedAt };
         return await refreshGameEventsToD1(env, game);
       }
 
       const parsed = decodeEventPayload(row.payload);
       const updatedAt = Number(row.updated_at);
-      if (!parsed || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+      if (!parsed || !Number.isFinite(updatedAt) || updatedAt <= 0 || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
         await triggerRefreshAllGames(env);
         const refreshed = await readEventCacheRow(env, game);
         const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        if (refreshedParsed) return refreshedParsed;
+        const refreshedUpdatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
+        if (refreshedParsed && Number.isFinite(refreshedUpdatedAt) && refreshedUpdatedAt > 0) {
+          return { events: refreshedParsed, updatedAtMs: refreshedUpdatedAt };
+        }
         return await refreshGameEventsToD1(env, game);
       }
 
-      return parsed;
+      return { events: parsed, updatedAtMs: updatedAt };
     } catch (err) {
       console.error("D1 event cache failed, fallback to in-memory cache", { game, err });
       return await memoryFallback();
@@ -733,17 +747,18 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Calend
 
 type GameSnapshotData = {
   events: CalendarEvent[];
+  eventsUpdatedAtMs: number;
   version: GameVersionInfo | null;
 };
 
 async function getGameSnapshotWithCache(env: Env, game: GameId): Promise<GameSnapshotData> {
   const cacheTtlMs = parseCacheTtlMs(env);
   return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
-    const [events, version] = await Promise.all([
+    const [eventsRes, version] = await Promise.all([
       getEventsForGameWithCache(env, game),
       fetchCurrentVersionForGame(game, env),
     ]);
-    return { events, version };
+    return { events: eventsRes.events, eventsUpdatedAtMs: eventsRes.updatedAtMs, version };
   });
 }
 
@@ -953,6 +968,20 @@ function parseCorsAllowlist(env: Env): string[] | null {
     .filter(Boolean);
 }
 
+function ensureExposeHeader(h: Headers, name: string): void {
+  const existing = h.get("access-control-expose-headers");
+  if (!existing) {
+    h.set("access-control-expose-headers", name);
+    return;
+  }
+  const parts = existing
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (parts.includes(name.toLowerCase())) return;
+  h.set("access-control-expose-headers", `${existing}, ${name}`);
+}
+
 function withCors(req: Request, env: Env, res: Response): Response {
   const allowlist = parseCorsAllowlist(env);
   if (!allowlist) {
@@ -960,6 +989,7 @@ function withCors(req: Request, env: Env, res: Response): Response {
     const h = new Headers(res.headers);
     h.set("access-control-allow-origin", "*");
     h.append("vary", "origin");
+    ensureExposeHeader(h, UPDATED_AT_HEADER);
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
   }
 
@@ -969,6 +999,7 @@ function withCors(req: Request, env: Env, res: Response): Response {
   const h = new Headers(res.headers);
   h.set("access-control-allow-origin", origin);
   h.append("vary", "origin");
+  ensureExposeHeader(h, UPDATED_AT_HEADER);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
@@ -1084,7 +1115,10 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     const data = snapshot.events;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
-      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+      headers: {
+        "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}`,
+        [UPDATED_AT_HEADER]: String(snapshot.eventsUpdatedAtMs),
+      },
     });
   }
 
@@ -1120,7 +1154,10 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     const data = snapshot.events;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
-      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+      headers: {
+        "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}`,
+        [UPDATED_AT_HEADER]: String(snapshot.eventsUpdatedAtMs),
+      },
     });
   }
 

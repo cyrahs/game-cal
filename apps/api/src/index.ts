@@ -17,6 +17,7 @@ const server = Fastify({ logger: true });
 
 const cache = new SimpleTtlCache();
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 8;
+const UPDATED_AT_HEADER = "x-gc-updated-at";
 
 function parseCacheTtlMs(): number {
   const raw = process.env.CACHE_TTL_SECONDS;
@@ -38,6 +39,7 @@ await server.register(cors, {
     ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean)
     : true,
   allowedHeaders: ["accept", "authorization", "content-type", "origin", "x-requested-with", "x-gc-password"],
+  exposedHeaders: [UPDATED_AT_HEADER],
 });
 
 server.get("/api/health", async () => ({ ok: true }));
@@ -72,6 +74,7 @@ function isGameId(x: unknown): x is GameId {
 type GameSnapshotData = {
   events: Awaited<ReturnType<typeof fetchEventsForGame>>;
   version: Awaited<ReturnType<typeof fetchCurrentVersionForGame>>;
+  updatedAtMs: number;
 };
 
 async function getGameSnapshotData(game: GameId): Promise<GameSnapshotData> {
@@ -81,18 +84,8 @@ async function getGameSnapshotData(game: GameId): Promise<GameSnapshotData> {
       fetchEventsForGame(game, runtimeEnv),
       fetchCurrentVersionForGame(game, runtimeEnv),
     ]);
-    return { events, version };
+    return { events, version, updatedAtMs: Date.now() };
   });
-}
-
-async function getEventsData(game: GameId) {
-  const snapshot = await getGameSnapshotData(game);
-  return snapshot.events;
-}
-
-async function getVersionData(game: GameId) {
-  const snapshot = await getGameSnapshotData(game);
-  return snapshot.version;
 }
 
 server.get<{
@@ -104,9 +97,11 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: [] };
   }
 
-  const data = await getEventsData(game);
+  const snapshot = await getGameSnapshotData(game);
+  const data = snapshot.events;
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
 
@@ -123,9 +118,11 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: [] };
   }
 
-  const data = await getEventsData(game);
+  const snapshot = await getGameSnapshotData(game);
+  const data = snapshot.events;
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
 
@@ -138,9 +135,11 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: null };
   }
 
-  const data = await getVersionData(game);
+  const snapshot = await getGameSnapshotData(game);
+  const data = snapshot.version;
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
 
@@ -157,9 +156,11 @@ server.get<{
     return { code: 400, msg: `Unsupported game: ${game}`, data: null };
   }
 
-  const data = await getVersionData(game);
+  const snapshot = await getGameSnapshotData(game);
+  const data = snapshot.version;
 
   reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
 
