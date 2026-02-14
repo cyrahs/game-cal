@@ -975,11 +975,16 @@ function rgbToCss(rgb: Rgb): string {
 }
 
 function normalizeAnnouncementHtml(html: string, theme: "light" | "dark"): string {
-  if (theme !== "dark") return html;
   if (typeof DOMParser === "undefined") return html;
 
   const doc = new DOMParser().parseFromString(html, "text/html");
   const root = doc.body;
+
+  for (const img of Array.from(root.querySelectorAll("img"))) {
+    img.setAttribute("referrerpolicy", "no-referrer");
+  }
+
+  if (theme !== "dark") return root.innerHTML;
 
   const candidates = root.querySelectorAll<HTMLElement>("[style],[color],[bgcolor]");
   for (const el of candidates) {
@@ -1488,6 +1493,7 @@ export default function TimelineCalendar(props: {
   const [dayWidth, setDayWidth] = useState(26); // px per day
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
   const [selectedFrom, setSelectedFrom] = useState<"timeline" | "list" | null>(null);
+  const [isTimelineCheckboxVisible, setIsTimelineCheckboxVisible] = useState(false);
   const [hoveredTimelineEventId, setHoveredTimelineEventId] = useState<string | number | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
@@ -1520,6 +1526,27 @@ export default function TimelineCalendar(props: {
   const hScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (!selectedId) return;
+
+    const hideTimelineCheckboxOnOutsideBarInteraction = (e: Event) => {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest("[data-event-bar]")) return;
+      setIsTimelineCheckboxVisible(false);
+    };
+
+    document.addEventListener("mousedown", hideTimelineCheckboxOnOutsideBarInteraction);
+    document.addEventListener("touchstart", hideTimelineCheckboxOnOutsideBarInteraction, { passive: true });
+    document.addEventListener("pointerdown", hideTimelineCheckboxOnOutsideBarInteraction);
+
+    return () => {
+      document.removeEventListener("mousedown", hideTimelineCheckboxOnOutsideBarInteraction);
+      document.removeEventListener("touchstart", hideTimelineCheckboxOnOutsideBarInteraction);
+      document.removeEventListener("pointerdown", hideTimelineCheckboxOnOutsideBarInteraction);
+    };
+  }, [selectedId]);
+
+  useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 60_000);
     return () => clearInterval(t);
   }, []);
@@ -1528,6 +1555,7 @@ export default function TimelineCalendar(props: {
   useEffect(() => {
     setSelectedId(null);
     setSelectedFrom(null);
+    setIsTimelineCheckboxVisible(false);
     setHoveredTimelineEventId(null);
     setIsRecurringSettingsOpen(false);
     setRecurringForm(makeRecurringFormState(dayjs()));
@@ -1562,10 +1590,12 @@ export default function TimelineCalendar(props: {
     if (selectedId === eventId && selectedFrom === "list") {
       setSelectedId(null);
       setSelectedFrom(null);
+      setIsTimelineCheckboxVisible(false);
       return;
     }
     setSelectedId(eventId);
     setSelectedFrom("list");
+    setIsTimelineCheckboxVisible(false);
   };
 
   const parsedUpstream = useMemo(() => {
@@ -1670,6 +1700,7 @@ export default function TimelineCalendar(props: {
     if (selectedEvent) return;
     setSelectedId(null);
     setSelectedFrom(null);
+    setIsTimelineCheckboxVisible(false);
   }, [selectedEvent, selectedId]);
 
   const { rangeStart, rangeEnd, months, weeks } = useMemo(() => {
@@ -2039,7 +2070,8 @@ export default function TimelineCalendar(props: {
                 {timelineEvents.map((e, idx) => {
                   const isSelected = selectedId === e.id;
                   const isHovered = hoveredTimelineEventId === e.id;
-                  const showCompleteToggle = (isSelected && selectedFrom === "timeline") || isHovered;
+                  const showCompleteToggle =
+                    (isSelected && selectedFrom === "timeline" && isTimelineCheckboxVisible) || isHovered;
                   const isEnd = now.isAfter(e._e);
                   const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
                   const remainingDays = Math.floor(remainingMs / DAY_MS);
@@ -2102,6 +2134,7 @@ export default function TimelineCalendar(props: {
                       style={{ height: 56 }}
                     >
                       <div
+                        data-event-bar
                         className={clsx(
                           "absolute top-2 bottom-2 py-2 overflow-hidden",
                           "flex items-center",
@@ -2126,10 +2159,12 @@ export default function TimelineCalendar(props: {
                           if (selectedId === e.id && selectedFrom === "timeline") {
                             setSelectedId(null);
                             setSelectedFrom(null);
+                            setIsTimelineCheckboxVisible(false);
                             return;
                           }
                           setSelectedId(e.id);
                           setSelectedFrom("timeline");
+                          setIsTimelineCheckboxVisible(true);
                         }}
                         onMouseEnter={() => setHoveredTimelineEventId(e.id)}
                         onMouseLeave={() => setHoveredTimelineEventId(null)}
