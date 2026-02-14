@@ -403,6 +403,7 @@ export default function Shell() {
       <div className="max-w-[1200px] mx-auto px-4 py-6">
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div className="flex items-end gap-2">
+            <img src="/favicon/apple-icon.png" alt="Game Calendar Logo" className="w-7 h-7 object-contain rounded-sm" />
             <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
             <div className="text-xs text-[color:var(--muted)] leading-none">{timezoneLabel}</div>
           </div>
