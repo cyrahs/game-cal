@@ -1,8 +1,8 @@
 # 游戏活动日历
 
-[![Web](https://img.shields.io/badge/web-gamecal.nv5.me-blue)](https://gamecal.nv5.me)
-[![Deploy to Cloudflare](https://img.shields.io/badge/deploy_to_cloudflare-F38020?&logo=cloudflare&logoColor=white)](https://deploy.workers.cloudflare.com/?url=https://github.com/cyrahs/game-cal)
-[![Built with Codex](https://img.shields.io/badge/built_with_Codex-1A1A1A)](https://openai.com/codex)
+[![Demo](https://img.shields.io/badge/Demo-gamecal.nv5.me-blue)](https://gamecal.nv5.me)
+[![Deploy to Cloudflare](https://img.shields.io/badge/Deploy_to_Cloudflare-F38020?&logo=cloudflare&logoColor=white)](https://deploy.workers.cloudflare.com/?url=https://github.com/cyrahs/game-cal)
+[![Built with Codex](https://img.shields.io/badge/Built_with_Codex-1A1A1A)](https://openai.com/codex)
 
 
 这是一个游戏活动日历项目，包含前端 SPA 与 API 聚合代理，当前支持：
