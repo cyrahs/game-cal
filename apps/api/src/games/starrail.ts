@@ -126,12 +126,26 @@ function parseAnnItem(raw: unknown): MihoyoAnnItem | null {
   };
 }
 
+function makeAnnItemKey(item: MihoyoAnnItem): string {
+  // Upstream sometimes returns multiple records that share the same ann_id but
+  // differ in title/time window. Using ann_id alone will cause collisions.
+  const title = item.title?.trim() || item.subtitle?.trim() || "";
+  return [
+    item.ann_id,
+    title,
+    item.start_time ?? "",
+    item.end_time ?? "",
+    item.type ?? "",
+    item.type_label ?? "",
+  ].join("|");
+}
+
 function extractItemsFromRawList(list: unknown[]): MihoyoAnnItem[] {
-  const items = new Map<number, MihoyoAnnItem>();
+  const items = new Map<string, MihoyoAnnItem>();
   for (const it of list) {
     const parsed = parseAnnItem(it);
     if (parsed) {
-      items.set(parsed.ann_id, parsed);
+      items.set(makeAnnItemKey(parsed), parsed);
     }
   }
   return [...items.values()];
@@ -203,12 +217,25 @@ function parseContentItem(raw: unknown): MihoyoAnnContentItem | null {
   };
 }
 
-function collectContentItemsFromNode(node: unknown, out: Map<number, MihoyoAnnContentItem>): void {
+function addContentItem(out: Map<number, MihoyoAnnContentItem[]>, item: MihoyoAnnContentItem): void {
+  const list = out.get(item.ann_id);
+  const titleKey = `${item.title?.trim() ?? ""}|${item.subtitle?.trim() ?? ""}`;
+  if (!list) {
+    out.set(item.ann_id, [item]);
+    return;
+  }
+  // Keep stable insertion order, but avoid exact title duplicates.
+  if (!list.some((x) => `${x.title?.trim() ?? ""}|${x.subtitle?.trim() ?? ""}` === titleKey)) {
+    list.push(item);
+  }
+}
+
+function collectContentItemsFromNode(node: unknown, out: Map<number, MihoyoAnnContentItem[]>): void {
   if (!isRecord(node)) return;
 
   const direct = parseContentItem(node);
   if (direct) {
-    if (!out.has(direct.ann_id)) out.set(direct.ann_id, direct);
+    addContentItem(out, direct);
     return;
   }
 
@@ -217,7 +244,7 @@ function collectContentItemsFromNode(node: unknown, out: Map<number, MihoyoAnnCo
     for (const item of list) {
       const parsed = parseContentItem(item);
       if (parsed) {
-        if (!out.has(parsed.ann_id)) out.set(parsed.ann_id, parsed);
+        addContentItem(out, parsed);
         continue;
       }
       collectContentItemsFromNode(item, out);
@@ -318,7 +345,7 @@ async function fetchStarRailAnnouncementCategories(env: RuntimeEnv): Promise<Mih
 }
 
 function getStarRailEventItems(categories: MihoyoAnnCategory[]): MihoyoAnnItem[] {
-  const byId = new Map<number, MihoyoAnnItem>();
+  const byKey = new Map<string, MihoyoAnnItem>();
   const isCategorySelected = (category: MihoyoAnnCategory): boolean => {
     if (category.type_id === 3 || category.type_id === 4) return true;
     const label = category.type_label ?? "";
@@ -334,12 +361,12 @@ function getStarRailEventItems(categories: MihoyoAnnCategory[]): MihoyoAnnItem[]
     const categorySelected = isCategorySelected(category);
     for (const item of category.list ?? []) {
       if (categorySelected || isItemSelected(item)) {
-        byId.set(item.ann_id, item);
+        byKey.set(makeAnnItemKey(item), item);
       }
     }
   }
 
-  return [...byId.values()];
+  return [...byKey.values()];
 }
 
 export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
@@ -369,7 +396,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
 
   // getAnnContent includes the full (HTML) announcement body but does not include
   // reliable structured start/end fields, so we merge it with getAnnList by ann_id.
-  const contentById = new Map<number, MihoyoAnnContentItem>();
+  const contentById = new Map<number, MihoyoAnnContentItem[]>();
   try {
     const contentRes = await fetchJson<MihoyoAnnContentResponse>(contentApiUrl, {
       timeoutMs: 12_000,
@@ -379,11 +406,29 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     // If content fetch fails, still return the event list based on getAnnList.
   }
 
+  const normalizeTitle = (input: string): string => input.replace(/\s+/g, " ").trim();
+  const pickBestContentItem = (
+    items: MihoyoAnnContentItem[] | undefined,
+    listTitle: string,
+    listSubtitle: string | undefined,
+  ): MihoyoAnnContentItem | undefined => {
+    if (!items || items.length === 0) return undefined;
+    if (items.length === 1) return items[0];
+
+    const targets = [listTitle, listSubtitle].filter(Boolean).map((t) => normalizeTitle(String(t)));
+    for (const target of targets) {
+      const match = items.find((x) => normalizeTitle(x.title ?? "") === target || normalizeTitle(x.subtitle ?? "") === target);
+      if (match) return match;
+    }
+
+    return items[0];
+  };
+
   return filtered.map((item) => {
-    const contentItem = contentById.get(item.ann_id);
     const title = item.title?.trim() || item.subtitle?.trim() || "";
+    const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     return {
-      id: item.ann_id,
+      id: `starrail:${makeAnnItemKey(item)}`,
       title,
       start_time: toIsoWithSourceOffset(item.start_time!, STARRAIL_SOURCE_TZ_OFFSET),
       end_time: toIsoWithSourceOffset(item.end_time!, STARRAIL_SOURCE_TZ_OFFSET),
