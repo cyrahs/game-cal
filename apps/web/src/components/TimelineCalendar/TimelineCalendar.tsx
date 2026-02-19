@@ -750,10 +750,71 @@ function getMonthlyCardRemainingDays(
   return Math.max(0, baseDays - elapsedCycles);
 }
 
+function decodeBasicHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'");
+}
+
+function extractMiHoYoOpenInBrowserUrl(href: string): string | null {
+  const m = /^\s*javascript:\s*miHoYoGameJSSDK\.openInBrowser\s*\(([\s\S]*)\)\s*;?\s*$/i.exec(href);
+  if (!m?.[1]) return null;
+
+  const args = m[1].trim();
+  const quote = args[0];
+  if (quote !== "'" && quote !== "\"") return null;
+
+  let firstArg = "";
+  for (let i = 1; i < args.length; i++) {
+    const ch = args[i]!;
+    if (ch === "\\") {
+      if (i + 1 >= args.length) break;
+      firstArg += args[i + 1]!;
+      i++;
+      continue;
+    }
+    if (ch === quote) {
+      const decoded = decodeBasicHtmlEntities(firstArg).trim();
+      return /^https?:\/\//i.test(decoded) ? decoded : null;
+    }
+    firstArg += ch;
+  }
+
+  return null;
+}
+
+function rewriteMiHoYoAnnouncementAnchors(input: string): string {
+  if (typeof DOMParser === "undefined") return input;
+
+  const doc = new DOMParser().parseFromString(input, "text/html");
+  const anchors = Array.from(doc.body.querySelectorAll<HTMLAnchorElement>("a[href]"));
+
+  let changed = false;
+  for (const anchor of anchors) {
+    const rawHref = anchor.getAttribute("href");
+    if (!rawHref) continue;
+
+    const extracted = extractMiHoYoOpenInBrowserUrl(rawHref);
+    if (!extracted) continue;
+
+    anchor.setAttribute("href", extracted);
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noreferrer noopener");
+    changed = true;
+  }
+
+  return changed ? doc.body.innerHTML : input;
+}
+
 function preprocessAnnContent(input: string): string {
   // miHoYo announcements sometimes escape their <t ...>time</t> placeholders, e.g.
   // "&lt;t class=\"t_lc\"&gt;2026/03/23 03:59:00&lt;/t&gt;". Keep only the timestamp text.
-  return input.replace(/&lt;t[^&]*?&gt;([\s\S]*?)&lt;\/t&gt;/g, "$1");
+  const normalized = input.replace(/&lt;t[^&]*?&gt;([\s\S]*?)&lt;\/t&gt;/g, "$1");
+  if (!looksLikeHtml(normalized)) return normalized;
+  return rewriteMiHoYoAnnouncementAnchors(normalized);
 }
 
 function looksLikeHtml(input: string): boolean {
