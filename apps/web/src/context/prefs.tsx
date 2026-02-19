@@ -25,6 +25,8 @@ const ALL_GAME_IDS: GameId[] = [
   "endfield",
 ];
 const ALL_GAME_ID_SET = new Set<GameId>(ALL_GAME_IDS);
+const MAX_MONTHLY_CARD_DAYS = 3650;
+const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export type RecurringRule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
@@ -37,6 +39,11 @@ export type RecurringActivity = {
   title: string;
   rule: RecurringRule;
   durationDays?: number;
+};
+
+export type MonthlyCardState = {
+  remainingDays: number;
+  asOfDate: string;
 };
 
 export type RecurringSettingsExport = {
@@ -200,6 +207,55 @@ function coerceRecurringActivitiesByGame(input: unknown): Partial<Record<GameId,
   return next;
 }
 
+function formatLocalDateStamp(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseLocalDateStamp(input: string): number | null {
+  if (!LOCAL_DATE_RE.test(input)) return null;
+  const [yearRaw, monthRaw, dayRaw] = input.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  const d = new Date(year, month - 1, day);
+  if (
+    d.getFullYear() !== year ||
+    d.getMonth() !== month - 1 ||
+    d.getDate() !== day
+  ) {
+    return null;
+  }
+  return d.getTime();
+}
+
+function coerceMonthlyCardState(input: unknown): MonthlyCardState | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const obj = input as Record<string, unknown>;
+  const remainingDaysRaw = toInt(obj.remainingDays);
+  const asOfDate = typeof obj.asOfDate === "string" ? obj.asOfDate.trim() : "";
+  if (remainingDaysRaw === null || !asOfDate) return null;
+  if (parseLocalDateStamp(asOfDate) == null) return null;
+  return {
+    remainingDays: clampInt(remainingDaysRaw, 0, MAX_MONTHLY_CARD_DAYS),
+    asOfDate,
+  };
+}
+
+function coerceMonthlyCardByGame(input: unknown): Partial<Record<GameId, MonthlyCardState>> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const next: Partial<Record<GameId, MonthlyCardState>> = {};
+  for (const gameId of ALL_GAME_IDS) {
+    const entry = coerceMonthlyCardState((input as Record<string, unknown>)[gameId]);
+    if (!entry) continue;
+    next[gameId] = entry;
+  }
+  return next;
+}
+
 function parseRecurringSettingsImport(input: unknown): Partial<Record<GameId, RecurringActivity[]>> | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const obj = input as Record<string, unknown>;
@@ -233,6 +289,7 @@ export type PrefsState = {
     showNotStarted: boolean;
     showWeekSeparators: boolean;
     showGacha: boolean;
+    monthlyCardByGame: Partial<Record<GameId, MonthlyCardState>>;
     completedIdsByGame: Partial<Record<GameId, Array<string | number>>>;
     completedRecurringByGame: Partial<Record<GameId, Record<string, string>>>;
     recurringActivitiesByGame: Partial<Record<GameId, RecurringActivity[]>>;
@@ -257,6 +314,7 @@ export type PrefsContextValue = {
   setShowNotStarted: (v: boolean) => void;
   setShowWeekSeparators: (v: boolean) => void;
   setShowGacha: (v: boolean) => void;
+  setMonthlyCardRemainingDays: (gameId: GameId, days: number | null) => void;
   toggleCompleted: (gameId: GameId, eventId: string | number) => void;
   toggleRecurringCompleted: (gameId: GameId, activityId: string, cycleKey: string) => void;
   addRecurringActivity: (gameId: GameId, activity: Omit<RecurringActivity, "id">) => void;
@@ -383,6 +441,7 @@ function makeDefaultPrefs(): PrefsState {
       showNotStarted: false,
       showWeekSeparators: false,
       showGacha: false,
+      monthlyCardByGame: {},
       completedIdsByGame: {},
       completedRecurringByGame: {},
       recurringActivitiesByGame: cloneRecurringActivitiesByGame(DEFAULT_RECURRING_ACTIVITIES_BY_GAME),
@@ -489,6 +548,7 @@ function coercePrefs(input: unknown): PrefsState {
       : base.timeline.showWeekSeparators;
   const showGacha =
     typeof obj.timeline?.showGacha === "boolean" ? (obj.timeline.showGacha as boolean) : base.timeline.showGacha;
+  const monthlyCardByGame = coerceMonthlyCardByGame(obj.timeline?.monthlyCardByGame);
 
   const completedIdsByGame: PrefsState["timeline"]["completedIdsByGame"] = {};
   const src = obj.timeline?.completedIdsByGame;
@@ -529,7 +589,15 @@ function coercePrefs(input: unknown): PrefsState {
     gameOrderIds,
     visibleGameIds,
     hiddenGameIds,
-    timeline: { showNotStarted, showWeekSeparators, showGacha, completedIdsByGame, completedRecurringByGame, recurringActivitiesByGame },
+    timeline: {
+      showNotStarted,
+      showWeekSeparators,
+      showGacha,
+      monthlyCardByGame,
+      completedIdsByGame,
+      completedRecurringByGame,
+      recurringActivitiesByGame,
+    },
   };
 }
 
@@ -973,6 +1041,41 @@ export function PrefsProvider(props: { children: ReactNode }) {
     setPrefs((prev) => ({ ...prev, timeline: { ...prev.timeline, showGacha: v }, updatedAt: Date.now() }));
   }, []);
 
+  const setMonthlyCardRemainingDays = useCallback((gameId: GameId, days: number | null) => {
+    setPrefs((prev) => {
+      const nextByGame: PrefsState["timeline"]["monthlyCardByGame"] = { ...prev.timeline.monthlyCardByGame };
+      if (days == null) {
+        if (!(gameId in nextByGame)) return prev;
+        delete nextByGame[gameId];
+        return {
+          ...prev,
+          timeline: { ...prev.timeline, monthlyCardByGame: nextByGame },
+          updatedAt: Date.now(),
+        };
+      }
+
+      const normalizedDays = Number.isFinite(days) ? clampInt(days, 0, MAX_MONTHLY_CARD_DAYS) : 0;
+      const nextEntry: MonthlyCardState = {
+        remainingDays: normalizedDays,
+        asOfDate: formatLocalDateStamp(),
+      };
+      const prevEntry = nextByGame[gameId];
+      if (
+        prevEntry &&
+        prevEntry.remainingDays === nextEntry.remainingDays &&
+        prevEntry.asOfDate === nextEntry.asOfDate
+      ) {
+        return prev;
+      }
+      nextByGame[gameId] = nextEntry;
+      return {
+        ...prev,
+        timeline: { ...prev.timeline, monthlyCardByGame: nextByGame },
+        updatedAt: Date.now(),
+      };
+    });
+  }, []);
+
   const toggleCompleted = useCallback((gameId: GameId, eventId: string | number) => {
     setPrefs((prev) => {
       const existing = prev.timeline.completedIdsByGame[gameId] ?? [];
@@ -1157,6 +1260,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setShowNotStarted,
       setShowWeekSeparators,
       setShowGacha,
+      setMonthlyCardRemainingDays,
       toggleCompleted,
       toggleRecurringCompleted,
       addRecurringActivity,
@@ -1199,6 +1303,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setShowNotStarted,
       setShowWeekSeparators,
       setShowGacha,
+      setMonthlyCardRemainingDays,
       syncState,
       toggleCompleted,
       toggleRecurringCompleted,

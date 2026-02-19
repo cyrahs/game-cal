@@ -9,6 +9,7 @@ import type { CalendarEvent, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import {
+  type MonthlyCardState,
   type RecurringActivity,
   type RecurringRule,
   usePrefs,
@@ -715,6 +716,15 @@ function formatVersionTimelineLabel(version: GameVersionInfo, now: Dayjs): Versi
     endLabel,
     remainingLabel: `${remainingDays}d`,
   };
+}
+
+function getMonthlyCardRemainingDays(entry: MonthlyCardState | null | undefined, now: Dayjs): number | null {
+  if (!entry) return null;
+  const baseDays = Math.max(0, Math.trunc(entry.remainingDays));
+  const asOf = dayjs(entry.asOfDate, "YYYY-MM-DD", true);
+  if (!asOf.isValid()) return baseDays;
+  const elapsedDays = Math.max(0, now.startOf("day").diff(asOf.startOf("day"), "day"));
+  return Math.max(0, baseDays - elapsedDays);
 }
 
 function preprocessAnnContent(input: string): string {
@@ -1484,6 +1494,7 @@ export default function TimelineCalendar(props: {
     setShowNotStarted,
     setShowWeekSeparators,
     setShowGacha,
+    setMonthlyCardRemainingDays,
     toggleCompleted: toggleCompletedPref,
     toggleRecurringCompleted: toggleRecurringCompletedPref,
     addRecurringActivity,
@@ -1496,6 +1507,8 @@ export default function TimelineCalendar(props: {
   const [isTimelineCheckboxVisible, setIsTimelineCheckboxVisible] = useState(false);
   const [hoveredTimelineEventId, setHoveredTimelineEventId] = useState<string | number | null>(null);
   const [now, setNow] = useState(() => dayjs());
+  const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
+  const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
@@ -1506,10 +1519,16 @@ export default function TimelineCalendar(props: {
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
+  const monthlyCardState = prefs.timeline.monthlyCardByGame[props.gameId] ?? null;
   const completedIdsArr = prefs.timeline.completedIdsByGame[props.gameId] ?? [];
   const completedIds = useMemo(() => new Set<string | number>(completedIdsArr), [completedIdsArr]);
   const completedRecurring = prefs.timeline.completedRecurringByGame[props.gameId] ?? {};
   const recurringDefs = prefs.timeline.recurringActivitiesByGame[props.gameId] ?? [];
+  const monthlyCardRemainingDays = useMemo(
+    () => getMonthlyCardRemainingDays(monthlyCardState, now),
+    [monthlyCardState, now]
+  );
+  const isMonthlyCardUrgent = monthlyCardRemainingDays != null && monthlyCardRemainingDays <= 3;
   const recurringTzLabel = useMemo(
     () => formatFixedUtcOffset(getRecurringTzOffsetMinutes(props.gameId)),
     [props.gameId]
@@ -1522,8 +1541,32 @@ export default function TimelineCalendar(props: {
   const toggleCompleted = (eventId: string | number) => toggleCompletedPref(props.gameId, eventId);
   const toggleRecurringCompleted = (activityId: string, cycleKey: string) =>
     toggleRecurringCompletedPref(props.gameId, activityId, cycleKey);
-
   const hScrollRef = useRef<HTMLDivElement | null>(null);
+  const monthlyCardInputRef = useRef<HTMLInputElement | null>(null);
+
+  const startMonthlyCardEditing = () => {
+    setMonthlyCardDraft(monthlyCardRemainingDays == null ? "" : String(monthlyCardRemainingDays));
+    setIsMonthlyCardEditing(true);
+  };
+
+  const cancelMonthlyCardEditing = () => {
+    setIsMonthlyCardEditing(false);
+    setMonthlyCardDraft("");
+  };
+
+  const commitMonthlyCardEditing = () => {
+    const input = monthlyCardDraft.trim();
+    if (!input) {
+      setMonthlyCardRemainingDays(props.gameId, null);
+      setIsMonthlyCardEditing(false);
+      return;
+    }
+
+    const parsed = Number(input);
+    const normalized = Number.isFinite(parsed) ? Math.max(0, Math.min(3650, Math.trunc(parsed))) : 0;
+    setMonthlyCardRemainingDays(props.gameId, normalized);
+    setIsMonthlyCardEditing(false);
+  };
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1551,12 +1594,20 @@ export default function TimelineCalendar(props: {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    if (!isMonthlyCardEditing) return;
+    monthlyCardInputRef.current?.focus();
+    monthlyCardInputRef.current?.select();
+  }, [isMonthlyCardEditing]);
+
   // When switching games, reset UI state.
   useEffect(() => {
     setSelectedId(null);
     setSelectedFrom(null);
     setIsTimelineCheckboxVisible(false);
     setHoveredTimelineEventId(null);
+    setIsMonthlyCardEditing(false);
+    setMonthlyCardDraft("");
     setIsRecurringSettingsOpen(false);
     setRecurringForm(makeRecurringFormState(dayjs()));
     setRecurringFormError(null);
@@ -1931,7 +1982,7 @@ export default function TimelineCalendar(props: {
   return (
     <div className="fade-in grid gap-3">
       <div className="glass shadow-ink rounded-2xl overflow-hidden relative">
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
+        <div className="relative z-40 flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
           <div className="flex items-center gap-0.5 min-w-0">
             <div className="flex items-center gap-2 shrink-0">
               <img
@@ -1953,6 +2004,52 @@ export default function TimelineCalendar(props: {
             ) : null}
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            <div className="relative z-50">
+              <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
+                <span>月卡</span>
+                {isMonthlyCardEditing ? (
+                  <>
+                    <input
+                      ref={monthlyCardInputRef}
+                      type="text"
+                      inputMode="numeric"
+                      value={monthlyCardDraft}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        if (/^\d*$/.test(next)) setMonthlyCardDraft(next);
+                      }}
+                      onBlur={commitMonthlyCardEditing}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          commitMonthlyCardEditing();
+                          return;
+                        }
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          cancelMonthlyCardEditing();
+                        }
+                      }}
+                      placeholder="天数"
+                      className="w-14 px-1.5 py-0.5 rounded border border-[color:var(--line)] bg-[color:var(--popover)] text-[color:var(--ink2)] font-mono"
+                    />
+                    <span className="font-mono text-[color:var(--ink2)]">d</span>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={startMonthlyCardEditing}
+                    className={clsx(
+                      "font-mono hover:text-[color:var(--ink)]",
+                      isMonthlyCardUrgent ? "text-red-500" : "text-[color:var(--ink2)]"
+                    )}
+                    title="点击直接输入月卡剩余天数"
+                  >
+                    {monthlyCardRemainingDays == null ? "未设置" : `${monthlyCardRemainingDays}d`}
+                  </button>
+                )}
+              </div>
+            </div>
             <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
               <span>按周分隔</span>
               <input
@@ -2703,6 +2800,7 @@ export default function TimelineCalendar(props: {
           />
         </div>
       ) : null}
+
     </div>
   );
 }
