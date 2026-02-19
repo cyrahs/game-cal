@@ -26,7 +26,6 @@ const ALL_GAME_IDS: GameId[] = [
 ];
 const ALL_GAME_ID_SET = new Set<GameId>(ALL_GAME_IDS);
 const MAX_MONTHLY_CARD_DAYS = 3650;
-const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export type RecurringRule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
@@ -43,7 +42,7 @@ export type RecurringActivity = {
 
 export type MonthlyCardState = {
   remainingDays: number;
-  asOfDate: string;
+  asOfMs: number;
 };
 
 export type RecurringSettingsExport = {
@@ -207,41 +206,15 @@ function coerceRecurringActivitiesByGame(input: unknown): Partial<Record<GameId,
   return next;
 }
 
-function formatLocalDateStamp(d: Date = new Date()): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function parseLocalDateStamp(input: string): number | null {
-  if (!LOCAL_DATE_RE.test(input)) return null;
-  const [yearRaw, monthRaw, dayRaw] = input.split("-");
-  const year = Number(yearRaw);
-  const month = Number(monthRaw);
-  const day = Number(dayRaw);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
-  const d = new Date(year, month - 1, day);
-  if (
-    d.getFullYear() !== year ||
-    d.getMonth() !== month - 1 ||
-    d.getDate() !== day
-  ) {
-    return null;
-  }
-  return d.getTime();
-}
-
 function coerceMonthlyCardState(input: unknown): MonthlyCardState | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const obj = input as Record<string, unknown>;
   const remainingDaysRaw = toInt(obj.remainingDays);
-  const asOfDate = typeof obj.asOfDate === "string" ? obj.asOfDate.trim() : "";
-  if (remainingDaysRaw === null || !asOfDate) return null;
-  if (parseLocalDateStamp(asOfDate) == null) return null;
+  const asOfMsRaw = toInt(obj.asOfMs);
+  if (remainingDaysRaw === null || asOfMsRaw === null) return null;
   return {
     remainingDays: clampInt(remainingDaysRaw, 0, MAX_MONTHLY_CARD_DAYS),
-    asOfDate,
+    asOfMs: asOfMsRaw,
   };
 }
 
@@ -1057,13 +1030,13 @@ export function PrefsProvider(props: { children: ReactNode }) {
       const normalizedDays = Number.isFinite(days) ? clampInt(days, 0, MAX_MONTHLY_CARD_DAYS) : 0;
       const nextEntry: MonthlyCardState = {
         remainingDays: normalizedDays,
-        asOfDate: formatLocalDateStamp(),
+        asOfMs: Date.now(),
       };
       const prevEntry = nextByGame[gameId];
       if (
         prevEntry &&
         prevEntry.remainingDays === nextEntry.remainingDays &&
-        prevEntry.asOfDate === nextEntry.asOfDate
+        prevEntry.asOfMs === nextEntry.asOfMs
       ) {
         return prev;
       }

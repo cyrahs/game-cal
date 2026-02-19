@@ -67,17 +67,27 @@ type ParsedRecurringEvent = ParsedEvent & {
 };
 type AnyParsedEvent = ParsedUpstreamEvent | ParsedRecurringEvent;
 const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
-const RECURRING_TZ_OFFSET_MINUTES_BY_GAME: Record<GameId, number> = {
-  genshin: 8 * 60,
-  starrail: 8 * 60,
-  zzz: 8 * 60,
-  ww: 8 * 60,
-  snowbreak: 8 * 60,
-  endfield: 8 * 60,
+type GameDailyResetConfig = {
+  tzOffsetMinutes: number;
+  resetOffsetMinutes: number;
+};
+
+const GAME_DAILY_RESET_CONFIG_BY_GAME: Record<GameId, GameDailyResetConfig> = {
+  // Current upstream sources in this app are all CN servers (UTC+8) and use 04:00 as daily rollover.
+  genshin: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
+  starrail: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
+  zzz: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
+  ww: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
+  snowbreak: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
+  endfield: { tzOffsetMinutes: 8 * 60, resetOffsetMinutes: 4 * 60 },
 };
 
 function getRecurringTzOffsetMinutes(gameId: GameId): number {
-  return RECURRING_TZ_OFFSET_MINUTES_BY_GAME[gameId] ?? 8 * 60;
+  return GAME_DAILY_RESET_CONFIG_BY_GAME[gameId]?.tzOffsetMinutes ?? 8 * 60;
+}
+
+function getDailyResetOffsetMinutes(gameId: GameId): number {
+  return GAME_DAILY_RESET_CONFIG_BY_GAME[gameId]?.resetOffsetMinutes ?? 4 * 60;
 }
 
 export function isUrgentByRemainingMs(kind: "upstream" | "recurring", remainingMs: number): boolean {
@@ -718,13 +728,26 @@ function formatVersionTimelineLabel(version: GameVersionInfo, now: Dayjs): Versi
   };
 }
 
-function getMonthlyCardRemainingDays(entry: MonthlyCardState | null | undefined, now: Dayjs): number | null {
+function toDailyCycleIndex(ms: number, tzOffsetMinutes: number, resetOffsetMinutes: number): number {
+  const tzOffsetMs = tzOffsetMinutes * MINUTE_MS;
+  const resetOffsetMs = resetOffsetMinutes * MINUTE_MS;
+  return Math.floor((ms + tzOffsetMs - resetOffsetMs) / DAY_MS);
+}
+
+function getMonthlyCardRemainingDays(
+  entry: MonthlyCardState | null | undefined,
+  now: Dayjs,
+  tzOffsetMinutes: number,
+  resetOffsetMinutes: number
+): number | null {
   if (!entry) return null;
   const baseDays = Math.max(0, Math.trunc(entry.remainingDays));
-  const asOf = dayjs(entry.asOfDate, "YYYY-MM-DD", true);
-  if (!asOf.isValid()) return baseDays;
-  const elapsedDays = Math.max(0, now.startOf("day").diff(asOf.startOf("day"), "day"));
-  return Math.max(0, baseDays - elapsedDays);
+  if (!Number.isFinite(entry.asOfMs)) return baseDays;
+  const asOfMs = Math.trunc(entry.asOfMs);
+  const nowCycle = toDailyCycleIndex(now.valueOf(), tzOffsetMinutes, resetOffsetMinutes);
+  const asOfCycle = toDailyCycleIndex(asOfMs, tzOffsetMinutes, resetOffsetMinutes);
+  const elapsedCycles = Math.max(0, nowCycle - asOfCycle);
+  return Math.max(0, baseDays - elapsedCycles);
 }
 
 function preprocessAnnContent(input: string): string {
@@ -1520,19 +1543,18 @@ export default function TimelineCalendar(props: {
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
   const monthlyCardState = prefs.timeline.monthlyCardByGame[props.gameId] ?? null;
+  const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(props.gameId);
+  const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(props.gameId);
   const completedIdsArr = prefs.timeline.completedIdsByGame[props.gameId] ?? [];
   const completedIds = useMemo(() => new Set<string | number>(completedIdsArr), [completedIdsArr]);
   const completedRecurring = prefs.timeline.completedRecurringByGame[props.gameId] ?? {};
   const recurringDefs = prefs.timeline.recurringActivitiesByGame[props.gameId] ?? [];
   const monthlyCardRemainingDays = useMemo(
-    () => getMonthlyCardRemainingDays(monthlyCardState, now),
-    [monthlyCardState, now]
+    () => getMonthlyCardRemainingDays(monthlyCardState, now, recurringTzOffsetMinutes, monthlyCardResetOffsetMinutes),
+    [monthlyCardResetOffsetMinutes, monthlyCardState, now, recurringTzOffsetMinutes]
   );
   const isMonthlyCardUrgent = monthlyCardRemainingDays != null && monthlyCardRemainingDays <= 3;
-  const recurringTzLabel = useMemo(
-    () => formatFixedUtcOffset(getRecurringTzOffsetMinutes(props.gameId)),
-    [props.gameId]
-  );
+  const recurringTzLabel = useMemo(() => formatFixedUtcOffset(recurringTzOffsetMinutes), [recurringTzOffsetMinutes]);
   const versionTimelineLabel = useMemo(() => {
     if (props.currentVersionState.status !== "success" || !props.currentVersionState.data) return null;
     return formatVersionTimelineLabel(props.currentVersionState.data, now);
