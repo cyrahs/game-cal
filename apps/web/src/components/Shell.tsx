@@ -12,7 +12,13 @@ import snowbreakIcon from "../assets/snowbreak.png";
 import type { CalendarEvent, GameId } from "../api/types";
 import { usePrefs } from "../context/prefs";
 import { useEvents } from "../hooks/useEvents";
-import { computeRecurringWindow, isUrgentByRemainingMs, parseDateTime } from "./TimelineCalendar/TimelineCalendar";
+import {
+  computeRecurringWindow,
+  isGachaEventTitle,
+  isUrgentByRemainingMs,
+  normalizeEventTitle,
+  parseDateTime,
+} from "./TimelineCalendar/TimelineCalendar";
 
 type GameLink = { id: GameId; to: string; name: string; icon: string };
 type SettingsTabId = "games" | "sync" | "config";
@@ -114,6 +120,8 @@ export default function Shell() {
   const theme = prefs.theme;
   const visibleGameIds = prefs.visibleGameIds;
   const gameOrderIds = prefs.gameOrderIds;
+  const showNotStarted = prefs.timeline.showNotStarted;
+  const showGacha = prefs.timeline.showGacha;
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("games");
@@ -261,9 +269,14 @@ export default function Shell() {
 
       for (const event of upstreamEvents) {
         if (completedIds.has(event.id)) continue;
+        const start = parseDateTime(event.start_time);
         const end = parseDateTime(event.end_time);
-        if (!end.isValid()) continue;
-        if (isUrgentByRemainingMs("upstream", end.valueOf() - nowMs)) {
+        if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
+        const title = normalizeEventTitle(event.title);
+        const isGacha = Boolean(event.is_gacha) || isGachaEventTitle(gameId, title);
+        if (!showGacha && isGacha) continue;
+        if (!showNotStarted && nowMs < start.valueOf()) continue;
+        if (isUrgentByRemainingMs("upstream", Math.max(0, end.valueOf() - nowMs))) {
           urgent = true;
           break;
         }
@@ -277,7 +290,7 @@ export default function Shell() {
           if (!window.start.isValid() || !window.end.isValid() || !window.end.isAfter(window.start)) continue;
           if (nowMs < window.start.valueOf() || nowMs >= window.end.valueOf()) continue;
           if (completedRecurring[activity.id] === window.cycleKey) continue;
-          if (isUrgentByRemainingMs("recurring", window.end.valueOf() - nowMs)) {
+          if (isUrgentByRemainingMs("recurring", Math.max(0, window.end.valueOf() - nowMs))) {
             urgent = true;
             break;
           }
@@ -288,7 +301,15 @@ export default function Shell() {
     }
 
     return next;
-  }, [now, prefs.timeline.completedIdsByGame, prefs.timeline.completedRecurringByGame, prefs.timeline.recurringActivitiesByGame, upstreamEventsByGame]);
+  }, [
+    now,
+    prefs.timeline.completedIdsByGame,
+    prefs.timeline.completedRecurringByGame,
+    prefs.timeline.recurringActivitiesByGame,
+    showGacha,
+    showNotStarted,
+    upstreamEventsByGame,
+  ]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 60_000);

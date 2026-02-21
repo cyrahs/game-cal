@@ -655,12 +655,12 @@ export function parseDateTime(input: string): Dayjs {
   return dayjs(input);
 }
 
-function normalizeEventTitle(input: string): string {
+export function normalizeEventTitle(input: string): string {
   // Some upstream titles contain literal "\n" sequences; normalize them to a single-line label.
   return input.replace(/\\[rnt]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function isGachaEventTitle(gameId: GameId, title: string): boolean {
+export function isGachaEventTitle(gameId: GameId, title: string): boolean {
   const normalized = title.trim();
   if (!normalized) return false;
 
