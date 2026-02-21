@@ -747,7 +747,8 @@ function getMonthlyCardRemainingDays(
   const nowCycle = toDailyCycleIndex(now.valueOf(), tzOffsetMinutes, resetOffsetMinutes);
   const asOfCycle = toDailyCycleIndex(asOfMs, tzOffsetMinutes, resetOffsetMinutes);
   const elapsedCycles = Math.max(0, nowCycle - asOfCycle);
-  return Math.max(0, baseDays - elapsedCycles);
+  if (elapsedCycles > baseDays) return null;
+  return baseDays - elapsedCycles;
 }
 
 function decodeBasicHtmlEntities(input: string): string {
