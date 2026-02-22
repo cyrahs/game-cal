@@ -41,7 +41,7 @@ const SYNC_HASH_BYTES = 32; // 256-bit
 const SYNC_UUID_MIN_LENGTH = 8;
 const SYNC_UUID_MAX_LENGTH = 64;
 const SYNC_PASSWORD_MAX_LENGTH = 128;
-const SYNC_WRITE_IDLE_FLUSH_MS = 30_000;
+const SYNC_WRITE_IDLE_FLUSH_MS = 5_000;
 const SYNC_BUFFER_MAX_ENTRIES = 5_000;
 const SYNC_BUFFER_IDLE_EVICT_MS = 10 * 60 * 1000;
 const SYNC_BUFFER_SWEEP_INTERVAL_MS = 60 * 1000;
@@ -452,8 +452,11 @@ function rememberSyncRow(row: SyncRow): SyncRow {
   const now = Date.now();
   const entry = syncBuffer.get(row.uuid);
   if (entry) {
-    entry.row = row;
     entry.lastAccessAtMs = now;
+    // Never overwrite dirty buffered writes with a DB snapshot.
+    if (!entry.dirty) {
+      entry.row = row;
+    }
     return entry.row;
   }
 
@@ -851,8 +854,15 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
   }
 
   if (request.method === "GET") {
-    const row = await readSyncRowWithBuffer(env, uuidRaw);
+    // Pull must read from D1 as source of truth, then refresh worker memory cache.
+    const pending = syncBuffer.get(uuidRaw);
+    if (pending?.dirty) {
+      await flushSyncRowImmediately(env, uuidRaw, pending.version);
+    }
+
+    const row = await readSyncRow(env, uuidRaw);
     if (!row) return json({ code: 404, msg: "Not found", data: null }, { status: 404 });
+    rememberSyncRow(row);
     if (!(await verifyRowPassword(row, password))) {
       return json({ code: 403, msg: "Invalid password", data: null }, { status: 403 });
     }
