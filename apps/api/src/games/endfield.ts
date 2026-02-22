@@ -33,9 +33,6 @@ const ENDFIELD_SOURCE_TZ_OFFSET = "+08:00";
 // This value may change upstream, so we try to auto-discover it first.
 const ENDFIELD_CODE_FALLBACK = "endfield_5SD9TN";
 
-const CODE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
-let cachedCode: { value: string; expiresAt: number } | null = null;
-
 function normalizeTitle(input: string | undefined): string {
   return (input ?? "")
     .replace(/\\[rnt]/g, " ")
@@ -150,9 +147,6 @@ async function getEndfieldCode(env: RuntimeEnv): Promise<string> {
   const override = (env.ENDFIELD_CODE ?? "").trim();
   if (override) return override;
 
-  const now = Date.now();
-  if (cachedCode && cachedCode.expiresAt > now) return cachedCode.value;
-
   const webviewUrl = env.ENDFIELD_WEBVIEW_URL ?? ENDFIELD_WEBVIEW_DEFAULT;
 
   try {
@@ -163,8 +157,6 @@ async function getEndfieldCode(env: RuntimeEnv): Promise<string> {
     const commonsJs = await fetchText(commonsUrl, { timeoutMs: 12_000 });
     const code = extractEndfieldCodeFromCommonsJs(commonsJs);
     if (!code) throw new Error("Failed to discover Endfield bulletin code");
-
-    cachedCode = { value: code, expiresAt: Date.now() + CODE_CACHE_TTL_MS };
     return code;
   } catch {
     // Best-effort only: keep a known working fallback for resilience.
