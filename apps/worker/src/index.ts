@@ -872,6 +872,7 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
 
     const blob = typeof body?.blob === "string" ? body.blob : "";
     const clientUpdatedAt = typeof body?.clientUpdatedAt === "number" ? body.clientUpdatedAt : NaN;
+    const baseClientUpdatedAt = typeof body?.baseClientUpdatedAt === "number" ? body.baseClientUpdatedAt : undefined;
     const force = url.searchParams.get("force") === "1";
 
     if (!blob) {
@@ -879,6 +880,9 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
     }
     if (!Number.isFinite(clientUpdatedAt) || clientUpdatedAt <= 0) {
       return json({ code: 400, msg: "Invalid body.clientUpdatedAt", data: null }, { status: 400 });
+    }
+    if (baseClientUpdatedAt != null && (!Number.isFinite(baseClientUpdatedAt) || baseClientUpdatedAt < 0)) {
+      return json({ code: 400, msg: "Invalid body.baseClientUpdatedAt", data: null }, { status: 400 });
     }
     if (blob.length > 900_000) {
       return json({ code: 413, msg: "Blob too large", data: null }, { status: 413 });
@@ -918,6 +922,19 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
 
     if (!(await verifyRowPassword(existing, password))) {
       return respondPut(json({ code: 403, msg: "Invalid password", data: null }, { status: 403 }));
+    }
+
+    if (!force && baseClientUpdatedAt != null && Math.trunc(baseClientUpdatedAt) !== Math.trunc(existing.client_updated_at)) {
+      return respondPut(
+        json(
+          {
+            code: 409,
+            msg: "Conflict: server version changed",
+            data: { uuid: existing.uuid, blob: existing.blob, clientUpdatedAt: existing.client_updated_at },
+          },
+          { status: 409 }
+        )
+      );
     }
 
     if (!force && Math.trunc(clientUpdatedAt) < Math.trunc(existing.client_updated_at)) {

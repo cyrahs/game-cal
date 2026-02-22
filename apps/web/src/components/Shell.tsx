@@ -790,7 +790,7 @@ export default function Shell() {
                           <button
                             type="button"
                             className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-                            onClick={() => void sync.pull()}
+                            onClick={() => void sync.pull({ forceCloud: true })}
                           >
                             从云端拉取
                           </button>
@@ -812,7 +812,7 @@ export default function Shell() {
                               <button
                                 type="button"
                                 className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-                                onClick={() => void sync.pull()}
+                                onClick={() => void sync.pull({ forceCloud: true })}
                               >
                                 使用云端
                               </button>

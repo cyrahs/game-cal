@@ -46,6 +46,7 @@ export interface SyncStateData {
 export interface SyncPutBody {
   blob: string;
   clientUpdatedAt: number;
+  baseClientUpdatedAt?: number; // optional optimistic concurrency precondition
 }
 
 export interface SyncRotateBody extends SyncPutBody {

@@ -55,7 +55,7 @@ server.get<{ Params: { uuid: string } }>("/api/sync/:uuid", async (_req, reply):
 server.put<{
   Params: { uuid: string };
   Querystring: { force?: string };
-  Body: { blob?: unknown; clientUpdatedAt?: unknown };
+  Body: { blob?: unknown; clientUpdatedAt?: unknown; baseClientUpdatedAt?: unknown };
 }>("/api/sync/:uuid", async (_req, reply): Promise<ApiResponse<null>> => {
   return syncUnavailable(reply);
 });

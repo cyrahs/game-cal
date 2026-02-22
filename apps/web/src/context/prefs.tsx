@@ -307,7 +307,7 @@ export type PrefsContextValue = {
     setPassword: (password: string) => void;
     generateUuid: () => string;
     generatePassword: () => string;
-    pull: () => Promise<void>;
+    pull: (opts?: { forceCloud?: boolean }) => Promise<void>;
     push: (opts?: { force?: boolean; forceNetwork?: boolean }) => Promise<void>;
     rotatePassword: (newPassword: string) => Promise<void>;
     state: SyncState;
@@ -630,6 +630,8 @@ export function PrefsProvider(props: { children: ReactNode }) {
   const lastAutoPushUpdatedAtRef = useRef<number>(0);
   const pullInFlightRef = useRef(false);
   const lastActiveAutoPullAtRef = useRef<number>(0);
+  const lastKnownCloudClientUpdatedAtRef = useRef<number | null>(null);
+  const forceNextRecurringConfigPushRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", prefs.theme === "dark");
@@ -647,12 +649,14 @@ export function PrefsProvider(props: { children: ReactNode }) {
     setUuidState(next.trim());
     // Clear cached blob: it belongs to the previous uuid.
     safeLsRemove(SYNC_CACHE_KEY);
+    lastKnownCloudClientUpdatedAtRef.current = null;
   }, []);
 
   const setPassword = useCallback((next: string) => {
     setPasswordState(next);
     // Clear cached blob: it's encrypted with the previous password.
     safeLsRemove(SYNC_CACHE_KEY);
+    lastKnownCloudClientUpdatedAtRef.current = null;
   }, []);
 
   const push = useCallback(
@@ -700,12 +704,21 @@ export function PrefsProvider(props: { children: ReactNode }) {
         return;
       }
 
-      const { status, body } = await syncRequest<{ uuid: string; blob: string; clientUpdatedAt: number }>(
+      const baseClientUpdatedAt =
+        !force && lastKnownCloudClientUpdatedAtRef.current != null
+          ? Math.trunc(lastKnownCloudClientUpdatedAtRef.current)
+          : undefined;
+
+      const { status, body } = await syncRequest<{ uuid: string; clientUpdatedAt: number; blob?: string }>(
         `/api/sync/${encodeURIComponent(uuid)}${force ? "?force=1" : ""}`,
         {
           method: "PUT",
           headers: { "content-type": "application/json", "x-gc-password": password },
-          body: JSON.stringify({ blob, clientUpdatedAt: snap.updatedAt }),
+          body: JSON.stringify({
+            blob,
+            clientUpdatedAt: snap.updatedAt,
+            ...(baseClientUpdatedAt != null ? { baseClientUpdatedAt } : {}),
+          }),
         }
       );
 
@@ -714,14 +727,28 @@ export function PrefsProvider(props: { children: ReactNode }) {
         return;
       }
 
-      if (status === 409 && body?.data) {
+      const conflictData =
+        status === 409 && body?.data && typeof body.data.blob === "string"
+          ? {
+              uuid: body.data.uuid,
+              blob: body.data.blob,
+              clientUpdatedAt: body.data.clientUpdatedAt,
+            }
+          : null;
+
+      if (conflictData) {
+        lastKnownCloudClientUpdatedAtRef.current = Math.trunc(conflictData.clientUpdatedAt);
         setSyncState({
           phase: "conflict",
-          error: body.msg ?? "Conflict",
-          conflict: body.data,
+          error: body?.msg ?? "Conflict",
+          conflict: conflictData,
           lastPullAt: undefined,
           lastPushAt: undefined,
         });
+        return;
+      }
+      if (status === 409) {
+        setSyncState({ phase: "error", error: body?.msg ?? "Sync conflict without payload" });
         return;
       }
 
@@ -730,12 +757,14 @@ export function PrefsProvider(props: { children: ReactNode }) {
         return;
       }
 
+      lastKnownCloudClientUpdatedAtRef.current = Math.trunc(body.data.clientUpdatedAt);
       setSyncState((s) => ({ phase: "ready", lastPullAt: s.lastPullAt, lastPushAt: Date.now() }));
     },
     [password, uuid]
   );
 
-  const pull = useCallback(async () => {
+  const pull = useCallback(async (opts?: { forceCloud?: boolean }) => {
+    const forceCloud = opts?.forceCloud ?? false;
     if (pullInFlightRef.current) return;
     pullInFlightRef.current = true;
 
@@ -754,6 +783,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
 
       if (status === 404) {
         // No cloud state yet; seed it using the current prefs.
+        lastKnownCloudClientUpdatedAtRef.current = null;
         await push({ force: true, forceNetwork: true });
         return;
       }
@@ -779,6 +809,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
         const cached = readSyncCacheForUuid(uuid);
         const hasLocalSyncContext = Boolean(cached);
         const cloudUpdatedAt = Math.trunc(data.clientUpdatedAt);
+        lastKnownCloudClientUpdatedAtRef.current = cloudUpdatedAt;
         const cachedClientUpdatedAt = cached ? Math.trunc(cached.clientUpdatedAt) : 0;
         const localUpdatedAt = hasLocalSyncContext
           ? Math.max(Math.trunc(prefsRef.current.updatedAt), cachedClientUpdatedAt)
@@ -786,10 +817,11 @@ export function PrefsProvider(props: { children: ReactNode }) {
         const next = coercePrefs(decrypted);
         next.updatedAt = cloudUpdatedAt;
 
-        // If this device has no cache for the current uuid, always trust cloud data.
-        // Otherwise, keep the newer side by clientUpdatedAt.
-        if (!hasLocalSyncContext || cloudUpdatedAt >= localUpdatedAt) {
-          if (!hasLocalSyncContext || cloudUpdatedAt > localUpdatedAt) {
+        // Manual "use cloud" should always apply cloud snapshot.
+        // For background pull, preserve last-write-wins by clientUpdatedAt.
+        if (forceCloud || !hasLocalSyncContext || cloudUpdatedAt >= localUpdatedAt) {
+          if (forceCloud || !hasLocalSyncContext || cloudUpdatedAt > localUpdatedAt) {
+            if (forceCloud) pendingNetworkPushRef.current = false;
             suppressNextAutoPushRef.current = true;
             setPrefs(next);
           }
@@ -853,6 +885,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setPasswordState(nextPw);
       setPrefs(snap);
       safeLsSet(SYNC_CACHE_KEY, JSON.stringify({ uuid, clientUpdatedAt: snap.updatedAt, blob } satisfies SyncCache));
+      lastKnownCloudClientUpdatedAtRef.current = Math.trunc(snap.updatedAt);
 
       setSyncState((s) => ({ phase: "ready", lastPullAt: s.lastPullAt, lastPushAt: Date.now() }));
     },
@@ -945,6 +978,12 @@ export function PrefsProvider(props: { children: ReactNode }) {
 
     if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
     autoPushTimerRef.current = window.setTimeout(() => {
+      const forceRecurringConfigPush = forceNextRecurringConfigPushRef.current;
+      forceNextRecurringConfigPushRef.current = false;
+      if (forceRecurringConfigPush) {
+        void push({ force: true, forceNetwork: true });
+        return;
+      }
       void push();
     }, 800);
     return () => {
@@ -1096,6 +1135,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
         [gameId]: [...existing, nextEntry],
       };
 
+      forceNextRecurringConfigPushRef.current = true;
       return { ...prev, timeline: { ...prev.timeline, recurringActivitiesByGame: nextByGame }, updatedAt: Date.now() };
     });
   }, []);
@@ -1129,6 +1169,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
           [gameId]: nextActivities,
         };
 
+        forceNextRecurringConfigPushRef.current = true;
         return { ...prev, timeline: { ...prev.timeline, recurringActivitiesByGame: nextByGame }, updatedAt: Date.now() };
       });
     },
@@ -1160,6 +1201,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       if (Object.keys(nextCompletedForGame).length === 0) delete nextCompletedByGame[gameId];
       else nextCompletedByGame[gameId] = nextCompletedForGame;
 
+      forceNextRecurringConfigPushRef.current = true;
       return {
         ...prev,
         timeline: {
@@ -1197,6 +1239,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       validIdByGame[gameId] = new Set(entries.map((entry) => entry.id));
     }
 
+    forceNextRecurringConfigPushRef.current = true;
     setPrefs((prev) => {
       const nextCompletedRecurringByGame: PrefsState["timeline"]["completedRecurringByGame"] = {};
       for (const gameId of ALL_GAME_IDS) {
