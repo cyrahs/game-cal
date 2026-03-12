@@ -8,6 +8,7 @@ type HypergryphAggregateItem = {
   cid?: string;
   tab?: string;
   title?: string;
+  header?: string;
   startAt?: number;
   data?: {
     html?: string;
@@ -38,6 +39,17 @@ function normalizeTitle(input: string | undefined): string {
     .replace(/\\[rnt]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeTitleKey(input: string | undefined): string {
+  return normalizeTitle(input)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[「」『』“”"'’‘]/g, "")
+    .replace(
+      /(?:常驻活动|签到活动|引入活动|供给活动|减耗活动|趣味活动|挑战活动|限时挑战活动|叙事活动|内容更新|开放)$/u,
+      ""
+    );
 }
 
 function stripHtml(input: string): string {
@@ -102,11 +114,11 @@ function extractTimeRangeFromHtml(
 
   // Fallback: try to find explicit start/end markers.
   const startKw =
-    /(?:开放时间|活动时间|开启时间|开始时间)[^0-9]{0,40}(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
+    /(?:开放时间|活动时间|开启时间|开始时间)\s*(?:[:：])?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
       text
     );
   const endKw =
-    /(?:结束时间|截止时间|截至|截止)[^0-9]{0,40}(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
+    /(?:结束时间|截止时间|截至|截止)\s*(?:[:：])?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
       text
     );
 
@@ -114,6 +126,221 @@ function extractTimeRangeFromHtml(
     start: normalizeDateTimeCandidate(startKw?.[1]),
     end: normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]),
   };
+}
+
+function tokenizeHtmlLines(input: string | undefined): string[] {
+  return (input ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|h\d|li|tr)>/gi, "\n")
+    .replace(/<(p|div|h\d|li|tr)[^>]*>/gi, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function parseExplicitDateRanges(input: string): Array<{ start: string; end: string }> {
+  const out: Array<{ start: string; end: string }> = [];
+  const re =
+    /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g;
+
+  for (const match of input.matchAll(re)) {
+    const start = normalizeDateTimeCandidate(match[1]);
+    const end = normalizeDateTimeCandidate(match[2]);
+    if (!start || !end) continue;
+    out.push({ start, end });
+  }
+
+  return out;
+}
+
+function extractVersionStartFromNoticeHtml(html: string | undefined): string | null {
+  const lines = tokenizeHtmlLines(html);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (!line.includes("维护时间")) continue;
+    const next = lines[i + 1] ?? "";
+    const ranges = parseExplicitDateRanges(`${line} ${next}`);
+    if (ranges.length === 0) continue;
+    return ranges[0]!.end;
+  }
+  return null;
+}
+
+function extractVersionRelativeEnd(input: string): string | null {
+  const dates = [...input.matchAll(/(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g)]
+    .map((match) => normalizeDateTimeCandidate(match[1]))
+    .filter((value): value is string => value != null);
+  return dates[dates.length - 1] ?? null;
+}
+
+function extractVersionRelativeRanges(
+  input: string,
+  versionStartNaive: string | null
+): Array<{ start: string; end: string }> {
+  if (!versionStartNaive) return [];
+  if (!/版本(?:开启后|更新后(?:开启)?)/.test(input)) return [];
+
+  const end = extractVersionRelativeEnd(input);
+  if (!end) return [];
+  return [{ start: versionStartNaive, end }];
+}
+
+function isEndfieldVersionNotice(item: HypergryphAggregateItem): boolean {
+  const title = `${item.header ?? ""} ${item.title ?? ""}`;
+  return title.includes("版本更新说明");
+}
+
+function parseVersionNoticeTimeRanges(
+  input: string,
+  versionStartNaive: string | null
+): Array<{ start: string; end: string }> {
+  const explicit = parseExplicitDateRanges(input);
+  if (explicit.length > 0) return explicit;
+  return extractVersionRelativeRanges(input, versionStartNaive);
+}
+
+function buildEndfieldEvent(
+  opts: {
+    id: string;
+    title: string;
+    startNaive: string;
+    endNaive: string;
+    banner?: string;
+    content?: string;
+  }
+): CalendarEvent | null {
+  const startIso = toIsoWithSourceOffset(opts.startNaive, ENDFIELD_SOURCE_TZ_OFFSET);
+  const endIso = toIsoWithSourceOffset(opts.endNaive, ENDFIELD_SOURCE_TZ_OFFSET);
+  const sMs = Date.parse(startIso);
+  const eMs = Date.parse(endIso);
+  if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) return null;
+
+  return {
+    id: opts.id,
+    title: opts.title,
+    start_time: startIso,
+    end_time: endIso,
+    is_gacha: isGachaEventTitle("endfield", opts.title),
+    banner: opts.banner,
+    content: opts.content,
+  };
+}
+
+function parseVersionNoticeEvents(
+  item: HypergryphAggregateItem,
+  versionStartNaive: string | null
+): CalendarEvent[] {
+  const html = item.data?.html;
+  if (!html) return [];
+
+  const lines = tokenizeHtmlLines(html);
+  const out = new Map<string, CalendarEvent>();
+  const banner = extractFirstImgSrc(html);
+  let inEventSection = false;
+  let currentTitle: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("■ ")) {
+      const section = line.slice(2).trim();
+      inEventSection = section === "全新活动" || section === "活动及玩法更新";
+      currentTitle = null;
+      continue;
+    }
+
+    if (!inEventSection) continue;
+
+    const numberedTitle = /^\d+\.\s*(.+)$/.exec(line);
+    if (numberedTitle?.[1]) {
+      currentTitle = normalizeTitle(numberedTitle[1]);
+      continue;
+    }
+
+    if (line.startsWith("同时，将同步开放")) {
+      currentTitle = normalizeTitle(line.replace(/^同时，将同步开放/, ""));
+      continue;
+    }
+
+    if (!currentTitle) continue;
+
+    const timeLine = /^·\s*([^:：]{0,48}?)(?:[:：])\s*(.+)$/.exec(line);
+    if (!timeLine) continue;
+
+    const label = normalizeTitle(timeLine[1]);
+    if (!label.includes("时间")) continue;
+
+    const ranges = parseVersionNoticeTimeRanges(timeLine[2] ?? "", versionStartNaive);
+    if (ranges.length === 0) continue;
+
+    for (let idx = 0; idx < ranges.length; idx += 1) {
+      const range = ranges[idx]!;
+      const event = buildEndfieldEvent({
+        id: `${item.cid ?? "version"}:${normalizeTitleKey(currentTitle)}:${range.start}:${range.end}:${idx}`,
+        title: currentTitle,
+        startNaive: range.start,
+        endNaive: range.end,
+        banner,
+      });
+      if (!event) continue;
+      const dedupeKey = `${normalizeTitleKey(event.title)}|${event.start_time}|${event.end_time}`;
+      if (!out.has(dedupeKey)) out.set(dedupeKey, event);
+    }
+  }
+
+  return [...out.values()];
+}
+
+function resolveEndfieldStartNaive(
+  item: HypergryphAggregateItem,
+  parsedStart: string | null,
+  html: string,
+  versionStartNaive: string | null
+): string | null {
+  if (parsedStart) return parsedStart;
+
+  const text = stripHtml(html);
+  if (/版本(?:开启后|更新后(?:开启)?)/.test(text)) {
+    return versionStartNaive;
+  }
+
+  if (item.startAt != null) {
+    const iso = unixSecondsToIsoWithSourceOffset(item.startAt, ENDFIELD_SOURCE_TZ_OFFSET);
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms)) {
+      return iso.slice(0, 19).replace("T", " ");
+    }
+  }
+
+  return null;
+}
+
+function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
+  const merged = new Map<string, CalendarEvent>();
+
+  for (const event of events) {
+    const key = `${normalizeTitleKey(event.title)}|${event.start_time}|${event.end_time}`;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, event);
+      continue;
+    }
+
+    merged.set(key, {
+      ...prev,
+      is_gacha: prev.is_gacha || event.is_gacha,
+      banner: prev.banner ?? event.banner,
+      content: prev.content ?? event.content,
+    });
+  }
+
+  return [...merged.values()].sort((a, b) => {
+    const sa = Date.parse(a.start_time);
+    const sb = Date.parse(b.start_time);
+    if (sa !== sb) return sa - sb;
+    return a.title.localeCompare(b.title, "zh-Hans-CN");
+  });
 }
 
 function extractCommonsJsUrl(html: string): string | null {
@@ -175,8 +402,12 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
 
   const res = await fetchJson<HypergryphAggregateResponse>(url.toString(), { timeoutMs: 12_000 });
   const items = res.data?.list ?? [];
+  const versionNotice = items
+    .filter(isEndfieldVersionNotice)
+    .sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0))[0];
+  const versionStartNaive = extractVersionStartFromNoticeHtml(versionNotice?.data?.html);
 
-  return items
+  const tabEvents = items
     .filter((it) => {
       const tab = String(it.tab ?? "").toLowerCase();
       return tab === "events" || tab === "event";
@@ -191,31 +422,24 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
         return [];
       }
 
-      const startIso = start
-        ? toIsoWithSourceOffset(start, ENDFIELD_SOURCE_TZ_OFFSET)
-        : it.startAt != null
-          ? unixSecondsToIsoWithSourceOffset(it.startAt, ENDFIELD_SOURCE_TZ_OFFSET)
-          : null;
+      const startNaive = resolveEndfieldStartNaive(it, start, html, versionStartNaive);
+      if (!startNaive) return [];
 
-      if (!startIso) return [];
-
-      const endIso = toIsoWithSourceOffset(end, ENDFIELD_SOURCE_TZ_OFFSET);
-
-      const sMs = Date.parse(startIso);
-      const eMs = Date.parse(endIso);
-      if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) return [];
       const title = normalizeTitle(it.title) || it.cid || "活动";
-
-      return [
-        {
-          id: it.cid ?? `${normalizeTitle(it.title)}:${it.startAt ?? startIso}`,
-          title,
-          start_time: startIso,
-          end_time: endIso,
-          is_gacha: isGachaEventTitle("endfield", title),
-          banner: extractFirstImgSrc(html),
-          content: html,
-        },
-      ];
+      const event = buildEndfieldEvent({
+        id: it.cid ?? `${normalizeTitle(it.title)}:${it.startAt ?? startNaive}`,
+        title,
+        startNaive,
+        endNaive: end,
+        banner: extractFirstImgSrc(html),
+        content: html,
+      });
+      return event ? [event] : [];
     });
+
+  const versionEvents = versionNotice
+    ? parseVersionNoticeEvents(versionNotice, versionStartNaive)
+    : [];
+
+  return mergeEvents([...tabEvents, ...versionEvents]);
 }
