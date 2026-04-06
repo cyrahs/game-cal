@@ -6,6 +6,13 @@ type CacheEntry<T> = {
 export class SimpleTtlCache {
   private readonly store = new Map<string, CacheEntry<unknown>>();
   private readonly inflight = new Map<string, Promise<unknown>>();
+  private readonly generations = new Map<string, number>();
+
+  delete(key: string): void {
+    this.store.delete(key);
+    this.inflight.delete(key);
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+  }
 
   async getOrSet<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
     const now = Date.now();
@@ -19,17 +26,21 @@ export class SimpleTtlCache {
       return (await existing) as T;
     }
 
+    const generation = this.generations.get(key) ?? 0;
     const p = fn()
       .then((value) => {
-        this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+        if ((this.generations.get(key) ?? 0) === generation) {
+          this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+        }
         return value;
       })
       .finally(() => {
-        this.inflight.delete(key);
+        if (this.inflight.get(key) === p) {
+          this.inflight.delete(key);
+        }
       });
 
     this.inflight.set(key, p as Promise<unknown>);
     return await p;
   }
 }
-
