@@ -169,8 +169,8 @@ pnpm --filter @game-cal/api start
 
 - 同一游戏下，`/api/events*` 与 `/api/version*` 共享同一份快照缓存（同一次刷新、同一 TTL）。
 - 缓存按 `CACHE_TTL_SECONDS` 过期，按请求触发刷新。
-- Worker + D1 时，事件底层缓存仍持久化在 `gc_events_cache`，缺失或过期时会拉取并回写 D1。
-- Worker 默认每分钟定时检查一次事件底层缓存；若任一游戏缺失或超过 `CACHE_TTL_SECONDS`，会后台刷新全部游戏，降低冷启动等待。
+- Worker + D1 时，事件与版本底层缓存分别持久化在 `gc_events_cache` 与 `gc_versions_cache`；版本 `null` 也是有效缓存值，缺失或过期时会拉取并回写 D1。
+- Worker 默认每分钟定时检查一次事件与版本底层缓存；若任一游戏缺失或超过 `CACHE_TTL_SECONDS`，会后台刷新全部游戏，降低冷启动等待。
 - Node API 模式使用进程内存缓存。
 
 ## 时区说明

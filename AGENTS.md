@@ -124,8 +124,8 @@ When adding a new game:
 - Update docs (`README.md`) and examples if new env vars are required.
 
 Caching behavior:
-- Node API caches upstream event lists in-memory for `CACHE_TTL_SECONDS` and sends a `Cache-Control` header.
-- Worker API uses D1-backed `gc_events_cache` when `DB` binding exists; otherwise it falls back to in-memory cache.
+- Node API caches per-game snapshots in-memory for `CACHE_TTL_SECONDS` and sends a `Cache-Control` header.
+- Worker API uses D1-backed `gc_events_cache` and `gc_versions_cache` when `DB` binding exists; otherwise it falls back to in-memory cache.
 - Web hook (`useEvents`) also caches results for ~60s in-memory.
 
 Upstream-fetch hygiene:

@@ -35,6 +35,7 @@ const SYNC_RATE_LIMIT_MAX_TRACKED_IPS = 20_000;
 
 const SYNC_TABLE = "gc_sync_state";
 const EVENTS_TABLE = "gc_events_cache";
+const VERSIONS_TABLE = "gc_versions_cache";
 const SYNC_PBKDF2_ITERATIONS = 100_000;
 const SYNC_SALT_BYTES = 16;
 const SYNC_HASH_BYTES = 32; // 256-bit
@@ -64,7 +65,9 @@ let syncD1RateLastSweepAtMs = 0;
 
 let didInitSyncSchema = false;
 let didInitEventsSchema = false;
+let didInitVersionsSchema = false;
 let eventsRefreshAllPromise: Promise<void> | null = null;
+let versionsRefreshAllPromise: Promise<void> | null = null;
 
 function json(value: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(value), {
@@ -376,6 +379,16 @@ type EventCacheUpdatedAtRow = {
   updated_at: number | string;
 };
 
+type VersionCacheRow = {
+  game: GameId;
+  payload: string;
+  updated_at: number | string;
+};
+
+type VersionCacheUpdatedAtRow = {
+  updated_at: number | string;
+};
+
 const syncBuffer = new Map<string, SyncBufferEntry>();
 let syncBufferLastSweepAtMs = 0;
 
@@ -600,6 +613,23 @@ async function ensureEventsSchema(env: Env): Promise<boolean> {
   return true;
 }
 
+async function ensureVersionsSchema(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (didInitVersionsSchema) return true;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ${VERSIONS_TABLE} (
+      game TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_gc_versions_cache_updated_at ON ${VERSIONS_TABLE}(updated_at)`
+  ).run();
+  didInitVersionsSchema = true;
+  return true;
+}
+
 async function readEventCacheRow(env: Env, game: GameId): Promise<EventCacheRow | null> {
   if (!env.DB) return null;
   return (await env.DB.prepare(`SELECT game, payload, updated_at FROM ${EVENTS_TABLE} WHERE game = ?`)
@@ -628,6 +658,34 @@ async function writeEventCacheRow(env: Env, game: GameId, payload: string, updat
     .run();
 }
 
+async function readVersionCacheRow(env: Env, game: GameId): Promise<VersionCacheRow | null> {
+  if (!env.DB) return null;
+  return (await env.DB.prepare(`SELECT game, payload, updated_at FROM ${VERSIONS_TABLE} WHERE game = ?`)
+    .bind(game)
+    .first()) as VersionCacheRow | null;
+}
+
+async function readVersionCacheUpdatedAt(env: Env, game: GameId): Promise<number | null> {
+  if (!env.DB) return null;
+  const row = (await env.DB.prepare(`SELECT updated_at FROM ${VERSIONS_TABLE} WHERE game = ?`)
+    .bind(game)
+    .first()) as VersionCacheUpdatedAtRow | null;
+  if (!row) return null;
+  const updatedAt = Number(row.updated_at);
+  return Number.isFinite(updatedAt) ? updatedAt : Number.NaN;
+}
+
+async function writeVersionCacheRow(env: Env, game: GameId, payload: string, updatedAt: number): Promise<void> {
+  if (!env.DB) return;
+  await env.DB.prepare(
+    `INSERT INTO ${VERSIONS_TABLE} (game, payload, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(game) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+  )
+    .bind(game, payload, Math.trunc(updatedAt))
+    .run();
+}
+
 function decodeEventPayload(payload: string): CalendarEvent[] | null {
   try {
     const parsed = JSON.parse(payload) as unknown;
@@ -637,8 +695,26 @@ function decodeEventPayload(payload: string): CalendarEvent[] | null {
   }
 }
 
+function decodeVersionPayload(payload: string): { valid: true; value: GameVersionInfo | null } | { valid: false } {
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    if (parsed === null) return { valid: true, value: null };
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return { valid: true, value: parsed as GameVersionInfo };
+    }
+    return { valid: false };
+  } catch {
+    return { valid: false };
+  }
+}
+
 type EventsWithUpdatedAt = {
   events: CalendarEvent[];
+  updatedAtMs: number;
+};
+
+type VersionWithUpdatedAt = {
+  version: GameVersionInfo | null;
   updatedAtMs: number;
 };
 
@@ -647,6 +723,13 @@ async function refreshGameEventsToD1(env: Env, game: GameId): Promise<EventsWith
   const updatedAtMs = Date.now();
   await writeEventCacheRow(env, game, JSON.stringify(events), updatedAtMs);
   return { events, updatedAtMs };
+}
+
+async function refreshGameVersionToD1(env: Env, game: GameId): Promise<VersionWithUpdatedAt> {
+  const version = await fetchCurrentVersionForGame(game, env);
+  const updatedAtMs = Date.now();
+  await writeVersionCacheRow(env, game, JSON.stringify(version), updatedAtMs);
+  return { version, updatedAtMs };
 }
 
 async function refreshAllGamesToD1(env: Env): Promise<void> {
@@ -662,6 +745,19 @@ async function refreshAllGamesToD1(env: Env): Promise<void> {
   }
 }
 
+async function refreshAllVersionsToD1(env: Env): Promise<void> {
+  const tasks = GAMES.map(async ({ id }) => {
+    await refreshGameVersionToD1(env, id);
+  });
+  const results = await Promise.allSettled(tasks);
+  for (const [idx, r] of results.entries()) {
+    if (r.status === "rejected") {
+      const game = GAMES[idx]?.id;
+      console.error("Failed to refresh D1 version cache", { game, err: r.reason });
+    }
+  }
+}
+
 function triggerRefreshAllGames(env: Env): Promise<void> {
   const existing = eventsRefreshAllPromise;
   if (existing) return existing;
@@ -669,6 +765,16 @@ function triggerRefreshAllGames(env: Env): Promise<void> {
     eventsRefreshAllPromise = null;
   });
   eventsRefreshAllPromise = p;
+  return p;
+}
+
+function triggerRefreshAllVersions(env: Env): Promise<void> {
+  const existing = versionsRefreshAllPromise;
+  if (existing) return existing;
+  const p = refreshAllVersionsToD1(env).finally(() => {
+    versionsRefreshAllPromise = null;
+  });
+  versionsRefreshAllPromise = p;
   return p;
 }
 
@@ -689,6 +795,23 @@ async function shouldRefreshAllGames(env: Env, ttlMs: number): Promise<boolean> 
   return false;
 }
 
+async function shouldRefreshAllVersions(env: Env, ttlMs: number): Promise<boolean> {
+  const nowMs = Date.now();
+  const checks = await Promise.all(
+    GAMES.map(async ({ id }) => {
+      const updatedAt = await readVersionCacheUpdatedAt(env, id);
+      return { id, updatedAt };
+    })
+  );
+
+  for (const { updatedAt } of checks) {
+    if (updatedAt === null || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, ttlMs, nowMs)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function refreshAllGamesToD1IfNeeded(env: Env): Promise<boolean> {
   if (!env.DB) return false;
   if (!(await ensureEventsSchema(env))) return false;
@@ -697,6 +820,17 @@ async function refreshAllGamesToD1IfNeeded(env: Env): Promise<boolean> {
   if (!(await shouldRefreshAllGames(env, ttlMs))) return false;
 
   await triggerRefreshAllGames(env);
+  return true;
+}
+
+async function refreshAllVersionsToD1IfNeeded(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (!(await ensureVersionsSchema(env))) return false;
+
+  const ttlMs = parseCacheTtlMs(env);
+  if (!(await shouldRefreshAllVersions(env, ttlMs))) return false;
+
+  await triggerRefreshAllVersions(env);
   return true;
 }
 
@@ -748,6 +882,56 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
   });
 }
 
+async function getVersionForGameWithCache(env: Env, game: GameId): Promise<VersionWithUpdatedAt> {
+  const cacheTtlMs = parseCacheTtlMs(env);
+  const memoryFallback = async () =>
+    await cache.getOrSet(`version:${game}`, cacheTtlMs, async () => {
+      const version = await fetchCurrentVersionForGame(game, env);
+      return { version, updatedAtMs: Date.now() };
+    });
+
+  if (!env.DB) return await memoryFallback();
+
+  return await cache.getOrSet(`version:d1:${game}`, cacheTtlMs, async () => {
+    try {
+      if (!(await ensureVersionsSchema(env))) {
+        return await memoryFallback();
+      }
+
+      const row = await readVersionCacheRow(env, game);
+
+      if (!row) {
+        await triggerRefreshAllVersions(env);
+        const refreshed = await readVersionCacheRow(env, game);
+        const decoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
+        const updatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
+        if (decoded.valid && Number.isFinite(updatedAt) && updatedAt > 0) {
+          return { version: decoded.value, updatedAtMs: updatedAt };
+        }
+        return await refreshGameVersionToD1(env, game);
+      }
+
+      const decoded = decodeVersionPayload(row.payload);
+      const updatedAt = Number(row.updated_at);
+      if (!decoded.valid || !Number.isFinite(updatedAt) || updatedAt <= 0 || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+        await triggerRefreshAllVersions(env);
+        const refreshed = await readVersionCacheRow(env, game);
+        const refreshedDecoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
+        const refreshedUpdatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
+        if (refreshedDecoded.valid && Number.isFinite(refreshedUpdatedAt) && refreshedUpdatedAt > 0) {
+          return { version: refreshedDecoded.value, updatedAtMs: refreshedUpdatedAt };
+        }
+        return await refreshGameVersionToD1(env, game);
+      }
+
+      return { version: decoded.value, updatedAtMs: updatedAt };
+    } catch (err) {
+      console.error("D1 version cache failed, fallback to in-memory cache", { game, err });
+      return await memoryFallback();
+    }
+  });
+}
+
 type GameSnapshotData = {
   events: CalendarEvent[];
   eventsUpdatedAtMs: number;
@@ -757,11 +941,11 @@ type GameSnapshotData = {
 async function getGameSnapshotWithCache(env: Env, game: GameId): Promise<GameSnapshotData> {
   const cacheTtlMs = parseCacheTtlMs(env);
   return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
-    const [eventsRes, version] = await Promise.all([
+    const [eventsRes, versionRes] = await Promise.all([
       getEventsForGameWithCache(env, game),
-      fetchCurrentVersionForGame(game, env),
+      getVersionForGameWithCache(env, game),
     ]);
-    return { events: eventsRes.events, eventsUpdatedAtMs: eventsRes.updatedAtMs, version };
+    return { events: eventsRes.events, eventsUpdatedAtMs: eventsRes.updatedAtMs, version: versionRes.version };
   });
 }
 
@@ -1199,6 +1383,12 @@ export default {
       await refreshAllGamesToD1IfNeeded(env);
     } catch (err) {
       console.error("Scheduled refresh for D1 event cache failed", { err });
+    }
+
+    try {
+      await refreshAllVersionsToD1IfNeeded(env);
+    } catch (err) {
+      console.error("Scheduled refresh for D1 version cache failed", { err });
     }
   },
 };
