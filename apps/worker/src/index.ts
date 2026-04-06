@@ -718,6 +718,13 @@ type VersionWithUpdatedAt = {
   updatedAtMs: number;
 };
 
+function parseFreshUpdatedAt(updatedAtRaw: number | string | undefined, ttlMs: number): number | null {
+  const updatedAt = Number(updatedAtRaw);
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return null;
+  if (isCacheStale(updatedAt, ttlMs, Date.now())) return null;
+  return updatedAt;
+}
+
 async function refreshGameEventsToD1(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
   const events = await fetchEventsForGame(game, env);
   const updatedAtMs = Date.now();
@@ -856,8 +863,8 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
         await triggerRefreshAllGames(env);
         const refreshed = await readEventCacheRow(env, game);
         const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        const updatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
-        if (parsed && Number.isFinite(updatedAt) && updatedAt > 0) return { events: parsed, updatedAtMs: updatedAt };
+        const updatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
+        if (parsed && updatedAt != null) return { events: parsed, updatedAtMs: updatedAt };
         return await refreshGameEventsToD1(env, game);
       }
 
@@ -867,8 +874,8 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
         await triggerRefreshAllGames(env);
         const refreshed = await readEventCacheRow(env, game);
         const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        const refreshedUpdatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
-        if (refreshedParsed && Number.isFinite(refreshedUpdatedAt) && refreshedUpdatedAt > 0) {
+        const refreshedUpdatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
+        if (refreshedParsed && refreshedUpdatedAt != null) {
           return { events: refreshedParsed, updatedAtMs: refreshedUpdatedAt };
         }
         return await refreshGameEventsToD1(env, game);
@@ -904,8 +911,8 @@ async function getVersionForGameWithCache(env: Env, game: GameId): Promise<Versi
         await triggerRefreshAllVersions(env);
         const refreshed = await readVersionCacheRow(env, game);
         const decoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
-        const updatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
-        if (decoded.valid && Number.isFinite(updatedAt) && updatedAt > 0) {
+        const updatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
+        if (decoded.valid && updatedAt != null) {
           return { version: decoded.value, updatedAtMs: updatedAt };
         }
         return await refreshGameVersionToD1(env, game);
@@ -917,8 +924,8 @@ async function getVersionForGameWithCache(env: Env, game: GameId): Promise<Versi
         await triggerRefreshAllVersions(env);
         const refreshed = await readVersionCacheRow(env, game);
         const refreshedDecoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
-        const refreshedUpdatedAt = refreshed ? Number(refreshed.updated_at) : Number.NaN;
-        if (refreshedDecoded.valid && Number.isFinite(refreshedUpdatedAt) && refreshedUpdatedAt > 0) {
+        const refreshedUpdatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
+        if (refreshedDecoded.valid && refreshedUpdatedAt != null) {
           return { version: refreshedDecoded.value, updatedAtMs: refreshedUpdatedAt };
         }
         return await refreshGameVersionToD1(env, game);
