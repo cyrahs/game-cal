@@ -1576,9 +1576,6 @@ export default function TimelineCalendar(props: {
 }) {
   const {
     prefs,
-    setShowNotStarted,
-    setShowWeekSeparators,
-    setShowGacha,
     setMonthlyCardRemainingDays,
     toggleCompleted: toggleCompletedPref,
     toggleRecurringCompleted: toggleRecurringCompletedPref,
@@ -2087,7 +2084,7 @@ export default function TimelineCalendar(props: {
               </div>
             ) : null}
           </div>
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="shrink-0">
             <div className="relative z-50">
               <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
                 <span>月卡</span>
@@ -2134,33 +2131,6 @@ export default function TimelineCalendar(props: {
                 )}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-              <span>按周分隔</span>
-              <input
-                type="checkbox"
-                checked={showWeekSeparators}
-                onChange={(e) => setShowWeekSeparators(e.target.checked)}
-                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-              />
-            </label>
-            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-              <span>显示卡池</span>
-              <input
-                type="checkbox"
-                checked={showGacha}
-                onChange={(e) => setShowGacha(e.target.checked)}
-                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-              />
-            </label>
-            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-              <span>显示未开始活动</span>
-              <input
-                type="checkbox"
-                checked={showNotStarted}
-                onChange={(e) => setShowNotStarted(e.target.checked)}
-                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-              />
-            </label>
           </div>
         </div>
 

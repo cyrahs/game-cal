@@ -110,7 +110,18 @@ function formatUtcOffsetLabelByDate(date: Date): string {
 
 export default function Shell() {
   const location = useLocation();
-  const { prefs, setTheme, setGameOrderIds, setVisibleGameIds, sync, exportRecurringSettings, importRecurringSettings } = usePrefs();
+  const {
+    prefs,
+    setTheme,
+    setGameOrderIds,
+    setVisibleGameIds,
+    setShowNotStarted,
+    setShowWeekSeparators,
+    setShowGacha,
+    sync,
+    exportRecurringSettings,
+    importRecurringSettings,
+  } = usePrefs();
   const genshinEvents = useEvents("genshin");
   const starrailEvents = useEvents("starrail");
   const zzzEvents = useEvents("zzz");
@@ -121,6 +132,7 @@ export default function Shell() {
   const visibleGameIds = prefs.visibleGameIds;
   const gameOrderIds = prefs.gameOrderIds;
   const showNotStarted = prefs.timeline.showNotStarted;
+  const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -855,46 +867,84 @@ export default function Shell() {
 
                     {activeSettingsTab === "config" ? (
                       <>
-                        <div className="mt-3 text-sm font-semibold">循环活动配置</div>
-                        <div className="mt-2 text-[11px] text-[color:var(--muted)]">
-                          可导出当前循环活动配置到 JSON 文件，也可从文件导入并覆盖现有循环活动配置。
-                        </div>
-                        <div className="mt-3 flex gap-2">
-                          <button
-                            type="button"
-                            className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-                            onClick={handleExportRecurringSettings}
-                          >
-                            导出循环活动
-                          </button>
-                          <button
-                            type="button"
-                            className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-                            onClick={() => {
-                              setRecurringSettingsFeedback(null);
-                              recurringImportInputRef.current?.click();
-                            }}
-                          >
-                            导入循环活动
-                          </button>
-                        </div>
-                        <input
-                          ref={recurringImportInputRef}
-                          type="file"
-                          accept="application/json,.json"
-                          className="hidden"
-                          onChange={(e) => void handleImportRecurringSettings(e)}
-                        />
-                        {recurringSettingsFeedback ? (
-                          <div
-                            className={clsx(
-                              "mt-2 text-[11px]",
-                              recurringSettingsFeedback.kind === "error" ? "text-red-600/90 dark:text-red-400/90" : "text-[color:var(--muted)]"
-                            )}
-                          >
-                            {recurringSettingsFeedback.text}
+                        <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
+                          <div className="text-sm font-semibold">时间线显示</div>
+                          <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                            控制时间线是否按周分隔，以及是否展示卡池和未开始活动。
                           </div>
-                        ) : null}
+                          <div className="mt-3 grid gap-2">
+                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
+                              <span className="text-xs text-[color:var(--ink)]">按周分隔</span>
+                              <input
+                                type="checkbox"
+                                checked={showWeekSeparators}
+                                onChange={(e) => setShowWeekSeparators(e.target.checked)}
+                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
+                              />
+                            </label>
+                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
+                              <span className="text-xs text-[color:var(--ink)]">显示卡池</span>
+                              <input
+                                type="checkbox"
+                                checked={showGacha}
+                                onChange={(e) => setShowGacha(e.target.checked)}
+                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
+                              />
+                            </label>
+                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
+                              <span className="text-xs text-[color:var(--ink)]">显示未开始活动</span>
+                              <input
+                                type="checkbox"
+                                checked={showNotStarted}
+                                onChange={(e) => setShowNotStarted(e.target.checked)}
+                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
+                              />
+                            </label>
+                          </div>
+                        </section>
+
+                        <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
+                          <div className="text-sm font-semibold">循环活动配置</div>
+                          <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                            可导出当前循环活动配置到 JSON 文件，也可从文件导入并覆盖现有循环活动配置。
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+                              onClick={handleExportRecurringSettings}
+                            >
+                              导出循环活动
+                            </button>
+                            <button
+                              type="button"
+                              className="glass flex-1 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+                              onClick={() => {
+                                setRecurringSettingsFeedback(null);
+                                recurringImportInputRef.current?.click();
+                              }}
+                            >
+                              导入循环活动
+                            </button>
+                          </div>
+                          <input
+                            ref={recurringImportInputRef}
+                            type="file"
+                            accept="application/json,.json"
+                            className="hidden"
+                            onChange={(e) => void handleImportRecurringSettings(e)}
+                          />
+                          {recurringSettingsFeedback ? (
+                            <div
+                              className={clsx(
+                                "mt-2 text-[11px]",
+                                recurringSettingsFeedback.kind === "error" ? "text-red-600/90 dark:text-red-400/90" : "text-[color:var(--muted)]"
+                              )}
+                            >
+                              {recurringSettingsFeedback.text}
+                            </div>
+                          ) : null}
+                        </section>
                       </>
                     ) : null}
                   </div>
