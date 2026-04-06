@@ -31,6 +31,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
+const MONTH_LABEL_MIN_WIDTH = 36;
 const TIMELINE_BAR_COLORS = [
   "#71ADDC",
   "#B4D27C",
@@ -1835,7 +1836,7 @@ export default function TimelineCalendar(props: {
     setIsTimelineCheckboxVisible(false);
   }, [selectedEvent, selectedId]);
 
-  const { rangeStart, rangeEnd, months, weeks } = useMemo(() => {
+  const { rangeStart, rangeEnd, months: monthSegments, weeks } = useMemo(() => {
     const baseMonth = now.startOf("month");
     const windowStart = baseMonth.subtract(1, "month").startOf("month");
     const windowEnd = baseMonth.add(1, "month").endOf("month");
@@ -1958,6 +1959,16 @@ export default function TimelineCalendar(props: {
     const ms = rangeEnd.valueOf() - rangeStart.valueOf();
     return (ms / DAY_MS) * dayWidth;
   }, [rangeStart, rangeEnd, dayWidth]);
+
+  const months = useMemo(() => {
+    return monthSegments.map((segment) => {
+      const segmentPx = totalWidth * (segment.width / 100);
+      return {
+        ...segment,
+        showLabel: segmentPx >= MONTH_LABEL_MIN_WIDTH,
+      };
+    });
+  }, [monthSegments, totalWidth]);
 
   const nowX = useMemo(() => {
     const ms = now.valueOf() - rangeStart.valueOf();
@@ -2177,12 +2188,12 @@ export default function TimelineCalendar(props: {
                     <div
                       key={m.key}
                       className={clsx(
-                        "flex items-center justify-center text-sm font-semibold text-[color:var(--ink2)]",
+                        "flex items-center justify-center overflow-hidden text-sm font-semibold text-[color:var(--ink2)]",
                         idx < months.length - 1 && "border-r border-[color:var(--line)]"
                       )}
                       style={{ width: `${m.width}%` }}
                     >
-                      {m.label}
+                      {m.showLabel ? <span className="whitespace-nowrap">{m.label}</span> : null}
                     </div>
                   ))}
                 </div>
