@@ -13,6 +13,7 @@ interface Env extends RuntimeEnv {
 
   // Optional runtime knobs (match the Node API env vars where possible).
   CACHE_TTL_SECONDS?: string;
+  CACHE_REFRESH_MARGIN_SECONDS?: string;
   CORS_ORIGIN?: string; // comma-separated allowlist; omit/empty to allow all
 
   // Sync API rate limit knobs (IP based, Worker in-memory token bucket).
@@ -26,6 +27,7 @@ interface Env extends RuntimeEnv {
 
 const cache = new SimpleTtlCache();
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 8;
+const DEFAULT_CACHE_REFRESH_MARGIN_SECONDS = 30 * 60;
 const DEFAULT_SYNC_RATE_LIMIT_MAX = 120;
 const DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS = 60;
 const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 1;
@@ -107,6 +109,11 @@ function isCacheStale(updatedAtMs: number, ttlMs: number, nowMs: number): boolea
   return nowMs - updatedAtMs >= ttlMs;
 }
 
+function shouldRefreshCacheBeforeTtl(updatedAtMs: number, ttlMs: number, refreshMarginMs: number, nowMs: number): boolean {
+  const refreshWindowMs = Math.max(0, ttlMs - refreshMarginMs);
+  return nowMs - updatedAtMs >= refreshWindowMs;
+}
+
 function getPasswordHeader(req: Request): string | null {
   const raw = req.headers.get("x-gc-password") ?? req.headers.get("x-game-cal-password");
   const v = (raw ?? "").trim();
@@ -125,6 +132,31 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const n = Number(raw ?? String(fallback));
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.trunc(n);
+}
+
+function parseCacheConfig(env: Env): { ttlMs: number; refreshMarginMs: number } {
+  const ttlRaw = env.CACHE_TTL_SECONDS;
+  const ttlNum = Number(ttlRaw ?? String(DEFAULT_CACHE_TTL_SECONDS));
+  const ttlSeconds = Number.isFinite(ttlNum) && ttlNum > 0 ? Math.trunc(ttlNum) : DEFAULT_CACHE_TTL_SECONDS;
+
+  const marginRaw = env.CACHE_REFRESH_MARGIN_SECONDS;
+  const marginNum = Number(marginRaw ?? String(DEFAULT_CACHE_REFRESH_MARGIN_SECONDS));
+  const requestedMarginSeconds =
+    Number.isFinite(marginNum) && marginNum > 0 ? Math.trunc(marginNum) : DEFAULT_CACHE_REFRESH_MARGIN_SECONDS;
+
+  let refreshMarginSeconds = requestedMarginSeconds;
+  if (ttlSeconds <= 1) {
+    refreshMarginSeconds = 0;
+  } else if (ttlSeconds <= 60) {
+    refreshMarginSeconds = ttlSeconds - 1;
+  } else {
+    refreshMarginSeconds = Math.min(requestedMarginSeconds, ttlSeconds - 60);
+  }
+
+  return {
+    ttlMs: Math.trunc(ttlSeconds * 1000),
+    refreshMarginMs: Math.trunc(refreshMarginSeconds * 1000),
+  };
 }
 
 function parseSyncRateLimitConfig(env: Env): { limit: number; windowMs: number; writeCost: number } {
@@ -786,6 +818,7 @@ function triggerRefreshAllVersions(env: Env): Promise<void> {
 }
 
 async function shouldRefreshAllGames(env: Env, ttlMs: number): Promise<boolean> {
+  const { refreshMarginMs } = parseCacheConfig(env);
   const nowMs = Date.now();
   const checks = await Promise.all(
     GAMES.map(async ({ id }) => {
@@ -795,7 +828,12 @@ async function shouldRefreshAllGames(env: Env, ttlMs: number): Promise<boolean> 
   );
 
   for (const { updatedAt } of checks) {
-    if (updatedAt === null || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, ttlMs, nowMs)) {
+    if (
+      updatedAt === null ||
+      !Number.isFinite(updatedAt) ||
+      updatedAt <= 0 ||
+      shouldRefreshCacheBeforeTtl(updatedAt, ttlMs, refreshMarginMs, nowMs)
+    ) {
       return true;
     }
   }
@@ -803,6 +841,7 @@ async function shouldRefreshAllGames(env: Env, ttlMs: number): Promise<boolean> 
 }
 
 async function shouldRefreshAllVersions(env: Env, ttlMs: number): Promise<boolean> {
+  const { refreshMarginMs } = parseCacheConfig(env);
   const nowMs = Date.now();
   const checks = await Promise.all(
     GAMES.map(async ({ id }) => {
@@ -812,7 +851,12 @@ async function shouldRefreshAllVersions(env: Env, ttlMs: number): Promise<boolea
   );
 
   for (const { updatedAt } of checks) {
-    if (updatedAt === null || !Number.isFinite(updatedAt) || isCacheStale(updatedAt, ttlMs, nowMs)) {
+    if (
+      updatedAt === null ||
+      !Number.isFinite(updatedAt) ||
+      updatedAt <= 0 ||
+      shouldRefreshCacheBeforeTtl(updatedAt, ttlMs, refreshMarginMs, nowMs)
+    ) {
       return true;
     }
   }
@@ -823,7 +867,7 @@ async function refreshAllGamesToD1IfNeeded(env: Env): Promise<boolean> {
   if (!env.DB) return false;
   if (!(await ensureEventsSchema(env))) return false;
 
-  const ttlMs = parseCacheTtlMs(env);
+  const { ttlMs } = parseCacheConfig(env);
   if (!(await shouldRefreshAllGames(env, ttlMs))) return false;
 
   await triggerRefreshAllGames(env);
@@ -834,7 +878,7 @@ async function refreshAllVersionsToD1IfNeeded(env: Env): Promise<boolean> {
   if (!env.DB) return false;
   if (!(await ensureVersionsSchema(env))) return false;
 
-  const ttlMs = parseCacheTtlMs(env);
+  const { ttlMs } = parseCacheConfig(env);
   if (!(await shouldRefreshAllVersions(env, ttlMs))) return false;
 
   await triggerRefreshAllVersions(env);
@@ -842,7 +886,7 @@ async function refreshAllVersionsToD1IfNeeded(env: Env): Promise<boolean> {
 }
 
 async function getEventsForGameWithCache(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
-  const cacheTtlMs = parseCacheTtlMs(env);
+  const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
   const memoryFallback = async () =>
     await cache.getOrSet(`events:${game}`, cacheTtlMs, async () => {
       const events = await fetchEventsForGame(game, env);
@@ -890,7 +934,7 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
 }
 
 async function getVersionForGameWithCache(env: Env, game: GameId): Promise<VersionWithUpdatedAt> {
-  const cacheTtlMs = parseCacheTtlMs(env);
+  const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
   const memoryFallback = async () =>
     await cache.getOrSet(`version:${game}`, cacheTtlMs, async () => {
       const version = await fetchCurrentVersionForGame(game, env);
@@ -946,7 +990,7 @@ type GameSnapshotData = {
 };
 
 async function getGameSnapshotWithCache(env: Env, game: GameId): Promise<GameSnapshotData> {
-  const cacheTtlMs = parseCacheTtlMs(env);
+  const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
   return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
     const [eventsRes, versionRes] = await Promise.all([
       getEventsForGameWithCache(env, game),
@@ -1154,10 +1198,7 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
 }
 
 function parseCacheTtlMs(env: Env): number {
-  const raw = env.CACHE_TTL_SECONDS;
-  const n = Number(raw ?? String(DEFAULT_CACHE_TTL_SECONDS));
-  const seconds = Number.isFinite(n) && n > 0 ? n : DEFAULT_CACHE_TTL_SECONDS;
-  return Math.trunc(seconds * 1000);
+  return parseCacheConfig(env).ttlMs;
 }
 
 function parseCorsAllowlist(env: Env): string[] | null {
@@ -1386,16 +1427,16 @@ export default {
       console.error("Scheduled flush for buffered sync rows failed", { err });
     }
 
-    try {
-      await refreshAllGamesToD1IfNeeded(env);
-    } catch (err) {
-      console.error("Scheduled refresh for D1 event cache failed", { err });
-    }
+    const [eventsResult, versionsResult] = await Promise.allSettled([
+      refreshAllGamesToD1IfNeeded(env),
+      refreshAllVersionsToD1IfNeeded(env),
+    ]);
 
-    try {
-      await refreshAllVersionsToD1IfNeeded(env);
-    } catch (err) {
-      console.error("Scheduled refresh for D1 version cache failed", { err });
+    if (eventsResult.status === "rejected") {
+      console.error("Scheduled refresh for D1 event cache failed", { err: eventsResult.reason });
+    }
+    if (versionsResult.status === "rejected") {
+      console.error("Scheduled refresh for D1 version cache failed", { err: versionsResult.reason });
     }
   },
 };
