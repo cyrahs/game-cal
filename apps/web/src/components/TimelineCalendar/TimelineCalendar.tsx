@@ -32,6 +32,12 @@ const MINUTE_MS = 60 * 1000;
 const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
 const MONTH_LABEL_MIN_WIDTH = 36;
+const TIMELINE_BAR_TOP_OFFSET_PX = 8;
+const SHORT_BAR_TITLE_POPOVER_OFFSET_PX = 6;
+const SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX = 240;
+const SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX = 12;
+const SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX =
+  SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX / 2 + SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX;
 const TIMELINE_BAR_COLORS = [
   "#71ADDC",
   "#B4D27C",
@@ -2262,6 +2268,7 @@ export default function TimelineCalendar(props: {
                   const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
                   const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
                   const showCountdownOnly = width <= 88;
+                  const showShortBarTitlePopover = showCountdownOnly && showCompleteToggle;
                   const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
                   const countdownUnits = Array.from(remainingLabel).reduce(
                     (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
@@ -2273,6 +2280,33 @@ export default function TimelineCalendar(props: {
                     : 13;
                   const completeChipSize = showCountdownOnly ? clamp(width - 4, 8, 24) : 24;
                   const completeIconSize = clamp(completeChipSize * 0.58, 6, 14);
+                  const shortBarTitleCenterX = left + width / 2;
+                  const shortBarTitleAlignLeft = shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
+                  const shortBarTitleAlignRight =
+                    totalWidth - shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
+                  const shortBarTitleTranslateY = showShortBarTitlePopover
+                    ? `calc(-100% - ${SHORT_BAR_TITLE_POPOVER_OFFSET_PX}px)`
+                    : "calc(-100% - 2px)";
+                  const shortBarTitlePopoverStyle = shortBarTitleAlignLeft
+                    ? {
+                        top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                        left: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
+                        maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
+                        transform: `translateY(${shortBarTitleTranslateY})`,
+                      }
+                    : shortBarTitleAlignRight
+                      ? {
+                          top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                          right: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
+                          maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
+                          transform: `translateY(${shortBarTitleTranslateY})`,
+                        }
+                      : {
+                          top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                          left: `${shortBarTitleCenterX}px`,
+                          maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
+                          transform: `translate(-50%, ${shortBarTitleTranslateY})`,
+                        };
 
                   const barColor = timelineColorAt(idx, timelineBarColorStartOffset);
 
@@ -2295,6 +2329,29 @@ export default function TimelineCalendar(props: {
                       )}
                       style={{ height: 56 }}
                     >
+                      {showCountdownOnly ? (
+                        <div
+                          className={clsx(
+                            "pointer-events-none absolute z-30 px-3 py-2 rounded-xl border border-[color:var(--line)]",
+                            "bg-[color:var(--popover)] text-[13px] text-[color:var(--ink)] shadow-[0_12px_30px_var(--shadow-ink)]",
+                            "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                            showShortBarTitlePopover ? "opacity-100" : "opacity-0"
+                          )}
+                          style={shortBarTitlePopoverStyle}
+                          aria-hidden="true"
+                        >
+                          <div
+                            className="overflow-hidden break-words leading-5"
+                            style={{
+                              display: "-webkit-box",
+                              WebkitBoxOrient: "vertical",
+                              WebkitLineClamp: 2,
+                            }}
+                          >
+                            {e.title}
+                          </div>
+                        </div>
+                      ) : null}
                       <div
                         data-event-bar
                         className={clsx(
@@ -2343,30 +2400,30 @@ export default function TimelineCalendar(props: {
                             </div>
                           </div>
                         ) : null}
-	                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
-	                          <button
-	                            type="button"
-	                            className={clsx(
-	                              "absolute inline-flex items-center justify-center",
-	                              // When the bar is very short we render countdown-only text centered.
-	                              // Avoid turning the whole bar into a huge invisible button by sizing
-	                              // the hit-target to the chip only.
-	                              showCountdownOnly
-	                                ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-	                                : "inset-0",
-	                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-	                              showCompleteToggle
-	                                ? "opacity-100 scale-100 pointer-events-auto"
-	                                : "opacity-0 scale-95 pointer-events-none"
-	                            )}
-	                            style={
-	                              showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
-	                            }
-	                            onClick={(ev) => {
-	                              ev.stopPropagation();
-	                              if (e.kind === "recurring") {
-	                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
-	                              } else {
+                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
+                          <button
+                            type="button"
+                            className={clsx(
+                              "absolute inline-flex items-center justify-center",
+                              // When the bar is very short we render countdown-only text centered.
+                              // Avoid turning the whole bar into a huge invisible button by sizing
+                              // the hit-target to the chip only.
+                              showCountdownOnly
+                                ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+                                : "inset-0",
+                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                              showCompleteToggle
+                                ? "opacity-100 scale-100 pointer-events-auto"
+                                : "opacity-0 scale-95 pointer-events-none"
+                            )}
+                            style={
+                              showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
+                            }
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              if (e.kind === "recurring") {
+                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
+                              } else {
                                 toggleCompleted(e.id);
                               }
                             }}
@@ -2375,19 +2432,19 @@ export default function TimelineCalendar(props: {
                             aria-hidden={!showCompleteToggle}
                             tabIndex={showCompleteToggle ? 0 : -1}
                             disabled={!showCompleteToggle}
-	                          >
-	                            <span
-	                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-	                              style={
-	                                showCountdownOnly
-	                                  ? { width: "100%", height: "100%" }
-	                                  : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
-	                              }
-	                            >
-	                              <svg
-	                                className="flex-none"
-	                                viewBox="0 0 24 24"
-	                                fill="none"
+                          >
+                            <span
+                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                              style={
+                                showCountdownOnly
+                                  ? { width: "100%", height: "100%" }
+                                  : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
+                              }
+                            >
+                              <svg
+                                className="flex-none"
+                                viewBox="0 0 24 24"
+                                fill="none"
                                 stroke="currentColor"
                                 strokeWidth="3"
                                 strokeLinecap="round"
