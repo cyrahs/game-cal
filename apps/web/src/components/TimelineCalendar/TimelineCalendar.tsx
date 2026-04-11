@@ -1982,11 +1982,6 @@ export default function TimelineCalendar(props: {
   }, [now, rangeStart, dayWidth]);
 
   const isNowInRange = !now.isBefore(rangeStart) && !now.isAfter(rangeEnd);
-  const nowLabelX = useMemo(() => {
-    // Keep the chip readable near edges.
-    const pad = 80;
-    return Math.min(Math.max(nowX, pad), Math.max(pad, totalWidth - pad));
-  }, [nowX, totalWidth]);
 
   const axisHeights = useMemo(() => {
     const monthRow = 36;
@@ -2167,18 +2162,6 @@ export default function TimelineCalendar(props: {
                   style={{ left: nowX }}
                 >
                   <div className="w-[2px] h-full bg-indigo-500/80" />
-                </div>
-              ) : null}
-
-              {/* Now label */}
-              {isNowInRange ? (
-                <div
-                  className="pointer-events-none absolute top-2 z-40"
-                  style={{ left: nowLabelX, transform: "translateX(-50%)" }}
-                >
-                  <div className="px-3 py-1 rounded-full text-xs text-white bg-indigo-500 shadow">
-                    {now.format("M/D")}
-                  </div>
                 </div>
               ) : null}
 

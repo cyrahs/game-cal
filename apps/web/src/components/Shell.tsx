@@ -146,7 +146,10 @@ export default function Shell() {
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const gameRowRefs = useRef<Partial<Record<GameId, HTMLDivElement | null>>>({});
   const [now, setNow] = useState(() => dayjs());
-  const timezoneLabel = useMemo(() => formatUtcOffsetLabelByDate(now.toDate()), [now]);
+  const headerMetaLabel = useMemo(
+    () => `${now.format("YYYY/MM/DD")} · ${formatUtcOffsetLabelByDate(now.toDate())}`,
+    [now]
+  );
   const currentGameId = useMemo<GameId>(() => {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
     const matched = games.find((g) => g.to === normalizedPath);
@@ -438,7 +441,7 @@ export default function Shell() {
           <div className="flex items-end gap-2">
             <img src="/favicon/apple-icon.png" alt="Game Calendar Logo" className="w-7 h-7 object-contain rounded-sm" />
             <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
-            <div className="text-xs text-[color:var(--muted)] leading-none">{timezoneLabel}</div>
+            <div className="text-xs text-[color:var(--muted)] leading-none">{headerMetaLabel}</div>
           </div>
 
           <nav className="flex items-center gap-2">
