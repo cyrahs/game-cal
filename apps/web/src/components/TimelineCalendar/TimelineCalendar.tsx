@@ -2014,19 +2014,6 @@ export default function TimelineCalendar(props: {
     };
   }, [rangeStart, rangeEnd]);
 
-  useEffect(() => {
-    // Auto-scroll to "now" when data/range changes.
-    if (isTimelineEmpty) return;
-    if (!isNowInRange) return;
-    const el = hScrollRef.current;
-    if (!el) return;
-
-    const desired = Math.max(0, nowX - el.clientWidth * 0.25);
-    el.scrollTo({ left: desired, behavior: "smooth" });
-    // Only do this on range/zoom changes, not every minute tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rangeStart.valueOf(), rangeEnd.valueOf(), dayWidth, activeTimelineEvents.length]);
-
   const recurringDefinitionsSorted = useMemo(() => {
     return [...recurringDefs].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
   }, [recurringDefs]);
