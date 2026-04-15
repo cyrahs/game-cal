@@ -7,6 +7,10 @@ interface Env extends RuntimeEnv {
   // Workers Assets binding (see wrangler.jsonc assets.binding).
   ASSETS: Fetcher;
 
+  // Per-deployment Worker version metadata. We use this to invalidate D1 caches
+  // when a new Worker revision is deployed.
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
+
   // Optional D1 binding for sync state.
   // Configure in wrangler.jsonc -> d1_databases: [{ binding: "DB", ... }]
   DB?: D1Database;
@@ -38,6 +42,8 @@ const SYNC_RATE_LIMIT_MAX_TRACKED_IPS = 20_000;
 const SYNC_TABLE = "gc_sync_state";
 const EVENTS_TABLE = "gc_events_cache";
 const VERSIONS_TABLE = "gc_versions_cache";
+const CACHE_META_TABLE = "gc_cache_meta";
+const CACHE_META_DEPLOYMENT_REVISION_KEY = "deployment_revision";
 const SYNC_PBKDF2_ITERATIONS = 100_000;
 const SYNC_SALT_BYTES = 16;
 const SYNC_HASH_BYTES = 32; // 256-bit
@@ -68,6 +74,8 @@ let syncD1RateLastSweepAtMs = 0;
 let didInitSyncSchema = false;
 let didInitEventsSchema = false;
 let didInitVersionsSchema = false;
+let didInitCacheMetaSchema = false;
+let lastEnsuredDeploymentRevision: string | null = null;
 const eventRefreshPromises = new Map<GameId, Promise<EventsWithUpdatedAt>>();
 const versionRefreshPromises = new Map<GameId, Promise<VersionWithUpdatedAt>>();
 
@@ -660,6 +668,71 @@ async function ensureVersionsSchema(env: Env): Promise<boolean> {
   ).run();
   didInitVersionsSchema = true;
   return true;
+}
+
+async function ensureCacheMetaSchema(env: Env): Promise<boolean> {
+  if (!env.DB) return false;
+  if (didInitCacheMetaSchema) return true;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ${CACHE_META_TABLE} (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_gc_cache_meta_updated_at ON ${CACHE_META_TABLE}(updated_at)`
+  ).run();
+  didInitCacheMetaSchema = true;
+  return true;
+}
+
+async function readCacheMetaValue(env: Env, key: string): Promise<string | null> {
+  if (!env.DB) return null;
+  const row = (await env.DB.prepare(`SELECT value FROM ${CACHE_META_TABLE} WHERE key = ?`)
+    .bind(key)
+    .first()) as { value?: string } | null;
+  return typeof row?.value === "string" ? row.value : null;
+}
+
+function getDeploymentRevision(env: Env): string | null {
+  const metadata = env.CF_VERSION_METADATA;
+  if (!metadata) return null;
+  const tag = String(metadata.tag ?? "").trim();
+  const id = String(metadata.id ?? "").trim();
+  return tag || id || null;
+}
+
+function invalidateAllGameCaches(): void {
+  for (const { id } of GAMES) {
+    invalidateEventCaches(id);
+    invalidateVersionCaches(id);
+  }
+}
+
+async function ensureDeploymentCacheRevision(env: Env): Promise<void> {
+  if (!env.DB) return;
+
+  const deploymentRevision = getDeploymentRevision(env);
+  if (!deploymentRevision || lastEnsuredDeploymentRevision === deploymentRevision) return;
+
+  await Promise.all([ensureEventsSchema(env), ensureVersionsSchema(env), ensureCacheMetaSchema(env)]);
+
+  const persistedRevision = await readCacheMetaValue(env, CACHE_META_DEPLOYMENT_REVISION_KEY);
+  if (persistedRevision !== deploymentRevision) {
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM ${EVENTS_TABLE}`),
+      env.DB.prepare(`DELETE FROM ${VERSIONS_TABLE}`),
+      env.DB.prepare(
+        `INSERT INTO ${CACHE_META_TABLE} (key, value, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      ).bind(CACHE_META_DEPLOYMENT_REVISION_KEY, deploymentRevision, Date.now()),
+    ]);
+    invalidateAllGameCaches();
+  }
+
+  lastEnsuredDeploymentRevision = deploymentRevision;
 }
 
 async function readEventCacheRow(env: Env, game: GameId): Promise<EventCacheRow | null> {
@@ -1436,6 +1509,7 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    await ensureDeploymentCacheRevision(env);
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api")) {
@@ -1447,6 +1521,7 @@ export default {
     return env.ASSETS.fetch(request);
   },
   async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await ensureDeploymentCacheRevision(env);
     try {
       await flushDueSyncRowsToD1(env);
     } catch (err) {
