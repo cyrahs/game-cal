@@ -211,14 +211,14 @@ function isEndfieldVersionMaintenancePreview(item: HypergryphAggregateItem): boo
 function extractEndfieldVersionLabel(item: HypergryphAggregateItem): string | null {
   const combinedTitle = normalizeTitle(`${item.header ?? ""} ${item.title ?? ""}`);
   const titleMatch = /「([^」]+)」版本/.exec(combinedTitle);
-  if (titleMatch?.[1]) return normalizeTitle(titleMatch[1]);
+  if (titleMatch?.[1]) return `「${normalizeTitle(titleMatch[1])}」`;
 
   const text = stripHtml(item.data?.html ?? "");
   const welcomeMatch = /欢迎来到全新版本「([^」]+)」/.exec(text);
-  if (welcomeMatch?.[1]) return normalizeTitle(welcomeMatch[1]);
+  if (welcomeMatch?.[1]) return `「${normalizeTitle(welcomeMatch[1])}」`;
 
   const updateMatch = /更新至全新版本「([^」]+)」/.exec(text);
-  if (updateMatch?.[1]) return normalizeTitle(updateMatch[1]);
+  if (updateMatch?.[1]) return `「${normalizeTitle(updateMatch[1])}」`;
 
   return null;
 }
