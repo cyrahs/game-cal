@@ -4,7 +4,7 @@ import { fetchGenshinCurrentVersion, fetchGenshinEvents } from "./genshin.js";
 import { fetchStarRailCurrentVersion, fetchStarRailEvents } from "./starrail.js";
 import { fetchWwCurrentVersion, fetchWwEvents } from "./ww.js";
 import { fetchZzzCurrentVersion, fetchZzzEvents } from "./zzz.js";
-import { fetchEndfieldEvents } from "./endfield.js";
+import { fetchEndfieldCurrentVersion, fetchEndfieldEvents } from "./endfield.js";
 import { fetchSnowbreakCurrentVersion, fetchSnowbreakEvents } from "./snowbreak.js";
 
 export const GAMES: Array<{ id: GameId; name: string }> = [
@@ -56,7 +56,7 @@ export async function fetchCurrentVersionForGame(
     case "snowbreak":
       return await fetchSnowbreakCurrentVersion(env);
     case "endfield":
-      return null;
+      return await fetchEndfieldCurrentVersion(env);
     default: {
       const _exhaustive: never = game;
       return _exhaustive;

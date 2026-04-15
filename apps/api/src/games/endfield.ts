@@ -1,7 +1,7 @@
 import { fetchJson, fetchText } from "../lib/fetch.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
-import type { CalendarEvent } from "../types.js";
+import type { CalendarEvent, GameVersionInfo } from "../types.js";
 import { isGachaEventTitle } from "./gacha.js";
 
 type HypergryphAggregateItem = {
@@ -21,6 +21,14 @@ type HypergryphAggregateResponse = {
   data?: {
     list?: HypergryphAggregateItem[];
   };
+};
+
+type EndfieldVersionNotice = {
+  item: HypergryphAggregateItem;
+  version: string;
+  maintenanceEndNaive: string;
+  maintenanceStartIso: string;
+  maintenanceEndIso: string;
 };
 
 const ENDFIELD_WEBVIEW_DEFAULT =
@@ -156,7 +164,9 @@ function parseExplicitDateRanges(input: string): Array<{ start: string; end: str
   return out;
 }
 
-function extractVersionStartFromNoticeHtml(html: string | undefined): string | null {
+function extractMaintenanceTimeRangeFromNoticeHtml(
+  html: string | undefined
+): { start: string | null; end: string | null } {
   const lines = tokenizeHtmlLines(html);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -164,9 +174,9 @@ function extractVersionStartFromNoticeHtml(html: string | undefined): string | n
     const next = lines[i + 1] ?? "";
     const ranges = parseExplicitDateRanges(`${line} ${next}`);
     if (ranges.length === 0) continue;
-    return ranges[0]!.end;
+    return ranges[0]!;
   }
-  return null;
+  return { start: null, end: null };
 }
 
 function extractVersionRelativeEnd(input: string): string | null {
@@ -191,6 +201,61 @@ function extractVersionRelativeRanges(
 function isEndfieldVersionNotice(item: HypergryphAggregateItem): boolean {
   const title = `${item.header ?? ""} ${item.title ?? ""}`;
   return title.includes("版本更新说明");
+}
+
+function isEndfieldVersionMaintenancePreview(item: HypergryphAggregateItem): boolean {
+  const title = `${item.header ?? ""} ${item.title ?? ""}`;
+  return title.includes("版本更新维护预告");
+}
+
+function extractEndfieldVersionLabel(item: HypergryphAggregateItem): string | null {
+  const combinedTitle = normalizeTitle(`${item.header ?? ""} ${item.title ?? ""}`);
+  const titleMatch = /「([^」]+)」版本/.exec(combinedTitle);
+  if (titleMatch?.[1]) return normalizeTitle(titleMatch[1]);
+
+  const text = stripHtml(item.data?.html ?? "");
+  const welcomeMatch = /欢迎来到全新版本「([^」]+)」/.exec(text);
+  if (welcomeMatch?.[1]) return normalizeTitle(welcomeMatch[1]);
+
+  const updateMatch = /更新至全新版本「([^」]+)」/.exec(text);
+  if (updateMatch?.[1]) return normalizeTitle(updateMatch[1]);
+
+  return null;
+}
+
+function toEndfieldVersionNotice(item: HypergryphAggregateItem): EndfieldVersionNotice | null {
+  if (!isEndfieldVersionNotice(item) && !isEndfieldVersionMaintenancePreview(item)) {
+    return null;
+  }
+
+  const version = extractEndfieldVersionLabel(item);
+  if (!version) return null;
+
+  const maintenance = extractMaintenanceTimeRangeFromNoticeHtml(item.data?.html);
+  if (!maintenance.start || !maintenance.end) return null;
+
+  return {
+    item,
+    version,
+    maintenanceEndNaive: maintenance.end,
+    maintenanceStartIso: toIsoWithSourceOffset(maintenance.start, ENDFIELD_SOURCE_TZ_OFFSET),
+    maintenanceEndIso: toIsoWithSourceOffset(maintenance.end, ENDFIELD_SOURCE_TZ_OFFSET),
+  };
+}
+
+function pickCurrentEndfieldVersionNotice(items: HypergryphAggregateItem[]): EndfieldVersionNotice | null {
+  const nowMs = Date.now();
+  const notices = items
+    .filter(isEndfieldVersionNotice)
+    .map(toEndfieldVersionNotice)
+    .filter((notice): notice is EndfieldVersionNotice => notice != null)
+    .sort((a, b) => Date.parse(b.maintenanceEndIso) - Date.parse(a.maintenanceEndIso));
+
+  return (
+    notices.find((notice) => Date.parse(notice.maintenanceEndIso) <= nowMs) ??
+    notices[0] ??
+    null
+  );
 }
 
 function parseVersionNoticeTimeRanges(
@@ -391,7 +456,9 @@ async function getEndfieldCode(env: RuntimeEnv): Promise<string> {
   }
 }
 
-export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
+async function fetchEndfieldAggregateItems(
+  env: RuntimeEnv = {}
+): Promise<HypergryphAggregateItem[]> {
   const aggregateBase = env.ENDFIELD_AGGREGATE_API_URL ?? ENDFIELD_AGGREGATE_API_DEFAULT;
   const code = await getEndfieldCode(env);
 
@@ -401,11 +468,13 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
   url.searchParams.set("hideDetail", "0");
 
   const res = await fetchJson<HypergryphAggregateResponse>(url.toString(), { timeoutMs: 12_000 });
-  const items = res.data?.list ?? [];
-  const versionNotice = items
-    .filter(isEndfieldVersionNotice)
-    .sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0))[0];
-  const versionStartNaive = extractVersionStartFromNoticeHtml(versionNotice?.data?.html);
+  return res.data?.list ?? [];
+}
+
+export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
+  const items = await fetchEndfieldAggregateItems(env);
+  const versionNotice = pickCurrentEndfieldVersionNotice(items);
+  const versionStartNaive = versionNotice?.maintenanceEndNaive ?? null;
 
   const tabEvents = items
     .filter((it) => {
@@ -438,8 +507,42 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
     });
 
   const versionEvents = versionNotice
-    ? parseVersionNoticeEvents(versionNotice, versionStartNaive)
+    ? parseVersionNoticeEvents(versionNotice.item, versionStartNaive)
     : [];
 
   return mergeEvents([...tabEvents, ...versionEvents]);
+}
+
+export async function fetchEndfieldCurrentVersion(
+  env: RuntimeEnv = {}
+): Promise<GameVersionInfo | null> {
+  const items = await fetchEndfieldAggregateItems(env);
+  const currentNotice = pickCurrentEndfieldVersionNotice(items);
+  if (!currentNotice) return null;
+
+  const nextMaintenance = items
+    .map(toEndfieldVersionNotice)
+    .filter((notice): notice is EndfieldVersionNotice => notice != null)
+    .filter(
+      (notice) =>
+        Date.parse(notice.maintenanceStartIso) > Date.parse(currentNotice.maintenanceEndIso)
+    )
+    .sort((a, b) => Date.parse(a.maintenanceStartIso) - Date.parse(b.maintenanceStartIso))[0];
+
+  if (!nextMaintenance) return null;
+
+  const info: GameVersionInfo = {
+    game: "endfield",
+    version: currentNotice.version,
+    start_time: currentNotice.maintenanceEndIso,
+    end_time: nextMaintenance.maintenanceStartIso,
+    title: normalizeTitle(currentNotice.item.header) || normalizeTitle(currentNotice.item.title),
+  };
+
+  const annId = Number(currentNotice.item.cid);
+  if (Number.isInteger(annId) && annId > 0) {
+    info.ann_id = annId;
+  }
+
+  return info;
 }
