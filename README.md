@@ -166,6 +166,38 @@ pnpm --filter @game-cal/api start
 - `PUT /api/sync/:uuid`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 - `POST /api/sync/:uuid/rotate`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 
+## 上游巡检
+
+仓库内置了一条 GitHub Actions 定时任务：`.github/workflows/upstream-review.yml`。
+
+它会每天执行一次，流程如下：
+- 启动本仓库的本地 Node API
+- 抓取上游原始公告（当前覆盖：原神、星铁、终末地）
+- 调用 LLM API 对比“原始公告”与“当前 `/api/events/:game` 输出”
+- 有疑似问题时创建或更新固定 issue：`Upstream Review Alerts`
+- 无问题时自动关闭该 issue
+
+需要的仓库配置：
+- GitHub Secret：`OPENAI_API_KEY`
+- 可选 GitHub Secret：
+  - `OPENAI_BASE_URL`（如需把 base URL 放到 secret，优先级高于 variable）
+  - `OPENAI_MODEL`（优先级高于 variable）
+  - `OPENAI_REASONING_EFFORT`（优先级高于 variable）
+- 可选 GitHub Variables：
+  - `OPENAI_MODEL`（默认 `gpt-5-mini`）
+  - `OPENAI_BASE_URL`（默认 `https://api.openai.com/v1`）
+  - `OPENAI_REASONING_EFFORT`（例如 `low` / `medium`）
+
+这条巡检默认面向 GitHub Actions 运行。
+
+可选环境变量：
+- `UPSTREAM_REVIEW_API_BASE_URL`（默认 `http://127.0.0.1:8787`）
+- `UPSTREAM_REVIEW_GAMES`（默认 `genshin,starrail,endfield`）
+- `UPSTREAM_REVIEW_MAX_ITEMS`（默认 `60`）
+- `UPSTREAM_REVIEW_REPORT_PATH`（写出 JSON 报告）
+- `UPSTREAM_REVIEW_DRY_RUN=1`（只生成报告，不操作 GitHub issue）
+- `OPENAI_REASONING_EFFORT`（未设置时使用模型默认值）
+
 ## 缓存策略
 
 - 同一游戏下，`/api/events*` 与 `/api/version*` 共享同一份快照缓存（同一次刷新、同一 TTL）。

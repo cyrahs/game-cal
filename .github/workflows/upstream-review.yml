@@ -1,0 +1,70 @@
+name: Upstream Review
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-lockfile
+
+      - name: Start local API
+        run: nohup pnpm --filter @game-cal/api exec tsx src/index.ts > "$RUNNER_TEMP/api.log" 2>&1 &
+
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Run upstream review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL != '' && secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL != '' && secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT != '' && secrets.OPENAI_REASONING_EFFORT || vars.OPENAI_REASONING_EFFORT }}
+          UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+        run: pnpm review:upstream
+
+      - name: Upload review artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-review
+          path: |
+            artifacts/upstream-review.json
+            ${{ runner.temp }}/api.log
+          if-no-files-found: warn
