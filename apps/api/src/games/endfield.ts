@@ -61,6 +61,22 @@ function normalizeTitleKey(input: string | undefined): string {
     );
 }
 
+function extractLeadingQuotedTitleKey(input: string | undefined): string | null {
+  const title = normalizeTitle(input);
+  const match = /^[「『“"]([^」』”"]+)[」』”"]/.exec(title);
+  if (!match?.[1]) return null;
+
+  const key = normalizeTitleKey(match[1]);
+  return key || null;
+}
+
+function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
+  const keys = [normalizeTitleKey(event.title)].filter(Boolean);
+  const quotedKey = extractLeadingQuotedTitleKey(event.title);
+  if (quotedKey && !keys.includes(quotedKey)) keys.push(quotedKey);
+  return keys.map((key) => `${key}|${event.start_time}|${event.end_time}`);
+}
+
 function stripHtml(input: string): string {
   return input
     .replace(/<[^>]*>/g, " ")
@@ -325,6 +341,10 @@ function parseVersionNoticeTimeRanges(
   return extractVersionRelativeRanges(input, versionStartNaive);
 }
 
+function isEndfieldEventWindowLabel(label: string): boolean {
+  return /^(?:活动(?:开放|开启|开始)?时间|(?:开放|开启|开始)时间)$/.test(label);
+}
+
 function buildEndfieldEvent(
   opts: {
     id: string;
@@ -392,7 +412,7 @@ function parseVersionNoticeEvents(
     if (!timeLine) continue;
 
     const label = normalizeTitle(timeLine[1]);
-    if (!label.includes("时间")) continue;
+    if (!isEndfieldEventWindowLabel(label)) continue;
 
     const ranges = parseVersionNoticeTimeRanges(timeLine[2] ?? "", versionStartNaive);
     if (ranges.length === 0) continue;
@@ -441,21 +461,31 @@ function resolveEndfieldStartNaive(
 
 function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
   const merged = new Map<string, CalendarEvent>();
+  const aliases = new Map<string, string>();
 
   for (const event of events) {
-    const key = `${normalizeTitleKey(event.title)}|${event.start_time}|${event.end_time}`;
-    const prev = merged.get(key);
+    const mergeKeys = getEndfieldEventMergeKeys(event);
+    const existingPrimaryKey = mergeKeys.find((key) => {
+      const primaryKey = aliases.get(key) ?? key;
+      return merged.has(primaryKey);
+    });
+    const primaryKey = existingPrimaryKey ? aliases.get(existingPrimaryKey) ?? existingPrimaryKey : mergeKeys[0];
+    if (!primaryKey) continue;
+
+    const prev = merged.get(primaryKey);
     if (!prev) {
-      merged.set(key, event);
+      merged.set(primaryKey, event);
+      for (const key of mergeKeys) aliases.set(key, primaryKey);
       continue;
     }
 
-    merged.set(key, {
+    merged.set(primaryKey, {
       ...prev,
       is_gacha: prev.is_gacha || event.is_gacha,
       banner: prev.banner ?? event.banner,
       content: prev.content ?? event.content,
     });
+    for (const key of mergeKeys) aliases.set(key, primaryKey);
   }
 
   return [...merged.values()].sort((a, b) => {

@@ -1604,6 +1604,7 @@ export default function TimelineCalendar(props: {
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
   const [pendingDeleteRecurringId, setPendingDeleteRecurringId] = useState<string | null>(null);
+  const [truncatedTimelineTitleIds, setTruncatedTimelineTitleIds] = useState<Record<string, true>>({});
   const gameMeta = GAME_META[props.gameId];
   const eventDetailVariant = EVENT_DETAIL_VARIANT_BY_GAME[props.gameId];
   const showNotStarted = prefs.timeline.showNotStarted;
@@ -1632,6 +1633,7 @@ export default function TimelineCalendar(props: {
     toggleRecurringCompletedPref(props.gameId, activityId, cycleKey);
   const hScrollRef = useRef<HTMLDivElement | null>(null);
   const monthlyCardInputRef = useRef<HTMLInputElement | null>(null);
+  const timelineTitleRefs = useRef(new Map<string, HTMLDivElement>());
 
   const startMonthlyCardEditing = () => {
     setMonthlyCardDraft(monthlyCardRemainingDays == null ? "" : String(monthlyCardRemainingDays));
@@ -2015,6 +2017,29 @@ export default function TimelineCalendar(props: {
     };
   }, [rangeStart, rangeEnd]);
 
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const nextTruncatedIds: Record<string, true> = {};
+
+      for (const [eventId, el] of timelineTitleRefs.current) {
+        if (el.scrollWidth - el.clientWidth > 1) {
+          nextTruncatedIds[eventId] = true;
+        }
+      }
+
+      setTruncatedTimelineTitleIds((prev) => {
+        const prevKeys = Object.keys(prev).sort();
+        const nextKeys = Object.keys(nextTruncatedIds).sort();
+        if (prevKeys.length === nextKeys.length && prevKeys.every((key, idx) => key === nextKeys[idx])) {
+          return prev;
+        }
+        return nextTruncatedIds;
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [timelineEvents, totalWidth]);
+
   const recurringDefinitionsSorted = useMemo(() => {
     return [...recurringDefs].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
   }, [recurringDefs]);
@@ -2207,6 +2232,7 @@ export default function TimelineCalendar(props: {
                 ) : null}
 
                 {timelineEvents.map((e, idx) => {
+                  const eventKey = String(e.id);
                   const isSelected = selectedId === e.id;
                   const isHovered = hoveredTimelineEventId === e.id;
                   const showCompleteToggle =
@@ -2239,7 +2265,9 @@ export default function TimelineCalendar(props: {
                   const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
                   const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
                   const showCountdownOnly = width <= 88;
-                  const showShortBarTitlePopover = showCountdownOnly && showCompleteToggle;
+                  const hasTruncatedTitle = Boolean(truncatedTimelineTitleIds[eventKey]);
+                  const hasHiddenOrTruncatedTitle = showCountdownOnly || hasTruncatedTitle;
+                  const showBarTitlePopover = hasHiddenOrTruncatedTitle && showCompleteToggle;
                   const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
                   const countdownUnits = Array.from(remainingLabel).reduce(
                     (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
@@ -2259,7 +2287,7 @@ export default function TimelineCalendar(props: {
                   const shortBarTitleTop = showShortBarTitleBelow
                     ? TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX + SHORT_BAR_TITLE_POPOVER_OFFSET_PX
                     : TIMELINE_BAR_TOP_OFFSET_PX;
-                  const shortBarTitleTranslateY = showShortBarTitlePopover
+                  const shortBarTitleTranslateY = showBarTitlePopover
                     ? showShortBarTitleBelow
                       ? "0"
                       : `calc(-100% - ${SHORT_BAR_TITLE_POPOVER_OFFSET_PX}px)`
@@ -2308,13 +2336,13 @@ export default function TimelineCalendar(props: {
                       )}
                       style={{ height: TIMELINE_ROW_HEIGHT_PX }}
                     >
-                      {showCountdownOnly ? (
+                      {hasHiddenOrTruncatedTitle ? (
                         <div
                           className={clsx(
                             "pointer-events-none absolute z-30 px-3 py-2 rounded-xl border border-[color:var(--line)]",
                             "bg-[color:var(--popover)] text-[13px] text-[color:var(--ink)] shadow-[0_12px_30px_var(--shadow-ink)]",
                             "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                            showShortBarTitlePopover ? "opacity-100" : "opacity-0"
+                            showBarTitlePopover ? "opacity-100" : "opacity-0"
                           )}
                           style={shortBarTitlePopoverStyle}
                           aria-hidden="true"
@@ -2370,6 +2398,13 @@ export default function TimelineCalendar(props: {
                         {!showCountdownOnly ? (
                           <div className="min-w-0 flex-1">
                             <div
+                              ref={(node) => {
+                                if (node) {
+                                  timelineTitleRefs.current.set(eventKey, node);
+                                } else {
+                                  timelineTitleRefs.current.delete(eventKey);
+                                }
+                              }}
                               className={clsx(
                                 "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
                                 isEnd && "line-through"

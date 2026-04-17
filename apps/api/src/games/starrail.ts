@@ -86,6 +86,11 @@ const IGNORE_WORDS = [
   "更新概览",
   "有奖问卷",
   "角色PV",
+  "周边优惠",
+  "新品首发",
+  "新增关卡",
+  "获得加强",
+  "全新课题重磅更新",
 ];
 
 // Allowlist titles that would otherwise be removed by broad filters.
@@ -99,6 +104,17 @@ const IGNORE_SUFFIXES = [
 ];
 
 const EXPLANATION_VERSION_SUFFIX_PATTERN = /\u8bf4\u660e\s*[vV]\d+(?:\.\d+)+$/;
+const IGNORE_TITLE_PATTERNS = [
+  /\bPV\b/i,
+];
+
+function shouldIgnoreStarRailTitle(title: string): boolean {
+  if (IGNORE_WORDS.some((w) => title.includes(w))) return true;
+  if (IGNORE_TITLE_PATTERNS.some((pattern) => pattern.test(title))) return true;
+  if (!title.includes("活动说明") && EXPLANATION_VERSION_SUFFIX_PATTERN.test(title)) return true;
+  if (IGNORE_SUFFIXES.some((s) => title.endsWith(s))) return true;
+  return false;
+}
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -378,7 +394,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
 
   const filtered = list
     .filter((item) => item.start_time && item.end_time)
-  .filter((item) => {
+    .filter((item) => {
       const title = item.title?.trim() || item.subtitle?.trim() || "";
       if (!title) return false;
 
@@ -386,12 +402,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       if (IGNORE_ANN_IDS.has(item.ann_id)) return false;
       // Allowlist wins over broad ignore rules.
       if (INCLUDE_WORDS.some((w) => title.includes(w))) return true;
-      if (IGNORE_WORDS.some((w) => title.includes(w))) return false;
-      // Default: hide announcements ending with "说明" plus version suffix (e.g., "说明 V4.0"),
-      // except explicit "活动说明".
-      if (!title.includes("活动说明") && EXPLANATION_VERSION_SUFFIX_PATTERN.test(title)) return false;
-      if (IGNORE_SUFFIXES.some((s) => title.endsWith(s))) return false;
-      return true;
+      return !shouldIgnoreStarRailTitle(title);
     });
 
   // getAnnContent includes the full (HTML) announcement body but does not include

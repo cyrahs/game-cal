@@ -72,6 +72,17 @@ const IGNORE_WORDS = [
   "反馈功能",
 ];
 
+const IGNORE_TITLE_PATTERNS = [
+  /礼包.*(?:限时)?上架/,
+  /(?:限时)?上架.*礼包/,
+];
+
+function shouldIgnoreGenshinTitle(title: string): boolean {
+  if (IGNORE_WORDS.some((w) => title.includes(w))) return true;
+  if (IGNORE_TITLE_PATTERNS.some((pattern) => pattern.test(title))) return true;
+  return false;
+}
+
 type GenshinVersionNotice = {
   item: MihoyoAnnItem;
   startIso: string;
@@ -168,7 +179,7 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
       const title = item.title ?? "";
       if (isGachaEventTitle("genshin", title)) return true;
       if (IGNORE_ANN_IDS.has(item.ann_id)) return false;
-      return IGNORE_WORDS.every((w) => !title.includes(w));
+      return !shouldIgnoreGenshinTitle(title);
     });
 
   // getAnnContent includes the full (HTML) announcement body but does not include
