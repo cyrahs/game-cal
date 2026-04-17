@@ -444,7 +444,7 @@ export default function Shell() {
             <div className="text-xs text-[color:var(--muted)] leading-none">{headerMetaLabel}</div>
           </div>
 
-          <nav className="flex items-center gap-2">
+          <nav className="flex max-w-full flex-nowrap items-center gap-1.5 md:gap-2">
             {orderedVisibleGames.map((g) => (
               <NavLink
                 key={g.to}
@@ -454,18 +454,18 @@ export default function Shell() {
                 title={g.name}
                 className={({ isActive }) =>
                   clsx(
-                    "inline-flex items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
+                    "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
                     "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                     isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
                   )
                 }
               >
-                <span className="relative inline-flex">
+                <span className="relative inline-flex h-full w-full min-w-0">
                   <img
                     src={g.icon}
                     alt={g.name}
                     className={clsx(
-                      "w-9 h-9 object-contain rounded-xl",
+                      "h-full w-full object-contain rounded-xl",
                       "ring-1 ring-transparent transition",
                       "hover:ring-[color:var(--ring)]",
                       "active:scale-[0.98]"
@@ -484,7 +484,7 @@ export default function Shell() {
             ))}
 
             {orderedVisibleGames.length > 0 ? (
-              <span aria-hidden="true" className="mx-1 h-5 w-px bg-[color:var(--line)]" />
+              <span aria-hidden="true" className="mx-1 h-5 w-px shrink-0 bg-[color:var(--line)]" />
             ) : null}
 
             <a
@@ -494,7 +494,7 @@ export default function Shell() {
               aria-label="GitHub"
               title="GitHub"
               className={clsx(
-                "glass w-9 h-9 rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                "glass min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                 "hover:border-[color:var(--ink)]"
               )}
@@ -507,7 +507,7 @@ export default function Shell() {
             <button
               type="button"
               className={clsx(
-                "glass w-9 h-9 rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                "glass min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                 "hover:border-[color:var(--ink)]"
               )}
@@ -536,11 +536,11 @@ export default function Shell() {
               )}
             </button>
 
-            <div className="relative" ref={settingsRef}>
+            <div className="relative min-w-0 w-9" ref={settingsRef}>
               <button
                 type="button"
                 className={clsx(
-                  "glass w-9 h-9 rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                  "glass w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
                   "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                   "hover:border-[color:var(--ink)]",
                   isSettingsOpen && "border-[color:var(--ink)]"
