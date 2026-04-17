@@ -180,10 +180,6 @@ function extractMaintenanceTimeRangeFromNoticeHtml(
   return { start: null, end: null };
 }
 
-function collectExplicitRangeEnds(input: string): string[] {
-  return parseExplicitDateRanges(input).map((range) => range.end);
-}
-
 function toEndfieldIso(input: string): string {
   return toIsoWithSourceOffset(input, ENDFIELD_SOURCE_TZ_OFFSET);
 }
@@ -213,20 +209,32 @@ function inferEndfieldVersionEndIsoFromSchedule(
   currentVersionStartIso: string
 ): string | null {
   const lines = tokenizeHtmlLines(item.data?.html);
-  const scheduleEnds = lines
-    .flatMap(collectExplicitRangeEnds)
-    .map((endNaive) => ({
-      endNaive,
-      endIso: toEndfieldIso(endNaive),
-    }))
-    .filter((x) => {
-      const endMs = Date.parse(x.endIso);
-      return Number.isFinite(endMs) && endMs > Date.parse(currentVersionStartIso);
-    })
-    .sort((a, b) => Date.parse(b.endIso) - Date.parse(a.endIso));
+  let isInStaminaSupplySection = false;
+  const candidates: Array<{ endIso: string; endMs: number }> = [];
+
+  for (const line of lines) {
+    const numberedTitle = /^\d+\.\s*(.+)$/.exec(line);
+    if (numberedTitle?.[1]) {
+      isInStaminaSupplySection = numberedTitle[1].includes("理智补给");
+      continue;
+    }
+
+    if (!isInStaminaSupplySection) continue;
+
+    for (const range of parseExplicitDateRanges(line)) {
+      const endIso = inferMaintenanceStartIsoFromScheduleEnd(range.end);
+      if (!endIso) continue;
+      const endMs = Date.parse(endIso);
+      if (Number.isFinite(endMs)) candidates.push({ endIso, endMs });
+    }
+  }
+
+  const scheduleEnds = candidates
+    .filter((x) => x.endMs > Date.parse(currentVersionStartIso))
+    .sort((a, b) => b.endMs - a.endMs);
 
   const latest = scheduleEnds[0];
-  return latest ? inferMaintenanceStartIsoFromScheduleEnd(latest.endNaive) : null;
+  return latest?.endIso ?? null;
 }
 
 function extractVersionRelativeEnd(input: string): string | null {
