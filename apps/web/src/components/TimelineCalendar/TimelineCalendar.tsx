@@ -2133,7 +2133,7 @@ export default function TimelineCalendar(props: {
           </div>
         </div>
 
-        <div ref={hScrollRef} className="max-h-[70vh] overflow-auto">
+        <div ref={hScrollRef}>
           {isTimelineEmpty ? (
             <div className="min-h-[180px] flex items-center justify-center px-6 py-10">
               <div className="text-sm text-[color:var(--muted)] select-none">

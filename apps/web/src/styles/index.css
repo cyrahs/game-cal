@@ -46,8 +46,8 @@ html.dark {
 
 html,
 body {
-  /* Don't lock the page to the viewport height, otherwise the gradient can tile when scrolling. */
   min-height: 100%;
+  overscroll-behavior: none;
 }
 
 /* Prevent layout shift when the page toggles between "needs vertical scrollbar" and "doesn't".
@@ -55,6 +55,11 @@ body {
    scrollbars consume layout width (e.g. Windows). */
 html {
   scrollbar-gutter: stable;
+  background:
+    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.16), transparent 60%),
+    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.14), transparent 62%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+  background-attachment: fixed;
 }
 
 @supports not (scrollbar-gutter: stable) {
@@ -63,24 +68,29 @@ html {
   }
 }
 
-body {
-  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: var(--ink);
-  background:
-    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.16), transparent 60%),
-    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.14), transparent 62%),
-    linear-gradient(180deg, var(--bg0), var(--bg1));
-}
-
-html.dark body {
+html.dark {
   background:
     radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.22), transparent 60%),
     radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.18), transparent 62%),
     linear-gradient(180deg, var(--bg0), var(--bg1));
+  background-attachment: fixed;
+}
+
+body {
+  position: relative;
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: transparent;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+  min-height: 100svh;
 }
 
 /* Subtle "paper" grain without an image. */
-body::before {
+body::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -93,9 +103,10 @@ body::before {
       transparent 3px);
   mix-blend-mode: multiply;
   opacity: 0.35;
+  z-index: 0;
 }
 
-html.dark body::before {
+html.dark body::after {
   background-image:
     repeating-linear-gradient(0deg,
       rgba(255, 255, 255, 0.03),
