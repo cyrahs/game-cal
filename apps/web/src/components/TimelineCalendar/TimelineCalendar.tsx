@@ -33,6 +33,7 @@ const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
 const MONTH_LABEL_MIN_WIDTH = 36;
 const TIMELINE_BAR_TOP_OFFSET_PX = 8;
+const TIMELINE_ROW_HEIGHT_PX = 56;
 const SHORT_BAR_TITLE_POPOVER_OFFSET_PX = 6;
 const SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX = 240;
 const SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX = 12;
@@ -2254,25 +2255,33 @@ export default function TimelineCalendar(props: {
                   const shortBarTitleAlignLeft = shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
                   const shortBarTitleAlignRight =
                     totalWidth - shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
+                  const showShortBarTitleBelow = idx === 0;
+                  const shortBarTitleTop = showShortBarTitleBelow
+                    ? TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX + SHORT_BAR_TITLE_POPOVER_OFFSET_PX
+                    : TIMELINE_BAR_TOP_OFFSET_PX;
                   const shortBarTitleTranslateY = showShortBarTitlePopover
-                    ? `calc(-100% - ${SHORT_BAR_TITLE_POPOVER_OFFSET_PX}px)`
-                    : "calc(-100% - 2px)";
+                    ? showShortBarTitleBelow
+                      ? "0"
+                      : `calc(-100% - ${SHORT_BAR_TITLE_POPOVER_OFFSET_PX}px)`
+                    : showShortBarTitleBelow
+                      ? "-4px"
+                      : "calc(-100% - 2px)";
                   const shortBarTitlePopoverStyle = shortBarTitleAlignLeft
                     ? {
-                        top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                        top: `${shortBarTitleTop}px`,
                         left: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
                         maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
                         transform: `translateY(${shortBarTitleTranslateY})`,
                       }
                     : shortBarTitleAlignRight
                       ? {
-                          top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                          top: `${shortBarTitleTop}px`,
                           right: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
                           maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
                           transform: `translateY(${shortBarTitleTranslateY})`,
                         }
                       : {
-                          top: `${TIMELINE_BAR_TOP_OFFSET_PX}px`,
+                          top: `${shortBarTitleTop}px`,
                           left: `${shortBarTitleCenterX}px`,
                           maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
                           transform: `translate(-50%, ${shortBarTitleTranslateY})`,
@@ -2297,7 +2306,7 @@ export default function TimelineCalendar(props: {
                         "relative border-b border-[color:var(--line)]",
                         "hover:bg-white/20 dark:hover:bg-transparent"
                       )}
-                      style={{ height: 56 }}
+                      style={{ height: TIMELINE_ROW_HEIGHT_PX }}
                     >
                       {showCountdownOnly ? (
                         <div
