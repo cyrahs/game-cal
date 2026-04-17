@@ -37,6 +37,7 @@ const ENDFIELD_WEBVIEW_DEFAULT =
 const ENDFIELD_AGGREGATE_API_DEFAULT =
   "https://game-hub.hypergryph.com/bulletin/v2/aggregate";
 const ENDFIELD_SOURCE_TZ_OFFSET = "+08:00";
+const ENDFIELD_MAINTENANCE_AFTER_RESET_MS = 2 * 60 * 60 * 1000;
 
 // Fallback: known working code observed from the webview bundle.
 // This value may change upstream, so we try to auto-discover it first.
@@ -177,6 +178,55 @@ function extractMaintenanceTimeRangeFromNoticeHtml(
     return ranges[0]!;
   }
   return { start: null, end: null };
+}
+
+function collectExplicitRangeEnds(input: string): string[] {
+  return parseExplicitDateRanges(input).map((range) => range.end);
+}
+
+function toEndfieldIso(input: string): string {
+  return toIsoWithSourceOffset(input, ENDFIELD_SOURCE_TZ_OFFSET);
+}
+
+function addMsToEndfieldIso(input: string, msToAdd: number): string | null {
+  const ms = Date.parse(input);
+  if (!Number.isFinite(ms)) return null;
+  return unixSecondsToIsoWithSourceOffset(
+    Math.floor((ms + msToAdd) / 1000),
+    ENDFIELD_SOURCE_TZ_OFFSET
+  );
+}
+
+function inferMaintenanceStartIsoFromScheduleEnd(endNaive: string): string | null {
+  const endIso = toEndfieldIso(endNaive);
+  if (!Number.isFinite(Date.parse(endIso))) return null;
+
+  if (/\s04:00(?::00)?$/.test(endNaive)) {
+    return addMsToEndfieldIso(endIso, ENDFIELD_MAINTENANCE_AFTER_RESET_MS);
+  }
+
+  return endIso;
+}
+
+function inferEndfieldVersionEndIsoFromSchedule(
+  item: HypergryphAggregateItem,
+  currentVersionStartIso: string
+): string | null {
+  const lines = tokenizeHtmlLines(item.data?.html);
+  const scheduleEnds = lines
+    .flatMap(collectExplicitRangeEnds)
+    .map((endNaive) => ({
+      endNaive,
+      endIso: toEndfieldIso(endNaive),
+    }))
+    .filter((x) => {
+      const endMs = Date.parse(x.endIso);
+      return Number.isFinite(endMs) && endMs > Date.parse(currentVersionStartIso);
+    })
+    .sort((a, b) => Date.parse(b.endIso) - Date.parse(a.endIso));
+
+  const latest = scheduleEnds[0];
+  return latest ? inferMaintenanceStartIsoFromScheduleEnd(latest.endNaive) : null;
 }
 
 function extractVersionRelativeEnd(input: string): string | null {
@@ -529,13 +579,16 @@ export async function fetchEndfieldCurrentVersion(
     )
     .sort((a, b) => Date.parse(a.maintenanceStartIso) - Date.parse(b.maintenanceStartIso))[0];
 
-  if (!nextMaintenance) return null;
+  const endTime =
+    nextMaintenance?.maintenanceStartIso ??
+    inferEndfieldVersionEndIsoFromSchedule(currentNotice.item, currentNotice.maintenanceEndIso);
+  if (!endTime) return null;
 
   const info: GameVersionInfo = {
     game: "endfield",
     version: currentNotice.version,
     start_time: currentNotice.maintenanceEndIso,
-    end_time: nextMaintenance.maintenanceStartIso,
+    end_time: endTime,
     title: normalizeTitle(currentNotice.item.header) || normalizeTitle(currentNotice.item.title),
   };
 
