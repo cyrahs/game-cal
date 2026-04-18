@@ -8,6 +8,21 @@ const GENSHIN_LIST_API =
 const STARRAIL_LIST_API =
   "https://hkrpg-api-static.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnList?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn&platform=pc&region=prod_gf_cn&level=30&uid=11111111";
 
+const WW_NOTICE_API =
+  "https://aki-gm-resources-back.aki-game.com/gamenotice/G152/76402e5b20be2c39f095a152090afddc/zh-Hans.json";
+
+const ZZZ_ACTIVITY_API =
+  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getActivityList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+
+const ZZZ_LIST_API =
+  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getAnnList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+
+const ZZZ_CONTENT_API =
+  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getAnnContent?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+
+const SNOWBREAK_ANNOUNCE_API =
+  "https://cbjq-content.xoyocdn.com/ob202307/webfile/mainland/announce/config/pc_jinshan-pc_jinshan.json";
+
 const ENDFIELD_WEBVIEW_URL =
   "https://ef-webview.hypergryph.com/page/game_bulletin?target=IOS";
 
@@ -20,15 +35,21 @@ const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "gpt-5-mini";
 const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
 const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
-const DEFAULT_GAMES = ["genshin", "starrail", "endfield"];
+const DEFAULT_GAMES = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
 const GITHUB_API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MODEL_TIMEOUT_MS = 120_000;
+const CHINA_TZ_OFFSET = "+08:00";
+const RETRY_COUNT = 3;
+const RETRY_BASE_DELAY_MS = 1_000;
 
 const GAME_LABELS = {
   genshin: "原神",
   starrail: "崩坏：星穹铁道",
+  ww: "鸣潮",
+  zzz: "绝区零",
+  snowbreak: "尘白禁区",
   endfield: "明日方舟：终末地",
 };
 
@@ -60,6 +81,38 @@ function parseMaxItems(value, fallback) {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+function getErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry(label, fn, retryCount = RETRY_COUNT) {
+  const totalAttempts = retryCount + 1;
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === totalAttempts) {
+        throw new Error(
+          `${label} failed after ${totalAttempts} attempt(s): ${getErrorMessage(error)}`
+        );
+      }
+
+      const delayMs = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      console.warn(
+        `${label} failed on attempt ${attempt}/${totalAttempts}; retrying in ${delayMs}ms: ${getErrorMessage(error)}`
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`${label} failed unexpectedly`);
+}
+
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -74,16 +127,125 @@ function normalizeWhitespace(input) {
 function stripHtml(input) {
   return normalizeWhitespace(
     String(input ?? "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<\/(p|div|h\d|li|tr)>/gi, "\n")
       .replace(/<(p|div|h\d|li|tr)[^>]*>/gi, "")
       .replace(/<[^>]*>/g, " ")
       .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/g, "'")
+      .replace(/&ldquo;|&rdquo;/g, "\"")
+      .replace(/&lsquo;|&rsquo;/g, "'")
+      .replace(/&mdash;|&ndash;/g, "-")
   );
 }
 
 function ensureArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function parseNumberLike(value) {
+  if (value == null || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parsePositiveNumberLike(value) {
+  const n = parseNumberLike(value);
+  return n != null && n > 0 ? n : null;
+}
+
+function toIsoWithSourceOffset(input, sourceTzOffset = CHINA_TZ_OFFSET) {
+  const s = String(input ?? "").trim();
+  if (!s) return "";
+  if (/[zZ]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
+    const m = /([+-])(\d{2})(\d{2})$/.exec(s);
+    return m ? `${s.slice(0, -5)}${m[1]}${m[2]}:${m[3]}` : s;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(s)) {
+    return `${s.length === 16 ? `${s}:00` : s}${sourceTzOffset}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return `${s}T00:00:00${sourceTzOffset}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) {
+    return `${s.replace(" ", "T")}:00${sourceTzOffset}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    return `${s.replace(" ", "T")}${sourceTzOffset}`;
+  }
+  return s;
+}
+
+function unixSecondsToIsoWithSourceOffset(value, sourceTzOffset = CHINA_TZ_OFFSET) {
+  const n = parseNumberLike(value);
+  if (n == null) return "";
+
+  const offsetMatch = /^([+-])(\d{2}):(\d{2})$/.exec(sourceTzOffset);
+  const sign = offsetMatch?.[1] === "-" ? -1 : 1;
+  const hours = Number(offsetMatch?.[2] ?? "0");
+  const minutes = Number(offsetMatch?.[3] ?? "0");
+  const offsetMinutes = sign * (hours * 60 + minutes);
+  const shiftedMs = Math.trunc(n) * 1000 + offsetMinutes * 60 * 1000;
+  const d = new Date(shiftedMs);
+  const pad2 = (x) => String(x).padStart(2, "0");
+
+  return [
+    `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`,
+    `T${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`,
+    sourceTzOffset,
+  ].join("");
+}
+
+function unixMsToIsoWithSourceOffset(value, sourceTzOffset = CHINA_TZ_OFFSET) {
+  const n = parsePositiveNumberLike(value);
+  return n == null
+    ? ""
+    : unixSecondsToIsoWithSourceOffset(Math.floor(n / 1000), sourceTzOffset);
+}
+
+function parseLocalizedText(value) {
+  if (typeof value !== "string") return "";
+  const raw = value.trim();
+  if (!raw) return "";
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (isRecord(parsed)) {
+      for (const key of ["default", "zh-cn", "zh_cn", "zh", "cn"]) {
+        const candidate = parsed[key];
+        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+      }
+      for (const candidate of Object.values(parsed)) {
+        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+      }
+    }
+  } catch {
+    // Plain strings are the common case for most upstreams.
+  }
+
+  return raw;
+}
+
+function extractTimeCandidates(input) {
+  const text = stripHtml(input);
+  const out = [];
+  const seen = new Set();
+  const re = /(?:\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?\s*\d{1,2}[:：]\d{2}(?::\d{2})?|\d{1,2}月\d{1,2}日\s*\d{1,2}[:：]\d{2})/g;
+  for (const match of text.matchAll(re)) {
+    const value = normalizeWhitespace(match[0]);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= 6) break;
+  }
+  return out;
 }
 
 async function request(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -253,6 +415,146 @@ async function fetchStarRailRawNotices() {
   }));
 }
 
+async function fetchWwRawNotices() {
+  const url = process.env.WW_NOTICE_API_URL?.trim() || WW_NOTICE_API;
+  const json = await requestJson(url);
+  const sections = [
+    ["game", json?.game],
+    ["activity", json?.activity],
+    ["recommend", json?.recommend],
+  ];
+  const byKey = new Map();
+
+  for (const [source, list] of sections) {
+    for (const item of ensureArray(list)) {
+      const id = String(item?.id ?? "").trim();
+      const title = normalizeWhitespace(item?.tabTitle ?? "");
+      if (!title) continue;
+
+      const startMs = parsePositiveNumberLike(item?.startTimeMs);
+      const endMs = parsePositiveNumberLike(item?.endTimeMs);
+      const category = item?.category == null ? "" : String(item.category);
+      const tag = item?.tag == null ? "" : String(item.tag);
+      const permanent = item?.permanent == null ? "" : String(item.permanent);
+      const key = [id, title, startMs ?? "", endMs ?? "", category, tag, permanent].join("|");
+      const prev = byKey.get(key);
+      if (prev) {
+        if (!prev.source_sections.includes(source)) prev.source_sections.push(source);
+        continue;
+      }
+
+      byKey.set(key, {
+        source_sections: [source],
+        id,
+        title,
+        start_time: startMs == null ? "" : unixMsToIsoWithSourceOffset(startMs),
+        end_time: endMs == null ? "" : unixMsToIsoWithSourceOffset(endMs),
+        category,
+        tag,
+        permanent,
+        has_detail: Boolean(item?.content),
+        snippet: stripHtml(item?.content ?? "").slice(0, 220),
+      });
+    }
+  }
+
+  return [...byKey.values()];
+}
+
+async function fetchZzzRawNotices() {
+  const activityUrl = process.env.ZZZ_ACTIVITY_API_URL?.trim() || ZZZ_ACTIVITY_API;
+  const listUrl = process.env.ZZZ_API_URL?.trim() || ZZZ_LIST_API;
+  const contentUrl = process.env.ZZZ_CONTENT_API_URL?.trim() || ZZZ_CONTENT_API;
+  const [activityJson, listJson, contentJson] = await Promise.all([
+    requestJson(activityUrl),
+    requestJson(listUrl).catch(() => null),
+    requestJson(contentUrl).catch(() => null),
+  ]);
+
+  const out = [];
+  for (const item of ensureArray(activityJson?.data?.activity_list)) {
+    const title = normalizeWhitespace(item?.name ?? "");
+    if (!title) continue;
+    out.push({
+      source: "activity_list",
+      activity_id: String(item?.activity_id ?? ""),
+      title,
+      start_time: unixSecondsToIsoWithSourceOffset(item?.start_time),
+      end_time: unixSecondsToIsoWithSourceOffset(item?.end_time),
+      raw_start_time: String(item?.start_time ?? ""),
+      raw_end_time: String(item?.end_time ?? ""),
+    });
+  }
+
+  for (const category of ensureArray(listJson?.data?.list)) {
+    const typeId = category?.type_id ?? null;
+    const typeLabel = normalizeWhitespace(category?.type_label ?? "");
+    for (const item of ensureArray(category?.list)) {
+      const title = normalizeWhitespace(stripHtml(item?.title || item?.subtitle || ""));
+      if (!title) continue;
+      out.push({
+        source: "ann_list",
+        type_id: typeId,
+        type_label: typeLabel,
+        ann_id: item?.ann_id ?? null,
+        title,
+        subtitle: normalizeWhitespace(stripHtml(item?.subtitle ?? "")),
+        start_time: toIsoWithSourceOffset(item?.start_time),
+        end_time: toIsoWithSourceOffset(item?.end_time),
+      });
+    }
+  }
+
+  const addContentItems = (source, list) => {
+    for (const item of ensureArray(list)) {
+      const content = item?.content ?? "";
+      const title = normalizeWhitespace(stripHtml(item?.title || item?.subtitle || ""));
+      if (!title) continue;
+      out.push({
+        source,
+        ann_id: item?.ann_id ?? null,
+        title,
+        subtitle: normalizeWhitespace(stripHtml(item?.subtitle ?? "")),
+        has_detail: Boolean(content),
+        time_candidates: extractTimeCandidates(content),
+        snippet: stripHtml(content).slice(0, 220),
+      });
+    }
+  };
+
+  addContentItems("ann_content_list", contentJson?.data?.list);
+  addContentItems("ann_content_pic_list", contentJson?.data?.pic_list);
+
+  return out;
+}
+
+async function fetchSnowbreakRawNotices() {
+  const url = process.env.SNOWBREAK_ANNOUNCE_API_URL?.trim() || SNOWBREAK_ANNOUNCE_API;
+  const json = await requestJson(url);
+  const items = ensureArray(json?.announce);
+
+  return items.map((item) => {
+    const title = normalizeWhitespace(
+      parseLocalizedText(item?.title) || parseLocalizedText(item?.left_title)
+    );
+    const leftTitle = normalizeWhitespace(parseLocalizedText(item?.left_title));
+    const content = parseLocalizedText(item?.content);
+    return {
+      id: item?.id == null ? "" : String(item.id),
+      title,
+      left_title: leftTitle,
+      type: item?.type ?? null,
+      start_time: unixSecondsToIsoWithSourceOffset(item?.start_time),
+      end_time: unixSecondsToIsoWithSourceOffset(item?.end_time),
+      raw_start_time: String(item?.start_time ?? ""),
+      raw_end_time: String(item?.end_time ?? ""),
+      has_detail: Boolean(content),
+      time_candidates: extractTimeCandidates(content),
+      snippet: stripHtml(content).slice(0, 220),
+    };
+  });
+}
+
 function extractEndfieldCommonsJsUrl(html) {
   const match = /<script[^>]+src="([^"]+\/commons\.[^"]+\.js)"/i.exec(html);
   if (match?.[1]) return match[1];
@@ -326,6 +628,12 @@ async function fetchRawNotices(game) {
       return await fetchGenshinRawNotices();
     case "starrail":
       return await fetchStarRailRawNotices();
+    case "ww":
+      return await fetchWwRawNotices();
+    case "zzz":
+      return await fetchZzzRawNotices();
+    case "snowbreak":
+      return await fetchSnowbreakRawNotices();
     case "endfield":
       return await fetchEndfieldRawNotices();
     default:
@@ -333,14 +641,26 @@ async function fetchRawNotices(game) {
   }
 }
 
+function getDatasetNotes(game) {
+  switch (game) {
+    case "endfield":
+      return "Endfield API events may include events parsed from version update notices and not only standalone event bulletins. Do not flag Endfield items merely because they lack a standalone raw bulletin match.";
+    case "ww":
+      return "Wuthering Waves raw notices include game/activity/recommend entries, including permanent, system, community, and shop/promotion notices. Category, permanent, and promotion filters are intentional; only flag clear event omissions or non-event inclusions.";
+    case "zzz":
+      return "ZZZ normal events come from activity_list. Gacha events may be extracted from announcement content. Not every ann_list or ann_content item is expected to appear as an API event.";
+    case "snowbreak":
+      return "Snowbreak API events are parsed from the current version activity announcement content plus gacha notices. Raw announcements include shop, outfit, system, and other notices that are not expected API events.";
+    default:
+      return "Compare raw upstream notices with current API output. Be conservative and only flag clear issues.";
+  }
+}
+
 function buildGameDataset(game, rawNotices, apiEvents, maxItems) {
   return {
     game,
     game_label: GAME_LABELS[game] ?? game,
-    notes:
-      game === "endfield"
-        ? "Endfield API events may include events parsed from version update notices and not only standalone event bulletins. Do not flag Endfield items merely because they lack a standalone raw bulletin match."
-        : "Compare raw upstream notices with current API output. Be conservative and only flag clear issues.",
+    notes: getDatasetNotes(game),
     raw_notice_count: rawNotices.length,
     api_event_count: apiEvents.length,
     raw_notices: rawNotices.slice(0, maxItems),
@@ -374,8 +694,8 @@ function extractJsonObjectFromText(input) {
   throw new Error("Failed to parse JSON from model response");
 }
 
-function normalizeFinding(raw) {
-  const game = SUPPORTED_GAMES.has(raw?.game) ? raw.game : "unknown";
+function normalizeFinding(raw, fallbackGame = "unknown") {
+  const game = SUPPORTED_GAMES.has(fallbackGame) ? fallbackGame : "unknown";
   const severity = ["high", "medium", "low"].includes(raw?.severity) ? raw.severity : "medium";
   const confidence = ["high", "medium", "low"].includes(raw?.confidence) ? raw.confidence : "medium";
   const kind = typeof raw?.kind === "string" && raw.kind ? raw.kind : "other";
@@ -475,14 +795,26 @@ function applySuppressions(findings, suppressions) {
 }
 
 function summarizeFilteredReview(summary, unsuppressedCount, suppressedCount) {
-  if (suppressedCount === 0) return summary;
+  const base = summary || `${unsuppressedCount} unsuppressed finding(s) detected.`;
+  if (suppressedCount === 0) return base;
   if (unsuppressedCount === 0) {
-    return `No unsuppressed findings. ${suppressedCount} finding(s) matched suppression rules.`;
+    return `${base} No unsuppressed findings. ${suppressedCount} finding(s) matched suppression rules.`;
   }
-  return `${unsuppressedCount} unsuppressed finding(s) detected. ${suppressedCount} finding(s) matched suppression rules.`;
+  return `${base} ${unsuppressedCount} unsuppressed finding(s) detected. ${suppressedCount} finding(s) matched suppression rules.`;
 }
 
-async function reviewWithOpenAi(payload) {
+function summarizeGameReviews(gameReviews) {
+  if (gameReviews.length === 0) return "No games reviewed.";
+  return gameReviews
+    .map((review) => {
+      const label = GAME_LABELS[review.game] ?? review.game;
+      const summary = review.summary || `${review.findings.length} finding(s) detected.`;
+      return `${label}: ${summary}`;
+    })
+    .join(" ");
+}
+
+async function reviewGameWithOpenAi(payload) {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("Missing OPENAI_API_KEY");
@@ -493,10 +825,14 @@ async function reviewWithOpenAi(payload) {
   );
   const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
   const reasoningEffort = process.env.OPENAI_REASONING_EFFORT?.trim();
+  const dataset = payload.dataset;
   const prompt = {
     current_time: payload.generated_at,
+    game: dataset.game,
+    game_label: dataset.game_label,
     instructions: [
       "Review the upstream notice snapshots against the current API event output.",
+      "This request contains exactly one game dataset. Every Finding.game must match the dataset game.",
       "Only report issues that are likely real. Be conservative.",
       "Focus on: non-event notices incorrectly included, real events incorrectly filtered out, duplicate events, and clearly wrong time windows.",
       "Ignore pure style or wording preferences.",
@@ -505,7 +841,7 @@ async function reviewWithOpenAi(payload) {
       "Each Finding must include game, severity, confidence, kind, title, raw_title, api_title, start_time, end_time, reason.",
       "Use findings: [] when there is nothing clearly wrong.",
     ],
-    datasets: payload.datasets,
+    dataset,
   };
 
   const response = await requestJson(
@@ -543,12 +879,35 @@ async function reviewWithOpenAi(payload) {
   }
 
   const parsed = extractJsonObjectFromText(content);
-  const findings = ensureArray(parsed?.findings).map(normalizeFinding);
+  const findings = ensureArray(parsed?.findings).map((finding) =>
+    normalizeFinding(finding, dataset.game)
+  );
   return {
+    game: dataset.game,
     model,
     summary: normalizeWhitespace(parsed?.summary || ""),
     findings,
     raw_response: content,
+  };
+}
+
+async function reviewWithOpenAi(payload) {
+  const gameReviews = await Promise.all(
+    payload.datasets.map((dataset) =>
+      withRetry(`LLM review for ${dataset.game}`, () =>
+        reviewGameWithOpenAi({
+          generated_at: payload.generated_at,
+          dataset,
+        })
+      )
+    )
+  );
+
+  return {
+    model: gameReviews[0]?.model ?? process.env.OPENAI_MODEL?.trim() ?? DEFAULT_OPENAI_MODEL,
+    summary: summarizeGameReviews(gameReviews),
+    findings: gameReviews.flatMap((review) => review.findings),
+    game_reviews: gameReviews,
   };
 }
 
@@ -727,14 +1086,17 @@ async function main() {
   const maxItems = parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
   const generatedAt = new Date().toISOString();
 
-  const datasets = [];
-  for (const game of games) {
-    const [rawNotices, apiEvents] = await Promise.all([
-      fetchRawNotices(game),
-      fetchApiEvents(apiBaseUrl, game),
-    ]);
-    datasets.push(buildGameDataset(game, rawNotices, apiEvents, maxItems));
-  }
+  const datasets = await Promise.all(
+    games.map((game) =>
+      withRetry(`dataset collection for ${game}`, async () => {
+        const [rawNotices, apiEvents] = await Promise.all([
+          fetchRawNotices(game),
+          fetchApiEvents(apiBaseUrl, game),
+        ]);
+        return buildGameDataset(game, rawNotices, apiEvents, maxItems);
+      })
+    )
+  );
 
   const suppressions = await loadSuppressions(suppressionsPath);
   const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets });
@@ -750,6 +1112,12 @@ async function main() {
     review: {
       model: review.model,
       raw_summary: review.summary,
+      game_reviews: review.game_reviews.map((gameReview) => ({
+        game: gameReview.game,
+        model: gameReview.model,
+        raw_summary: gameReview.summary,
+        raw_finding_count: gameReview.findings.length,
+      })),
       summary: summarizeFilteredReview(
         review.summary,
         filteredFindings.length,

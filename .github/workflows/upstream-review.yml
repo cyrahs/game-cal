@@ -56,6 +56,7 @@ jobs:
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL != '' && secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
           OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT != '' && secrets.OPENAI_REASONING_EFFORT || vars.OPENAI_REASONING_EFFORT }}
           UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          UPSTREAM_REVIEW_GAMES: genshin,starrail,ww,zzz,snowbreak,endfield
           UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
         run: pnpm review:upstream
 

@@ -172,8 +172,9 @@ pnpm --filter @game-cal/api start
 
 它会每天执行一次，流程如下：
 - 启动本仓库的本地 Node API
-- 抓取上游原始公告（当前覆盖：原神、星铁、终末地）
-- 调用 LLM API 对比“原始公告”与“当前 `/api/events/:game` 输出”
+- 抓取上游原始公告（当前覆盖：原神、星铁、鸣潮、绝区零、尘白禁区、终末地）
+- 按游戏并行调用 LLM API，对比“原始公告”与“当前 `/api/events/:game` 输出”
+- 单游戏的数据收集和 LLM 分析失败时会各自重试 3 次
 - 按仓库内的 suppression 配置过滤已知合理项
 - 有疑似问题时创建或更新固定 issue：`Upstream Review Alerts`
 - 无问题时自动关闭该 issue
@@ -193,7 +194,7 @@ pnpm --filter @game-cal/api start
 
 可选环境变量：
 - `UPSTREAM_REVIEW_API_BASE_URL`（默认 `http://127.0.0.1:8787`）
-- `UPSTREAM_REVIEW_GAMES`（默认 `genshin,starrail,endfield`）
+- `UPSTREAM_REVIEW_GAMES`（默认 `genshin,starrail,ww,zzz,snowbreak,endfield`）
 - `UPSTREAM_REVIEW_MAX_ITEMS`（默认 `60`）
 - `UPSTREAM_REVIEW_REPORT_PATH`（写出 JSON 报告）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
