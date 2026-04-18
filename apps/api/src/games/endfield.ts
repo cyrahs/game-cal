@@ -35,6 +35,7 @@ type EndfieldVersionScheduleEntry = {
   title: string;
   titleKey: string;
   family: string;
+  timeText: string;
   startNaive: string;
   endNaive: string | null;
 };
@@ -401,6 +402,10 @@ function getEndfieldVersionScheduleFamily(title: string): string | null {
   return null;
 }
 
+function hasUnresolvedRelativeEnd(input: string): boolean {
+  return /后结束/.test(normalizeTitle(input));
+}
+
 function parseEndfieldVersionScheduleEntries(
   item: HypergryphAggregateItem,
   versionStartNaive: string | null
@@ -444,6 +449,7 @@ function parseEndfieldVersionScheduleEntries(
       title: currentTitle,
       titleKey: normalizeTitleKey(currentTitle),
       family,
+      timeText: timeLine[1],
       startNaive: window.start,
       endNaive: window.end,
     });
@@ -586,6 +592,7 @@ function inferEndfieldMissingWindow(
   if (scheduleEntry.endNaive) {
     return { startNaive: scheduleEntry.startNaive, endNaive: scheduleEntry.endNaive };
   }
+  if (hasUnresolvedRelativeEnd(scheduleEntry.timeText)) return null;
 
   const nextSameFamilyStart = opts.versionScheduleEntries
     .filter((entry) => entry !== scheduleEntry && entry.family === family)
