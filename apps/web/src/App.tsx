@@ -10,12 +10,12 @@ export default function App() {
       <Routes>
         <Route element={<Shell />}>
           <Route path="/" element={<HomePage />} />
-          <Route path="/genshin" element={<GamePage key="genshin" game="genshin" />} />
-          <Route path="/starrail" element={<GamePage key="starrail" game="starrail" />} />
-          <Route path="/ww" element={<GamePage key="ww" game="ww" />} />
-          <Route path="/zzz" element={<GamePage key="zzz" game="zzz" />} />
-          <Route path="/snowbreak" element={<GamePage key="snowbreak" game="snowbreak" />} />
-          <Route path="/endfield" element={<GamePage key="endfield" game="endfield" />} />
+          <Route path="/genshin" element={<GamePage game="genshin" />} />
+          <Route path="/starrail" element={<GamePage game="starrail" />} />
+          <Route path="/ww" element={<GamePage game="ww" />} />
+          <Route path="/zzz" element={<GamePage game="zzz" />} />
+          <Route path="/snowbreak" element={<GamePage game="snowbreak" />} />
+          <Route path="/endfield" element={<GamePage game="endfield" />} />
           <Route path="*" element={<HomePage />} />
         </Route>
       </Routes>

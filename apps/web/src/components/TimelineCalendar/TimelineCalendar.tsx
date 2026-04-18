@@ -4,7 +4,7 @@ import dayjs, { type Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import isoWeek from "dayjs/plugin/isoWeek";
 import utc from "dayjs/plugin/utc";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CalendarEvent, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
@@ -1666,7 +1666,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const isHome = mode === "home";
   const primaryGameId = props.gameId ?? "genshin";
   const showGameMeta = isHome;
-  const [dayWidth, setDayWidth] = useState(26); // px per day
+  const [timelineViewportWidth, setTimelineViewportWidth] = useState<number | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedFrom, setSelectedFrom] = useState<"timeline" | "list" | null>(null);
   const [isTimelineCheckboxVisible, setIsTimelineCheckboxVisible] = useState(false);
@@ -1786,8 +1786,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     monthlyCardInputRef.current?.select();
   }, [isMonthlyCardEditing]);
 
-  // When switching games, reset UI state.
-  useEffect(() => {
+  // When switching games, reset UI state before paint so reused route components
+  // do not briefly show controls from the previous game.
+  useLayoutEffect(() => {
     setSelectedKey(null);
     setSelectedFrom(null);
     setIsTimelineCheckboxVisible(false);
@@ -2154,10 +2155,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     setSelectedFrom(null);
   }, [completedIdsByGame, completedRecurringByGame, selectedEvent, selectedFrom, selectedKey]);
 
-  const totalWidth = useMemo(() => {
-    const ms = rangeEnd.valueOf() - rangeStart.valueOf();
-    return (ms / DAY_MS) * dayWidth;
-  }, [rangeStart, rangeEnd, dayWidth]);
+  const rangeMs = useMemo(
+    () => Math.max(1, rangeEnd.valueOf() - rangeStart.valueOf()),
+    [rangeEnd, rangeStart]
+  );
+  const rangeDays = rangeMs / DAY_MS;
+  const totalWidth = timelineViewportWidth ?? rangeDays * 26;
+  const dayWidth = totalWidth / rangeDays;
 
   const months = useMemo(() => {
     return monthSegments.map((segment) => {
@@ -2181,31 +2185,34 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return { monthRow, total: monthRow };
   }, []);
 
-  useEffect(() => {
-    // Calculate dayWidth to fit container width exactly
+  useLayoutEffect(() => {
     const updateWidth = () => {
       const el = hScrollRef.current;
       if (!el) return;
 
       const containerWidth = el.clientWidth;
-      const rangeDays = (rangeEnd.valueOf() - rangeStart.valueOf()) / DAY_MS;
-      if (rangeDays === 0) return;
+      if (containerWidth <= 0) return;
 
-      const calculatedDayWidth = containerWidth / rangeDays;
-      setDayWidth(calculatedDayWidth);
+      setTimelineViewportWidth((prev) => {
+        if (prev != null && Math.abs(prev - containerWidth) < 0.5) return prev;
+        return containerWidth;
+      });
     };
 
-    // Initial calculation with a small delay to ensure container is rendered
-    const timer = setTimeout(updateWidth, 0);
+    updateWidth();
 
-    // Update on window resize
-    window.addEventListener('resize', updateWidth);
+    const el = hScrollRef.current;
+    if (el && typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(updateWidth);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
 
+    window.addEventListener("resize", updateWidth);
     return () => {
-      clearTimeout(timer);
-      window.removeEventListener('resize', updateWidth);
+      window.removeEventListener("resize", updateWidth);
     };
-  }, [rangeStart, rangeEnd]);
+  }, []);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -2276,7 +2283,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   };
 
   return (
-    <div className="fade-in grid gap-3">
+    <div className="grid gap-3">
       <div className="glass shadow-ink rounded-2xl overflow-hidden relative">
         <div className="relative z-40 flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
           <div className="flex items-center gap-0.5 min-w-0">
