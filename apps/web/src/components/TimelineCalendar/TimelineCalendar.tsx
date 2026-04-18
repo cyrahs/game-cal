@@ -2642,7 +2642,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                             src={sourceGameIcon}
                             alt=""
                             aria-hidden="true"
-                            className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover border-r border-slate-900/20"
+                            className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover"
                             style={{ width: barIconWidth }}
                             referrerPolicy="no-referrer"
                           />
