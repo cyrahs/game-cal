@@ -1,6 +1,7 @@
 import { Route, Routes } from "react-router-dom";
 import { PrefsProvider } from "./context/prefs";
 import Shell from "./components/Shell";
+import HomePage from "./pages/HomePage";
 import GamePage from "./pages/GamePage";
 
 export default function App() {
@@ -8,13 +9,14 @@ export default function App() {
     <PrefsProvider>
       <Routes>
         <Route element={<Shell />}>
-          <Route path="/" element={<GamePage key="genshin" game="genshin" />} />
+          <Route path="/" element={<HomePage />} />
+          <Route path="/genshin" element={<GamePage key="genshin" game="genshin" />} />
           <Route path="/starrail" element={<GamePage key="starrail" game="starrail" />} />
           <Route path="/ww" element={<GamePage key="ww" game="ww" />} />
           <Route path="/zzz" element={<GamePage key="zzz" game="zzz" />} />
           <Route path="/snowbreak" element={<GamePage key="snowbreak" game="snowbreak" />} />
           <Route path="/endfield" element={<GamePage key="endfield" game="endfield" />} />
-          <Route path="*" element={<GamePage key="genshin" game="genshin" />} />
+          <Route path="*" element={<HomePage />} />
         </Route>
       </Routes>
     </PrefsProvider>

@@ -29,11 +29,14 @@ dayjs.extend(utc);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
+const HOME_TIMELINE_PAST_DAYS = 3;
+const HOME_TIMELINE_FUTURE_DAYS = 7;
 const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
 const MONTH_LABEL_MIN_WIDTH = 36;
 const TIMELINE_BAR_TOP_OFFSET_PX = 8;
 const TIMELINE_ROW_HEIGHT_PX = 56;
+const TIMELINE_BAR_ICON_WIDTH_PX = TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX * 2;
 const SHORT_BAR_TITLE_POPOVER_OFFSET_PX = 6;
 const SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX = 240;
 const SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX = 12;
@@ -66,14 +69,33 @@ function timelineColorAt(index: number, startOffset: number): string {
   return TIMELINE_BAR_COLORS[colorIndex]!;
 }
 
-type ParsedEvent = CalendarEvent & { _s: Dayjs; _e: Dayjs };
-type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream" };
+export type TimelineCalendarEvent = CalendarEvent & { gameId?: GameId };
+type TimelineCalendarProps =
+  | {
+      mode?: "game";
+      events: TimelineCalendarEvent[];
+      gameId: GameId;
+      currentVersionState: UseCurrentVersionState;
+      currentVersions?: never;
+    }
+  | {
+      mode: "home";
+      events: TimelineCalendarEvent[];
+      currentVersions?: GameVersionInfo[];
+      gameId?: never;
+      currentVersionState?: never;
+    };
+type ParsedEvent = CalendarEvent & { _s: Dayjs; _e: Dayjs; sourceGameId: GameId; eventKey: string };
+type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream"; is_gacha: boolean };
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
   recurringActivityId: string;
   cycleKey: string;
 };
-type AnyParsedEvent = ParsedUpstreamEvent | ParsedRecurringEvent;
+type ParsedVersionEvent = ParsedEvent & { kind: "version" };
+type ParsedMonthlyCardEvent = ParsedEvent & { kind: "monthlyCard" };
+type TimelineOnlyParsedEvent = ParsedVersionEvent | ParsedMonthlyCardEvent;
+type AnyParsedEvent = ParsedUpstreamEvent | ParsedRecurringEvent | TimelineOnlyParsedEvent;
 const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
 type GameDailyResetConfig = {
   tzOffsetMinutes: number;
@@ -652,6 +674,20 @@ const GAME_META: Record<GameId, { name: string; icon: string }> = {
   snowbreak: { name: "尘白禁区", icon: snowbreakIcon },
   endfield: { name: "明日方舟：终末地", icon: endfieldIcon },
 };
+const ALL_GAME_IDS = Object.keys(GAME_META) as GameId[];
+
+function resolveEventGameId(event: TimelineCalendarEvent, fallbackGameId?: GameId): GameId | null {
+  return event.gameId ?? fallbackGameId ?? null;
+}
+
+function makeEventKey(kind: "upstream" | "recurring" | "version" | "monthlyCard", gameId: GameId, id: string | number, suffix?: string): string {
+  return [kind, gameId, String(id), suffix].filter(Boolean).join(":");
+}
+
+function getEventAccessibleTitle(event: ParsedEvent, showGameMeta: boolean): string {
+  if (!showGameMeta) return event.title;
+  return `${GAME_META[event.sourceGameId].name} · ${event.title}`;
+}
 
 export function parseDateTime(input: string): Dayjs {
   // Safari does not reliably parse "YYYY-MM-DD HH:mm" without custom parsing.
@@ -757,6 +793,14 @@ function getMonthlyCardRemainingDays(
   const elapsedCycles = Math.max(0, nowCycle - asOfCycle);
   if (elapsedCycles > baseDays) return null;
   return baseDays - elapsedCycles;
+}
+
+function getMonthlyCardEndTime(now: Dayjs, remainingDays: number, tzOffsetMinutes: number, resetOffsetMinutes: number): Dayjs {
+  const currentCycle = toDailyCycleIndex(now.valueOf(), tzOffsetMinutes, resetOffsetMinutes);
+  const tzOffsetMs = tzOffsetMinutes * MINUTE_MS;
+  const resetOffsetMs = resetOffsetMinutes * MINUTE_MS;
+  const nextResetMs = (currentCycle + 1) * DAY_MS - tzOffsetMs + resetOffsetMs;
+  return dayjs(nextResetMs).add(Math.max(0, Math.trunc(remainingDays)), "day");
 }
 
 function decodeBasicHtmlEntities(input: string): string {
@@ -1125,6 +1169,7 @@ function EventDetail(props: {
   checked: boolean;
   now: Dayjs;
   variant: EventDetailVariant;
+  showGameMeta?: boolean;
 }) {
   const theme = useTheme();
   const isEnd = props.now.isAfter(props.event._e);
@@ -1133,6 +1178,7 @@ function EventDetail(props: {
   const hasBanner = Boolean(props.event.banner);
   const showBanner = props.variant !== "none" && hasBanner;
   const remainingLabel = formatRemainingTimeLabel(props.event._e, props.now);
+  const gameMeta = GAME_META[props.event.sourceGameId];
   const renderedContent = useMemo(() => {
     const raw = props.event.content;
     if (!raw) return null;
@@ -1149,6 +1195,18 @@ function EventDetail(props: {
 
   return (
     <div className="p-4 grid gap-3">
+      {props.showGameMeta ? (
+        <div className="flex items-center gap-2 text-xs text-[color:var(--muted)]">
+          <img
+            src={gameMeta.icon}
+            alt=""
+            aria-hidden="true"
+            className="w-5 h-5 object-contain rounded-md"
+            referrerPolicy="no-referrer"
+          />
+          <span>{gameMeta.name}</span>
+        </div>
+      ) : null}
       <div className="text-xs text-[color:var(--muted)] font-mono">
         {formatRange(props.event.start_time, props.event.end_time)}
         {remainingLabel ? <span>{` (${remainingLabel})`}</span> : null}
@@ -1209,6 +1267,7 @@ function EventListRow(props: {
   checked: boolean;
   isSelected: boolean;
   now: Dayjs;
+  showGameMeta?: boolean;
   showBottomDivider?: boolean;
   onSelect: () => void;
   onToggleCompleted: () => void;
@@ -1216,6 +1275,7 @@ function EventListRow(props: {
   const isEnd = props.now.isAfter(props.event._e);
   const isDimmed = props.checked || isEnd;
   const shouldStrike = isEnd && !props.checked;
+  const gameMeta = GAME_META[props.event.sourceGameId];
 
   return (
     <div
@@ -1241,12 +1301,21 @@ function EventListRow(props: {
       <div className="min-w-0 flex-1">
         <div
           className={clsx(
-            "text-sm font-semibold leading-snug",
+            "flex items-start gap-1.5 text-sm font-semibold leading-snug",
             isDimmed && "opacity-70",
             shouldStrike && "line-through"
           )}
         >
-          {props.event.title}
+          {props.showGameMeta ? (
+            <img
+              src={gameMeta.icon}
+              alt=""
+              aria-hidden="true"
+              className="mt-[1px] w-4 h-4 shrink-0 object-contain rounded"
+              referrerPolicy="no-referrer"
+            />
+          ) : null}
+          <span className="min-w-0 flex-1">{props.event.title}</span>
         </div>
         <div className="mt-1 text-[11px] text-[color:var(--muted)] font-mono">
           {formatRange(props.event.start_time, props.event.end_time)}
@@ -1274,9 +1343,10 @@ function EventListPanel<T extends ParsedEvent>(props: {
   events: T[];
   emptyText: string;
   checked: boolean;
-  selectedId: string | number | null;
+  selectedKey: string | null;
   now: Dayjs;
-  onSelect: (eventId: string | number) => void;
+  showGameMeta?: boolean;
+  onSelect: (eventKey: string) => void;
   onToggleCompleted: (event: T) => void;
 }) {
   return (
@@ -1289,14 +1359,15 @@ function EventListPanel<T extends ParsedEvent>(props: {
         {props.events.length > 0 ? (
           props.events.map((event, idx) => (
             <EventListRow
-              key={String(event.id)}
+              key={event.eventKey}
               event={event}
               checked={props.checked}
-              isSelected={props.selectedId === event.id}
+              isSelected={props.selectedKey === event.eventKey}
               now={props.now}
+              showGameMeta={props.showGameMeta}
               showBottomDivider={idx === props.events.length - 1}
               onSelect={() => {
-                props.onSelect(event.id);
+                props.onSelect(event.eventKey);
               }}
               onToggleCompleted={() => props.onToggleCompleted(event)}
             />
@@ -1307,6 +1378,10 @@ function EventListPanel<T extends ParsedEvent>(props: {
       </div>
     </div>
   );
+}
+
+function canCompleteTimelineEvent(event: AnyParsedEvent): event is ParsedUpstreamEvent | ParsedRecurringEvent {
+  return event.kind === "upstream" || event.kind === "recurring";
 }
 
 function sortByPhase<T extends { _s: Dayjs; _e: Dayjs; id: string | number }>(items: T[], now: Dayjs): T[] {
@@ -1577,11 +1652,7 @@ function parseRecurringForm(form: RecurringFormState): { value: Omit<RecurringAc
   };
 }
 
-export default function TimelineCalendar(props: {
-  events: CalendarEvent[];
-  gameId: GameId;
-  currentVersionState: UseCurrentVersionState;
-}) {
+export default function TimelineCalendar(props: TimelineCalendarProps) {
   const {
     prefs,
     setMonthlyCardRemainingDays,
@@ -1591,11 +1662,15 @@ export default function TimelineCalendar(props: {
     updateRecurringActivity,
     removeRecurringActivity,
   } = usePrefs();
+  const mode = props.mode ?? "game";
+  const isHome = mode === "home";
+  const primaryGameId = props.gameId ?? "genshin";
+  const showGameMeta = isHome;
   const [dayWidth, setDayWidth] = useState(26); // px per day
-  const [selectedId, setSelectedId] = useState<string | number | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedFrom, setSelectedFrom] = useState<"timeline" | "list" | null>(null);
   const [isTimelineCheckboxVisible, setIsTimelineCheckboxVisible] = useState(false);
-  const [hoveredTimelineEventId, setHoveredTimelineEventId] = useState<string | number | null>(null);
+  const [hoveredTimelineEventKey, setHoveredTimelineEventKey] = useState<string | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
   const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
@@ -1605,18 +1680,25 @@ export default function TimelineCalendar(props: {
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
   const [pendingDeleteRecurringId, setPendingDeleteRecurringId] = useState<string | null>(null);
   const [truncatedTimelineTitleIds, setTruncatedTimelineTitleIds] = useState<Record<string, true>>({});
-  const gameMeta = GAME_META[props.gameId];
-  const eventDetailVariant = EVENT_DETAIL_VARIANT_BY_GAME[props.gameId];
+  const gameMeta = GAME_META[primaryGameId];
+  const timelineTitle = isHome ? "近期结束" : gameMeta.name;
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
-  const monthlyCardState = prefs.timeline.monthlyCardByGame[props.gameId] ?? null;
-  const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(props.gameId);
-  const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(props.gameId);
-  const completedIdsArr = prefs.timeline.completedIdsByGame[props.gameId] ?? [];
-  const completedIds = useMemo(() => new Set<string | number>(completedIdsArr), [completedIdsArr]);
-  const completedRecurring = prefs.timeline.completedRecurringByGame[props.gameId] ?? {};
-  const recurringDefs = prefs.timeline.recurringActivitiesByGame[props.gameId] ?? [];
+  const monthlyCardState = prefs.timeline.monthlyCardByGame[primaryGameId] ?? null;
+  const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(primaryGameId);
+  const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(primaryGameId);
+  const completedIdsByGame = useMemo(() => {
+    const next: Partial<Record<GameId, Set<string | number>>> = {};
+    for (const gameId of ALL_GAME_IDS) {
+      next[gameId] = new Set<string | number>(prefs.timeline.completedIdsByGame[gameId] ?? []);
+    }
+    return next as Record<GameId, Set<string | number>>;
+  }, [prefs.timeline.completedIdsByGame]);
+  const completedRecurringByGame = prefs.timeline.completedRecurringByGame;
+  const recurringDefs = prefs.timeline.recurringActivitiesByGame[primaryGameId] ?? [];
+  const homeRangeStart = useMemo(() => now.startOf("day").subtract(HOME_TIMELINE_PAST_DAYS, "day"), [now]);
+  const homeRangeEnd = useMemo(() => now.startOf("day").add(HOME_TIMELINE_FUTURE_DAYS, "day").endOf("day"), [now]);
   const monthlyCardRemainingDays = useMemo(
     () => getMonthlyCardRemainingDays(monthlyCardState, now, recurringTzOffsetMinutes, monthlyCardResetOffsetMinutes),
     [monthlyCardResetOffsetMinutes, monthlyCardState, now, recurringTzOffsetMinutes]
@@ -1624,13 +1706,26 @@ export default function TimelineCalendar(props: {
   const isMonthlyCardUrgent = monthlyCardRemainingDays != null && monthlyCardRemainingDays <= 3;
   const recurringTzLabel = useMemo(() => formatFixedUtcOffset(recurringTzOffsetMinutes), [recurringTzOffsetMinutes]);
   const versionTimelineLabel = useMemo(() => {
-    if (props.currentVersionState.status !== "success" || !props.currentVersionState.data) return null;
+    if (isHome || props.currentVersionState?.status !== "success" || !props.currentVersionState.data) return null;
     return formatVersionTimelineLabel(props.currentVersionState.data, now);
-  }, [props.currentVersionState, now]);
+  }, [isHome, props.currentVersionState, now]);
 
-  const toggleCompleted = (eventId: string | number) => toggleCompletedPref(props.gameId, eventId);
-  const toggleRecurringCompleted = (activityId: string, cycleKey: string) =>
-    toggleRecurringCompletedPref(props.gameId, activityId, cycleKey);
+  const isUpstreamCompleted = (event: ParsedUpstreamEvent) =>
+    completedIdsByGame[event.sourceGameId]?.has(event.id) ?? false;
+  const isRecurringCompleted = (event: ParsedRecurringEvent) =>
+    completedRecurringByGame[event.sourceGameId]?.[event.recurringActivityId] === event.cycleKey;
+  const toggleCompleted = (event: ParsedUpstreamEvent) => toggleCompletedPref(event.sourceGameId, event.id);
+  const toggleRecurringCompleted = (event: ParsedRecurringEvent) =>
+    toggleRecurringCompletedPref(event.sourceGameId, event.recurringActivityId, event.cycleKey);
+  const isTimelineEventCompleted = (event: AnyParsedEvent): boolean => {
+    if (event.kind === "recurring") return isRecurringCompleted(event);
+    if (event.kind === "upstream") return isUpstreamCompleted(event);
+    return false;
+  };
+  const toggleTimelineEventCompleted = (event: ParsedUpstreamEvent | ParsedRecurringEvent) => {
+    if (event.kind === "recurring") toggleRecurringCompleted(event);
+    else toggleCompleted(event);
+  };
   const hScrollRef = useRef<HTMLDivElement | null>(null);
   const monthlyCardInputRef = useRef<HTMLInputElement | null>(null);
   const timelineTitleRefs = useRef(new Map<string, HTMLDivElement>());
@@ -1648,19 +1743,19 @@ export default function TimelineCalendar(props: {
   const commitMonthlyCardEditing = () => {
     const input = monthlyCardDraft.trim();
     if (!input) {
-      setMonthlyCardRemainingDays(props.gameId, null);
+      setMonthlyCardRemainingDays(primaryGameId, null);
       setIsMonthlyCardEditing(false);
       return;
     }
 
     const parsed = Number(input);
     const normalized = Number.isFinite(parsed) ? Math.max(0, Math.min(3650, Math.trunc(parsed))) : 0;
-    setMonthlyCardRemainingDays(props.gameId, normalized);
+    setMonthlyCardRemainingDays(primaryGameId, normalized);
     setIsMonthlyCardEditing(false);
   };
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedKey) return;
 
     const hideTimelineCheckboxOnOutsideBarInteraction = (e: Event) => {
       const target = e.target;
@@ -1678,7 +1773,7 @@ export default function TimelineCalendar(props: {
       document.removeEventListener("touchstart", hideTimelineCheckboxOnOutsideBarInteraction);
       document.removeEventListener("pointerdown", hideTimelineCheckboxOnOutsideBarInteraction);
     };
-  }, [selectedId]);
+  }, [selectedKey]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 60_000);
@@ -1693,10 +1788,10 @@ export default function TimelineCalendar(props: {
 
   // When switching games, reset UI state.
   useEffect(() => {
-    setSelectedId(null);
+    setSelectedKey(null);
     setSelectedFrom(null);
     setIsTimelineCheckboxVisible(false);
-    setHoveredTimelineEventId(null);
+    setHoveredTimelineEventKey(null);
     setIsMonthlyCardEditing(false);
     setMonthlyCardDraft("");
     setIsRecurringSettingsOpen(false);
@@ -1704,7 +1799,7 @@ export default function TimelineCalendar(props: {
     setRecurringFormError(null);
     setEditingRecurringId(null);
     setPendingDeleteRecurringId(null);
-  }, [props.gameId]);
+  }, [isHome, primaryGameId]);
 
   useEffect(() => {
     if (!pendingDeleteRecurringId) return;
@@ -1727,15 +1822,15 @@ export default function TimelineCalendar(props: {
     };
   }, [pendingDeleteRecurringId]);
 
-  const toggleSelectedFromList = (eventId: string | number) => {
+  const toggleSelectedFromList = (eventKey: string) => {
     // Mirror the timeline behavior: clicking the same list item again closes the detail panel.
-    if (selectedId === eventId && selectedFrom === "list") {
-      setSelectedId(null);
+    if (selectedKey === eventKey && selectedFrom === "list") {
+      setSelectedKey(null);
       setSelectedFrom(null);
       setIsTimelineCheckboxVisible(false);
       return;
     }
-    setSelectedId(eventId);
+    setSelectedKey(eventKey);
     setSelectedFrom("list");
     setIsTimelineCheckboxVisible(false);
   };
@@ -1743,6 +1838,8 @@ export default function TimelineCalendar(props: {
   const parsedUpstream = useMemo(() => {
     const items = props.events
       .map((e) => {
+        const sourceGameId = resolveEventGameId(e, props.gameId);
+        if (!sourceGameId) return null;
         const s = parseDateTime(e.start_time);
         const ed = parseDateTime(e.end_time);
         const title = normalizeEventTitle(e.title);
@@ -1750,12 +1847,14 @@ export default function TimelineCalendar(props: {
           ...e,
           kind: "upstream" as const,
           title,
-          is_gacha: Boolean(e.is_gacha) || isGachaEventTitle(props.gameId, title),
+          is_gacha: Boolean(e.is_gacha) || isGachaEventTitle(sourceGameId, title),
           _s: s,
           _e: ed,
+          sourceGameId,
+          eventKey: makeEventKey("upstream", sourceGameId, e.id),
         };
       })
-      .filter((e) => e._s.isValid() && e._e.isValid() && e._e.isAfter(e._s));
+      .filter((e): e is ParsedUpstreamEvent => Boolean(e && e._s.isValid() && e._e.isValid() && e._e.isAfter(e._s)));
     return items;
   }, [props.events, props.gameId]);
 
@@ -1763,131 +1862,226 @@ export default function TimelineCalendar(props: {
 
   const visibleUpstreamSorted = useMemo(() => {
     const nowMs = now.valueOf();
+    const homeEndMs = homeRangeEnd.valueOf();
     return sortedUpstream.filter((e) => {
       if (!showGacha && e.is_gacha) return false;
+      if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
+      if (isHome) return true;
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
-  }, [sortedUpstream, showGacha, showNotStarted, now]);
+  }, [homeRangeEnd, isHome, sortedUpstream, showGacha, showNotStarted, now]);
 
   const parsedRecurring = useMemo(() => {
-    if (recurringDefs.length === 0) return [] as ParsedRecurringEvent[];
-
     const items: ParsedRecurringEvent[] = [];
-    for (const a of recurringDefs) {
-      const w = computeRecurringWindow(now, props.gameId, a);
-      if (!w.start.isValid() || !w.end.isValid() || !w.end.isAfter(w.start)) continue;
-      // Ensure we only ever show the *current* cycle (no future occurrences).
-      if (now.valueOf() < w.start.valueOf() || now.valueOf() >= w.end.valueOf()) continue;
+    const sourceGameIds = isHome ? ALL_GAME_IDS : [primaryGameId];
 
-      const event: CalendarEvent = {
-        id: `rec:${props.gameId}:${a.id}`,
-        title: a.title,
-        start_time: toIsoWithOffset(w.start),
-        end_time: toIsoWithOffset(w.end),
-        content: `循环活动：${formatRecurringRule(props.gameId, a.rule, a.durationDays)}`,
-      };
+    for (const gameId of sourceGameIds) {
+      const defs = prefs.timeline.recurringActivitiesByGame[gameId] ?? [];
+      for (const a of defs) {
+        const w = computeRecurringWindow(now, gameId, a);
+        if (!w.start.isValid() || !w.end.isValid() || !w.end.isAfter(w.start)) continue;
+        // Ensure we only ever show the *current* cycle (no future occurrences).
+        if (now.valueOf() < w.start.valueOf() || now.valueOf() >= w.end.valueOf()) continue;
 
-      items.push({
-        ...event,
-        _s: w.start,
-        _e: w.end,
-        kind: "recurring",
-        recurringActivityId: a.id,
-        cycleKey: w.cycleKey,
-      });
+        const event: CalendarEvent = {
+          id: `rec:${gameId}:${a.id}`,
+          title: a.title,
+          start_time: toIsoWithOffset(w.start),
+          end_time: toIsoWithOffset(w.end),
+          content: `循环活动：${formatRecurringRule(gameId, a.rule, a.durationDays)}`,
+        };
+
+        items.push({
+          ...event,
+          _s: w.start,
+          _e: w.end,
+          kind: "recurring",
+          sourceGameId: gameId,
+          eventKey: makeEventKey("recurring", gameId, a.id, w.cycleKey),
+          recurringActivityId: a.id,
+          cycleKey: w.cycleKey,
+        });
+      }
     }
 
     return sortByPhase(items, now);
-  }, [now, props.gameId, recurringDefs]);
+  }, [isHome, now, prefs.timeline.recurringActivitiesByGame, primaryGameId]);
+
+  const visibleRecurring = useMemo(() => {
+    if (!isHome) return parsedRecurring;
+    const nowMs = now.valueOf();
+    const homeEndMs = homeRangeEnd.valueOf();
+    return parsedRecurring.filter((e) => e._e.valueOf() >= nowMs && e._e.valueOf() <= homeEndMs);
+  }, [homeRangeEnd, isHome, now, parsedRecurring]);
 
   const { activeUpstreamEvents, completedUpstreamEvents } = useMemo(() => {
-    const active = visibleUpstreamSorted.filter((e) => !completedIds.has(e.id));
-    const completed = visibleUpstreamSorted.filter((e) => completedIds.has(e.id));
+    const active = visibleUpstreamSorted.filter((e) => !isUpstreamCompleted(e));
+    const completed = visibleUpstreamSorted.filter((e) => isUpstreamCompleted(e));
     return { activeUpstreamEvents: active, completedUpstreamEvents: completed };
-  }, [visibleUpstreamSorted, completedIds]);
+  }, [completedIdsByGame, visibleUpstreamSorted]);
 
   const { activeRecurringEvents, completedRecurringEvents } = useMemo(() => {
-    if (parsedRecurring.length === 0) {
+    if (visibleRecurring.length === 0) {
       return { activeRecurringEvents: [] as ParsedRecurringEvent[], completedRecurringEvents: [] as ParsedRecurringEvent[] };
     }
     const active: ParsedRecurringEvent[] = [];
     const completed: ParsedRecurringEvent[] = [];
-    for (const e of parsedRecurring) {
-      if (completedRecurring[e.recurringActivityId] === e.cycleKey) completed.push(e);
+    for (const e of visibleRecurring) {
+      if (isRecurringCompleted(e)) completed.push(e);
       else active.push(e);
     }
     return { activeRecurringEvents: active, completedRecurringEvents: completed };
-  }, [parsedRecurring, completedRecurring]);
+  }, [completedRecurringByGame, visibleRecurring]);
+
+  const timelineOnlyEvents = useMemo(() => {
+    if (!isHome) return [] as TimelineOnlyParsedEvent[];
+
+    const nowMs = now.valueOf();
+    const homeEndMs = homeRangeEnd.valueOf();
+    const items: TimelineOnlyParsedEvent[] = [];
+
+    for (const gameId of ALL_GAME_IDS) {
+      const entry = prefs.timeline.monthlyCardByGame[gameId];
+      const remainingDays = getMonthlyCardRemainingDays(
+        entry,
+        now,
+        getRecurringTzOffsetMinutes(gameId),
+        getDailyResetOffsetMinutes(gameId)
+      );
+      if (remainingDays == null || remainingDays > HOME_TIMELINE_FUTURE_DAYS) continue;
+
+      const end = getMonthlyCardEndTime(
+        now,
+        remainingDays,
+        getRecurringTzOffsetMinutes(gameId),
+        getDailyResetOffsetMinutes(gameId)
+      );
+      if (!end.isValid() || end.valueOf() <= nowMs || end.valueOf() > homeEndMs) continue;
+      const start = now.subtract(5, "day");
+
+      const event: CalendarEvent = {
+        id: `monthly-card:${gameId}`,
+        title: "月卡",
+        start_time: toIsoWithOffset(start),
+        end_time: toIsoWithOffset(end),
+        content: `月卡剩余 ${remainingDays} 天`,
+      };
+
+      items.push({
+        ...event,
+        _s: start,
+        _e: end,
+        kind: "monthlyCard",
+        sourceGameId: gameId,
+        eventKey: makeEventKey("monthlyCard", gameId, event.id),
+      });
+    }
+
+    for (const version of props.currentVersions ?? []) {
+      const start = parseDateTime(version.start_time);
+      const end = parseDateTime(version.end_time);
+      if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
+      if (end.valueOf() < nowMs || end.valueOf() > homeEndMs) continue;
+
+      const versionLabel = version.version.trim();
+      if (!versionLabel) continue;
+
+      const event: CalendarEvent = {
+        id: `version:${version.game}:${versionLabel}`,
+        title: `${versionLabel}版本`,
+        start_time: version.start_time,
+        end_time: version.end_time,
+        content: "游戏版本",
+      };
+
+      items.push({
+        ...event,
+        _s: start,
+        _e: end,
+        kind: "version",
+        sourceGameId: version.game,
+        eventKey: makeEventKey("version", version.game, event.id),
+      });
+    }
+
+    return sortByPhase(items, now);
+  }, [homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions]);
 
   const activeTimelineEvents = useMemo(() => {
     return sortByPhase(
-      [...activeRecurringEvents, ...activeUpstreamEvents] satisfies ParsedEvent[],
+      [...timelineOnlyEvents, ...activeRecurringEvents, ...activeUpstreamEvents] satisfies ParsedEvent[],
       now
     );
-  }, [activeRecurringEvents, activeUpstreamEvents, now]);
+  }, [activeRecurringEvents, activeUpstreamEvents, now, timelineOnlyEvents]);
 
   const selectedEvent = useMemo(() => {
-    if (selectedId == null) return null;
+    if (selectedKey == null) return null;
     return (
-      (visibleUpstreamSorted.find((e) => e.id === selectedId) ??
-        parsedRecurring.find((e) => e.id === selectedId) ??
+      (visibleUpstreamSorted.find((e) => e.eventKey === selectedKey) ??
+        visibleRecurring.find((e) => e.eventKey === selectedKey) ??
+        timelineOnlyEvents.find((e) => e.eventKey === selectedKey) ??
         null) as AnyParsedEvent | null
     );
-  }, [visibleUpstreamSorted, parsedRecurring, selectedId]);
+  }, [visibleUpstreamSorted, visibleRecurring, timelineOnlyEvents, selectedKey]);
 
   // If selected ID disappears (data refresh / filter changes), hide the detail panel.
   useEffect(() => {
-    if (selectedId == null) return;
+    if (selectedKey == null) return;
     if (selectedEvent) return;
-    setSelectedId(null);
+    setSelectedKey(null);
     setSelectedFrom(null);
     setIsTimelineCheckboxVisible(false);
-  }, [selectedEvent, selectedId]);
+  }, [selectedEvent, selectedKey]);
 
   const { rangeStart, rangeEnd, months: monthSegments, weeks } = useMemo(() => {
-    const baseMonth = now.startOf("month");
-    const windowStart = baseMonth.subtract(1, "month").startOf("month");
-    const windowEnd = baseMonth.add(1, "month").endOf("month");
-    const todayStart = now.startOf("day");
-    const todayEnd = now.endOf("day");
+    let start = homeRangeStart;
+    let end = homeRangeEnd;
 
-    // Only consider events that overlap the maximum visible window.
-    // Timeline start/end are then derived from those visible events:
-    // - If any event starts before windowStart, show the full (n-1) month and truncate.
-    // - Otherwise start from the earliest visible event start.
-    // End follows the same rule with windowEnd / latest end.
-    const visible = activeTimelineEvents.filter(
-      (e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf()
-    );
+    if (!isHome) {
+      const baseMonth = now.startOf("month");
+      const windowStart = baseMonth.subtract(1, "month").startOf("month");
+      const windowEnd = baseMonth.add(1, "month").endOf("month");
+      const todayStart = now.startOf("day");
+      const todayEnd = now.endOf("day");
 
-    let start = windowStart;
-    let end = windowEnd;
+      // Only consider events that overlap the maximum visible window.
+      // Timeline start/end are then derived from those visible events:
+      // - If any event starts before windowStart, show the full (n-1) month and truncate.
+      // - Otherwise start from the earliest visible event start.
+      // End follows the same rule with windowEnd / latest end.
+      const visible = activeTimelineEvents.filter(
+        (e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf()
+      );
 
-    if (visible.length > 0) {
-      let minS = visible[0]!._s;
-      let maxE = visible[0]!._e;
-      let hasBeforeWindowStart = visible[0]!._s.isBefore(windowStart);
-      let hasAfterWindowEnd = visible[0]!._e.isAfter(windowEnd);
+      start = windowStart;
+      end = windowEnd;
 
-      for (const e of visible) {
-        if (e._s.isBefore(minS)) minS = e._s;
-        if (e._e.isAfter(maxE)) maxE = e._e;
-        if (e._s.isBefore(windowStart)) hasBeforeWindowStart = true;
-        if (e._e.isAfter(windowEnd)) hasAfterWindowEnd = true;
+      if (visible.length > 0) {
+        let minS = visible[0]!._s;
+        let maxE = visible[0]!._e;
+        let hasBeforeWindowStart = visible[0]!._s.isBefore(windowStart);
+        let hasAfterWindowEnd = visible[0]!._e.isAfter(windowEnd);
+
+        for (const e of visible) {
+          if (e._s.isBefore(minS)) minS = e._s;
+          if (e._e.isAfter(maxE)) maxE = e._e;
+          if (e._s.isBefore(windowStart)) hasBeforeWindowStart = true;
+          if (e._e.isAfter(windowEnd)) hasAfterWindowEnd = true;
+        }
+
+        start = hasBeforeWindowStart ? windowStart : minS;
+        end = hasAfterWindowEnd ? windowEnd : maxE;
       }
 
-      start = hasBeforeWindowStart ? windowStart : minS;
-      end = hasAfterWindowEnd ? windowEnd : maxE;
+      // Ensure the timeline always includes "today", even if all visible events are
+      // entirely in the future or past (or only later/earlier within today).
+      // - today is the max timeline start (start cannot be after todayStart)
+      // - today is the min timeline end (end cannot be before todayEnd)
+      if (start.isAfter(todayStart)) start = todayStart;
+      if (end.isBefore(todayEnd)) end = todayEnd;
+      if (end.isBefore(start)) end = start;
     }
-
-    // Ensure the timeline always includes "today", even if all visible events are
-    // entirely in the future or past (or only later/earlier within today).
-    // - today is the max timeline start (start cannot be after todayStart)
-    // - today is the min timeline end (end cannot be before todayEnd)
-    if (start.isAfter(todayStart)) start = todayStart;
-    if (end.isBefore(todayEnd)) end = todayEnd;
-    if (end.isBefore(start)) end = start;
 
     const monthSegments: Array<{ key: string; label: string; width: number }> = [];
     const weekSegments: Array<{ key: string; label: string; tooltip: string; width: number }> = [];
@@ -1932,7 +2126,7 @@ export default function TimelineCalendar(props: {
       months: monthSegments,
       weeks: weekSegments,
     };
-  }, [activeTimelineEvents, now]);
+  }, [activeTimelineEvents, homeRangeEnd, homeRangeStart, isHome, now]);
 
   const timelineEvents = useMemo(() => {
     return activeTimelineEvents.filter(
@@ -1942,8 +2136,8 @@ export default function TimelineCalendar(props: {
 
   // Start from an arbitrary (but stable) palette color per game; keep palette order unchanged.
   const timelineBarColorStartOffset = useMemo(
-    () => hashString(props.gameId) % TIMELINE_BAR_COLORS.length,
-    [props.gameId]
+    () => hashString(isHome ? "home" : primaryGameId) % TIMELINE_BAR_COLORS.length,
+    [isHome, primaryGameId]
   );
 
   const isTimelineEmpty = activeTimelineEvents.length === 0;
@@ -1952,17 +2146,13 @@ export default function TimelineCalendar(props: {
   // (so it disappears from the timeline), hide the detail panel.
   useEffect(() => {
     if (selectedFrom !== "timeline") return;
-    if (selectedId == null) return;
+    if (selectedKey == null) return;
     if (!selectedEvent) return;
 
-    const isCompleted =
-      selectedEvent.kind === "recurring"
-        ? completedRecurring[selectedEvent.recurringActivityId] === selectedEvent.cycleKey
-        : completedIds.has(selectedId);
-    if (!isCompleted) return;
-    setSelectedId(null);
+    if (!isTimelineEventCompleted(selectedEvent)) return;
+    setSelectedKey(null);
     setSelectedFrom(null);
-  }, [completedIds, completedRecurring, selectedEvent, selectedFrom, selectedId]);
+  }, [completedIdsByGame, completedRecurringByGame, selectedEvent, selectedFrom, selectedKey]);
 
   const totalWidth = useMemo(() => {
     const ms = rangeEnd.valueOf() - rangeStart.valueOf();
@@ -2077,9 +2267,9 @@ export default function TimelineCalendar(props: {
       return false;
     }
     if (editingRecurringId) {
-      updateRecurringActivity(props.gameId, editingRecurringId, value);
+      updateRecurringActivity(primaryGameId, editingRecurringId, value);
     } else {
-      addRecurringActivity(props.gameId, value);
+      addRecurringActivity(primaryGameId, value);
     }
     resetRecurringForm();
     return true;
@@ -2091,79 +2281,92 @@ export default function TimelineCalendar(props: {
         <div className="relative z-40 flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
           <div className="flex items-center gap-0.5 min-w-0">
             <div className="flex items-center gap-2 shrink-0">
-              <img
-                src={gameMeta.icon}
-                alt=""
-                aria-hidden="true"
-                className="w-5 h-5 object-contain rounded-md"
-                referrerPolicy="no-referrer"
-              />
-              <div className="text-sm font-semibold leading-none">
-                <span className="text-base leading-none">{gameMeta.name}</span>
+              {!isHome ? (
+                <img
+                  src={gameMeta.icon}
+                  alt=""
+                  aria-hidden="true"
+                  className="w-5 h-5 object-contain rounded-md"
+                  referrerPolicy="no-referrer"
+                />
+              ) : null}
+              <div className="text-sm font-semibold leading-none text-[color:var(--ink)]">
+                <span className="text-base leading-none">{timelineTitle}</span>
               </div>
             </div>
-            {versionTimelineLabel ? (
+            {!isHome && versionTimelineLabel ? (
               <div className="text-xs text-[color:var(--muted)] min-w-0 truncate leading-none translate-y-[3px]">
                 <span>{versionTimelineLabel.versionTitle}</span>
                 <span className="font-mono"> ~ {versionTimelineLabel.endLabel} ({versionTimelineLabel.remainingLabel})</span>
               </div>
             ) : null}
           </div>
-          <div className="shrink-0">
-            <div className="relative z-50">
-              <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
-                <span>月卡</span>
-                {isMonthlyCardEditing ? (
-                  <>
-                    <input
-                      ref={monthlyCardInputRef}
-                      type="text"
-                      inputMode="numeric"
-                      value={monthlyCardDraft}
-                      onChange={(e) => {
-                        const next = e.target.value;
-                        if (/^\d*$/.test(next)) setMonthlyCardDraft(next);
-                      }}
-                      onBlur={commitMonthlyCardEditing}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          commitMonthlyCardEditing();
-                          return;
-                        }
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          cancelMonthlyCardEditing();
-                        }
-                      }}
-                      placeholder="天数"
-                      className="w-14 px-1.5 py-0.5 rounded border border-[color:var(--line)] bg-[color:var(--popover)] text-[color:var(--ink2)] font-mono"
-                    />
-                    <span className="font-mono text-[color:var(--ink2)]">d</span>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={startMonthlyCardEditing}
-                    className={clsx(
-                      "font-mono hover:text-[color:var(--ink)]",
-                      isMonthlyCardUrgent ? "text-red-500" : "text-[color:var(--ink2)]"
-                    )}
-                    title="点击直接输入月卡剩余天数"
-                  >
-                    {monthlyCardRemainingDays == null ? "未设置" : `${monthlyCardRemainingDays}d`}
-                  </button>
-                )}
+          {!isHome ? (
+            <div className="shrink-0">
+              <div className="relative z-50">
+                <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
+                  <span>月卡</span>
+                  {isMonthlyCardEditing ? (
+                    <>
+                      <input
+                        ref={monthlyCardInputRef}
+                        type="text"
+                        inputMode="numeric"
+                        value={monthlyCardDraft}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          if (/^\d*$/.test(next)) setMonthlyCardDraft(next);
+                        }}
+                        onBlur={commitMonthlyCardEditing}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitMonthlyCardEditing();
+                            return;
+                          }
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            cancelMonthlyCardEditing();
+                          }
+                        }}
+                        placeholder="天数"
+                        className="w-14 px-1.5 py-0.5 rounded border border-[color:var(--line)] bg-[color:var(--popover)] text-[color:var(--ink2)] font-mono"
+                      />
+                      <span className="font-mono text-[color:var(--ink2)]">d</span>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startMonthlyCardEditing}
+                      className={clsx(
+                        "font-mono hover:text-[color:var(--ink)]",
+                        isMonthlyCardUrgent ? "text-red-500" : "text-[color:var(--ink2)]"
+                      )}
+                      title="点击直接输入月卡剩余天数"
+                    >
+                      {monthlyCardRemainingDays == null ? "未设置" : `${monthlyCardRemainingDays}d`}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="shrink-0 invisible" aria-hidden="true">
+              <div className="relative z-50">
+                <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
+                  <span>月卡</span>
+                  <span className="font-mono text-[color:var(--ink2)]">未设置</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div ref={hScrollRef}>
           {isTimelineEmpty ? (
             <div className="min-h-[180px] flex items-center justify-center px-6 py-10">
               <div className="text-sm text-[color:var(--muted)] select-none">
-                所有活动已完成，长草中(´-ω-`)
+                {isHome ? "未来 7 天内暂无将结束的未完成活动" : "所有活动已完成，长草中(´-ω-`)"}
               </div>
             </div>
           ) : (
@@ -2232,29 +2435,40 @@ export default function TimelineCalendar(props: {
                 ) : null}
 
                 {timelineEvents.map((e, idx) => {
-                  const eventKey = String(e.id);
-                  const isSelected = selectedId === e.id;
-                  const isHovered = hoveredTimelineEventId === e.id;
+                  const eventKey = e.eventKey;
+                  const displayTitle = e.title;
+                  const accessibleTitle = getEventAccessibleTitle(e, showGameMeta);
+                  const sourceGameIcon = GAME_META[e.sourceGameId].icon;
+                  const isSelected = selectedKey === eventKey;
+                  const isHovered = hoveredTimelineEventKey === eventKey;
+                  const canComplete = canCompleteTimelineEvent(e);
                   const showCompleteToggle =
-                    (isSelected && selectedFrom === "timeline" && isTimelineCheckboxVisible) || isHovered;
+                    canComplete && ((isSelected && selectedFrom === "timeline" && isTimelineCheckboxVisible) || isHovered);
                   const isEnd = now.isAfter(e._e);
                   const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
                   const remainingDays = Math.floor(remainingMs / DAY_MS);
                   const remainingHours = Math.floor(remainingMs / HOUR_MS);
                   const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
+                  const remainingDayHours = Math.floor((remainingMs % DAY_MS) / HOUR_MS);
                   const showMinutes = !isEnd && remainingMs < HOUR_MS;
                   const showHours = !isEnd && remainingMs < DAY_MS && !showMinutes;
+                  const showHomeDayHours = isHome && !isEnd && !showMinutes && !showHours;
                   const remainingLabel = showMinutes
                     ? `${remainingMinutes}分`
                     : showHours
                       ? `${remainingHours}h`
-                      : `${remainingDays}d`;
+                      : showHomeDayHours
+                        ? `${remainingDays}d${remainingDayHours}h`
+                        : `${remainingDays}d`;
                   const remainingAriaLabel = showMinutes
                     ? `剩余${remainingMinutes}分钟`
                     : showHours
                       ? `剩余${remainingHours}小时`
-                      : `剩余${remainingDays}天`;
-                  const isUrgent = isUrgentByRemainingMs(e.kind, remainingMs);
+                      : showHomeDayHours
+                        ? `剩余${remainingDays}天${remainingDayHours}小时`
+                        : `剩余${remainingDays}天`;
+                  const urgentKind = e.kind === "recurring" ? "recurring" : "upstream";
+                  const isUrgent = !isHome && isUrgentByRemainingMs(urgentKind, remainingMs);
 
                   const isTruncatedStart = e._s.isBefore(rangeStart);
                   const isTruncatedEnd = e._e.isAfter(rangeEnd);
@@ -2265,9 +2479,11 @@ export default function TimelineCalendar(props: {
                   const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
                   const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
                   const showCountdownOnly = width <= 88;
+                  const showBarIcon = showGameMeta && width >= 32;
+                  const barIconWidth = showBarIcon ? Math.min(TIMELINE_BAR_ICON_WIDTH_PX, width) : 0;
                   const hasTruncatedTitle = Boolean(truncatedTimelineTitleIds[eventKey]);
                   const hasHiddenOrTruncatedTitle = showCountdownOnly || hasTruncatedTitle;
-                  const showBarTitlePopover = hasHiddenOrTruncatedTitle && showCompleteToggle;
+                  const showBarTitlePopover = hasHiddenOrTruncatedTitle && (showCompleteToggle || isHovered);
                   const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
                   const countdownUnits = Array.from(remainingLabel).reduce(
                     (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
@@ -2329,7 +2545,7 @@ export default function TimelineCalendar(props: {
 
                   return (
                     <div
-                      key={String(e.id)}
+                      key={eventKey}
                       className={clsx(
                         "relative border-b border-[color:var(--line)]",
                         "hover:bg-white/20 dark:hover:bg-transparent"
@@ -2347,15 +2563,26 @@ export default function TimelineCalendar(props: {
                           style={shortBarTitlePopoverStyle}
                           aria-hidden="true"
                         >
-                          <div
-                            className="overflow-hidden break-words leading-5"
-                            style={{
-                              display: "-webkit-box",
-                              WebkitBoxOrient: "vertical",
-                              WebkitLineClamp: 2,
-                            }}
-                          >
-                            {e.title}
+                          <div className="flex items-start gap-1.5 leading-5">
+                            {showGameMeta ? (
+                              <img
+                                src={sourceGameIcon}
+                                alt=""
+                                aria-hidden="true"
+                                className="mt-0.5 w-4 h-4 shrink-0 object-contain rounded"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : null}
+                            <span
+                              className="min-w-0 overflow-hidden break-words"
+                              style={{
+                                display: "-webkit-box",
+                                WebkitBoxOrient: "vertical",
+                                WebkitLineClamp: 2,
+                              }}
+                            >
+                              {displayTitle}
+                            </span>
                           </div>
                         </div>
                       ) : null}
@@ -2364,8 +2591,9 @@ export default function TimelineCalendar(props: {
                         className={clsx(
                           "absolute top-2 bottom-2 py-2 overflow-hidden",
                           "flex items-center",
-                          showCountdownOnly ? "justify-center" : "px-3",
-                          "z-10 text-[13px] leading-5 shadow-sm cursor-pointer",
+                          showCountdownOnly ? "justify-center" : showBarIcon ? "pr-3" : "px-3",
+                          "z-10 text-[13px] leading-5 shadow-sm",
+                          canComplete ? "cursor-pointer" : "cursor-default",
                           "transition-[box-shadow,filter] duration-150 ease-out",
                           "hover:shadow-md hover:brightness-105",
                           isSelected
@@ -2381,22 +2609,36 @@ export default function TimelineCalendar(props: {
                           ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
                         }}
                         onClick={() => {
+                          if (!canComplete) return;
                           // Clicking the same timeline event again should hide the detail panel.
-                          if (selectedId === e.id && selectedFrom === "timeline") {
-                            setSelectedId(null);
+                          if (selectedKey === eventKey && selectedFrom === "timeline") {
+                            setSelectedKey(null);
                             setSelectedFrom(null);
                             setIsTimelineCheckboxVisible(false);
                             return;
                           }
-                          setSelectedId(e.id);
+                          setSelectedKey(eventKey);
                           setSelectedFrom("timeline");
                           setIsTimelineCheckboxVisible(true);
                         }}
-                        onMouseEnter={() => setHoveredTimelineEventId(e.id)}
-                        onMouseLeave={() => setHoveredTimelineEventId(null)}
+                        onMouseEnter={() => setHoveredTimelineEventKey(eventKey)}
+                        onMouseLeave={() => setHoveredTimelineEventKey(null)}
                       >
+                        {showBarIcon ? (
+                          <img
+                            src={sourceGameIcon}
+                            alt=""
+                            aria-hidden="true"
+                            className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover border-r border-slate-900/20"
+                            style={{ width: barIconWidth }}
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : null}
                         {!showCountdownOnly ? (
-                          <div className="min-w-0 flex-1">
+                          <div
+                            className="relative z-10 min-w-0 flex-1"
+                            style={showBarIcon ? { marginLeft: barIconWidth + 8 } : undefined}
+                          >
                             <div
                               ref={(node) => {
                                 if (node) {
@@ -2410,11 +2652,21 @@ export default function TimelineCalendar(props: {
                                 isEnd && "line-through"
                               )}
                             >
-                              {e.title}
+                              {displayTitle}
                             </div>
                           </div>
                         ) : null}
-                        <div className={clsx("relative", showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2")}>
+                        <div
+                          className={clsx(
+                            "relative z-10",
+                            showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
+                          )}
+                          style={
+                            showCountdownOnly && showBarIcon
+                              ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
+                              : undefined
+                          }
+                        >
                           <button
                             type="button"
                             className={clsx(
@@ -2435,13 +2687,10 @@ export default function TimelineCalendar(props: {
                             }
                             onClick={(ev) => {
                               ev.stopPropagation();
-                              if (e.kind === "recurring") {
-                                toggleRecurringCompleted(e.recurringActivityId, e.cycleKey);
-                              } else {
-                                toggleCompleted(e.id);
-                              }
+                              if (!canComplete) return;
+                              toggleTimelineEventCompleted(e);
                             }}
-                            aria-label={`标记${e.title}为已完成`}
+                            aria-label={`标记${accessibleTitle}为已完成`}
                             title="标记为已完成"
                             aria-hidden={!showCompleteToggle}
                             tabIndex={showCompleteToggle ? 0 : -1}
@@ -2503,35 +2752,24 @@ export default function TimelineCalendar(props: {
         <div className="glass shadow-ink rounded-2xl overflow-hidden">
           <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
             <div className="text-sm font-semibold">活动详情</div>
-            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-              <span>已完成</span>
-              <input
-                type="checkbox"
-                checked={
-                  selectedEvent.kind === "recurring"
-                    ? completedRecurring[selectedEvent.recurringActivityId] === selectedEvent.cycleKey
-                    : completedIds.has(selectedEvent.id)
-                }
-                onChange={() => {
-                  if (selectedEvent.kind === "recurring") {
-                    toggleRecurringCompleted(selectedEvent.recurringActivityId, selectedEvent.cycleKey);
-                  } else {
-                    toggleCompleted(selectedEvent.id);
-                  }
-                }}
-                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-              />
-            </label>
+            {canCompleteTimelineEvent(selectedEvent) ? (
+              <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
+                <span>已完成</span>
+                <input
+                  type="checkbox"
+                  checked={isTimelineEventCompleted(selectedEvent)}
+                  onChange={() => toggleTimelineEventCompleted(selectedEvent)}
+                  className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                />
+              </label>
+            ) : null}
           </div>
           <EventDetail
             event={selectedEvent}
-            checked={
-              selectedEvent.kind === "recurring"
-                ? completedRecurring[selectedEvent.recurringActivityId] === selectedEvent.cycleKey
-                : completedIds.has(selectedEvent.id)
-            }
+            checked={isTimelineEventCompleted(selectedEvent)}
             now={now}
-            variant={eventDetailVariant}
+            variant={EVENT_DETAIL_VARIANT_BY_GAME[selectedEvent.sourceGameId]}
+            showGameMeta={showGameMeta}
           />
         </div>
       ) : null}
@@ -2540,54 +2778,57 @@ export default function TimelineCalendar(props: {
         <EventListPanel
           title="限时活动"
           events={activeUpstreamEvents}
-          emptyText="暂无未完成活动"
+          emptyText={isHome ? "未来 7 天内暂无未完成限时活动" : "暂无未完成活动"}
           checked={false}
-          selectedId={selectedId}
+          selectedKey={selectedKey}
           now={now}
+          showGameMeta={showGameMeta}
           onSelect={toggleSelectedFromList}
-          onToggleCompleted={(event) => toggleCompleted(event.id)}
+          onToggleCompleted={(event) => toggleCompleted(event)}
         />
 
         <div className="glass shadow-ink rounded-2xl overflow-hidden">
           <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)] flex items-center justify-between gap-3">
             <div className="flex items-end gap-2 min-w-0">
               <div className="text-sm font-semibold">循环活动</div>
-              {editingRecurringId ? (
+              {!isHome && editingRecurringId ? (
                 <div className="text-xs text-[color:var(--accent)] whitespace-nowrap leading-none">正在编辑循环活动</div>
               ) : null}
             </div>
-            <button
-              type="button"
-              className={clsx(
-                "inline-flex items-center justify-center rounded-md transition-colors",
-                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                isRecurringSettingsOpen ? "text-[color:var(--accent)]" : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-              )}
-              onClick={() => {
-                if (isRecurringSettingsOpen) {
-                  setIsRecurringSettingsOpen(false);
-                  resetRecurringForm();
-                  return;
-                }
-                setIsRecurringSettingsOpen(true);
-                setRecurringFormError(null);
-              }}
-              aria-label={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
-              title={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
-              aria-haspopup="dialog"
-              aria-expanded={isRecurringSettingsOpen}
-            >
-              <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeLinejoin="round">
-                <circle cx="16" cy="16" r="4" strokeWidth="2" />
-                <path
-                  strokeWidth="2"
-                  strokeMiterlimit="10"
-                  d="M27.758 10.366l-1-1.732a2 2 0 0 0-2.732-.732l-.526.304c-2 1.154-4.5-.289-4.5-2.598V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v.608c0 2.309-2.5 3.753-4.5 2.598l-.526-.304a2 2 0 0 0-2.732.732l-1 1.732a2 2 0 0 0 .732 2.732l.526.304c2 1.155 2 4.041 0 5.196l-.526.304a2 2 0 0 0-.732 2.732l1 1.732a2 2 0 0 0 2.732.732l.526-.304c2-1.155 4.5.289 4.5 2.598V27a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-.608c0-2.309 2.5-3.753 4.5-2.598l.526.304a2 2 0 0 0 2.732-.732l1-1.732a2 2 0 0 0-.732-2.732l-.526-.304c-2-1.155-2-4.041 0-5.196l.526-.304a2 2 0 0 0 .732-2.732z"
-                />
-              </svg>
-            </button>
+            {!isHome ? (
+              <button
+                type="button"
+                className={clsx(
+                  "inline-flex items-center justify-center rounded-md transition-colors",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                  isRecurringSettingsOpen ? "text-[color:var(--accent)]" : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                )}
+                onClick={() => {
+                  if (isRecurringSettingsOpen) {
+                    setIsRecurringSettingsOpen(false);
+                    resetRecurringForm();
+                    return;
+                  }
+                  setIsRecurringSettingsOpen(true);
+                  setRecurringFormError(null);
+                }}
+                aria-label={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
+                title={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
+                aria-haspopup="dialog"
+                aria-expanded={isRecurringSettingsOpen}
+              >
+                <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeLinejoin="round">
+                  <circle cx="16" cy="16" r="4" strokeWidth="2" />
+                  <path
+                    strokeWidth="2"
+                    strokeMiterlimit="10"
+                    d="M27.758 10.366l-1-1.732a2 2 0 0 0-2.732-.732l-.526.304c-2 1.154-4.5-.289-4.5-2.598V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v.608c0 2.309-2.5 3.753-4.5 2.598l-.526-.304a2 2 0 0 0-2.732.732l-1 1.732a2 2 0 0 0 .732 2.732l.526.304c2 1.155 2 4.041 0 5.196l-.526.304a2 2 0 0 0-.732 2.732l1 1.732a2 2 0 0 0 2.732.732l.526-.304c2-1.155 4.5.289 4.5 2.598V27a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-.608c0-2.309 2.5-3.753 4.5-2.598l.526.304a2 2 0 0 0 2.732-.732l1-1.732a2 2 0 0 0-.732-2.732l-.526-.304c-2-1.155-2-4.041 0-5.196l.526-.304a2 2 0 0 0 .732-2.732z"
+                  />
+                </svg>
+              </button>
+            ) : null}
           </div>
-          {isRecurringSettingsOpen ? (
+          {!isHome && isRecurringSettingsOpen ? (
             <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]/40">
               <form
                 className="grid gap-3"
@@ -2817,7 +3058,7 @@ export default function TimelineCalendar(props: {
                       <div className="min-w-0">
                         <div className="text-sm font-medium break-words">{activity.title}</div>
                         <div className="text-[11px] text-[color:var(--muted)] mt-1">
-                          {formatRecurringRule(props.gameId, activity.rule, activity.durationDays)}
+                          {formatRecurringRule(primaryGameId, activity.rule, activity.durationDays)}
                         </div>
                       </div>
                       <div className="shrink-0 flex items-center gap-2">
@@ -2869,7 +3110,7 @@ export default function TimelineCalendar(props: {
                               return;
                             }
                             if (editingRecurringId === activity.id) resetRecurringForm();
-                            removeRecurringActivity(props.gameId, activity.id);
+                            removeRecurringActivity(primaryGameId, activity.id);
                             setPendingDeleteRecurringId(null);
                           }}
                         >
@@ -2888,21 +3129,22 @@ export default function TimelineCalendar(props: {
             {activeRecurringEvents.length > 0 ? (
               activeRecurringEvents.map((event, idx) => (
                 <EventListRow
-                  key={String(event.id)}
+                  key={event.eventKey}
                   event={event}
                   checked={false}
-                  isSelected={selectedId === event.id}
+                  isSelected={selectedKey === event.eventKey}
                   now={now}
+                  showGameMeta={showGameMeta}
                   showBottomDivider={idx === activeRecurringEvents.length - 1}
                   onSelect={() => {
-                    toggleSelectedFromList(event.id);
+                    toggleSelectedFromList(event.eventKey);
                   }}
-                  onToggleCompleted={() => toggleRecurringCompleted(event.recurringActivityId, event.cycleKey)}
+                  onToggleCompleted={() => toggleRecurringCompleted(event)}
                 />
               ))
             ) : (
               <div className="p-4 text-xs text-[color:var(--muted)]">
-                暂无未完成循环活动
+                {isHome ? "未来 7 天内暂无未完成循环活动" : "暂无未完成循环活动"}
               </div>
             )}
           </div>
@@ -2917,10 +3159,11 @@ export default function TimelineCalendar(props: {
             events={completedUpstreamEvents}
             emptyText="暂无已完成活动"
             checked={true}
-            selectedId={selectedId}
+            selectedKey={selectedKey}
             now={now}
+            showGameMeta={showGameMeta}
             onSelect={toggleSelectedFromList}
-            onToggleCompleted={(event) => toggleCompleted(event.id)}
+            onToggleCompleted={(event) => toggleCompleted(event)}
           />
 
           <EventListPanel
@@ -2929,10 +3172,11 @@ export default function TimelineCalendar(props: {
             events={completedRecurringEvents}
             emptyText="暂无已完成循环活动"
             checked={true}
-            selectedId={selectedId}
+            selectedKey={selectedKey}
             now={now}
+            showGameMeta={showGameMeta}
             onSelect={toggleSelectedFromList}
-            onToggleCompleted={(event) => toggleRecurringCompleted(event.recurringActivityId, event.cycleKey)}
+            onToggleCompleted={(event) => toggleRecurringCompleted(event)}
           />
         </div>
       ) : null}

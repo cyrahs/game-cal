@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import dayjs from "dayjs";
 import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import genshinIcon from "../assets/genshin.png";
 import starrailIcon from "../assets/starrail.png";
@@ -26,7 +26,7 @@ type SettingsTabId = "games" | "sync" | "config";
 const games: GameLink[] = [
   {
     id: "genshin",
-    to: "/",
+    to: "/genshin",
     name: "原神",
     icon: genshinIcon,
   },
@@ -110,6 +110,7 @@ function formatUtcOffsetLabelByDate(date: Date): string {
 
 export default function Shell() {
   const location = useLocation();
+  const navigate = useNavigate();
   const {
     prefs,
     setTheme,
@@ -150,13 +151,25 @@ export default function Shell() {
     () => `${now.format("YYYY/MM/DD")} · ${formatUtcOffsetLabelByDate(now.toDate())}`,
     [now]
   );
-  const currentGameId = useMemo<GameId>(() => {
+  const currentGameId = useMemo<GameId | null>(() => {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
     const matched = games.find((g) => g.to === normalizedPath);
-    return matched?.id ?? "genshin";
+    return matched?.id ?? null;
   }, [location.pathname]);
-  const currentDataSource = DATA_SOURCE_BY_GAME[currentGameId];
+  const currentDataSource = currentGameId ? DATA_SOURCE_BY_GAME[currentGameId] : "聚合所有游戏公告 API";
   const currentUpstreamUpdatedAtLabel = (() => {
+    if (!currentGameId) {
+      const updatedAtMsList: number[] = [];
+      for (const state of [genshinEvents, starrailEvents, zzzEvents, wwEvents, snowbreakEvents, endfieldEvents]) {
+        if (state.status === "success") updatedAtMsList.push(state.updatedAtMs);
+      }
+      if (updatedAtMsList.length === 0) return null;
+      const latestUpdatedAtMs = Math.max(...updatedAtMsList);
+      const d = dayjs(latestUpdatedAtMs);
+      if (!d.isValid()) return null;
+      return `最新更新于 ${d.format("MM/DD HH:mm")}`;
+    }
+
     const state =
       currentGameId === "genshin"
         ? genshinEvents
@@ -439,8 +452,17 @@ export default function Shell() {
       <div className="max-w-[1200px] mx-auto px-4 py-6">
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div className="flex items-end gap-2">
-            <img src="/favicon/apple-icon.png" alt="Game Calendar Logo" className="w-7 h-7 object-contain rounded-sm" />
-            <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
+            <Link
+              to="/"
+              aria-label="首页"
+              className={clsx(
+                "flex items-end gap-2 rounded-md transition hover:opacity-85",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+              )}
+            >
+              <img src="/favicon/apple-icon.png" alt="" className="w-7 h-7 object-contain rounded-sm" />
+              <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
+            </Link>
             <div className="text-xs text-[color:var(--muted)] leading-none">{headerMetaLabel}</div>
           </div>
 
@@ -449,9 +471,13 @@ export default function Shell() {
               <NavLink
                 key={g.to}
                 to={g.to}
-                end={g.to === "/"}
-                aria-label={g.name}
-                title={g.name}
+                aria-label={currentGameId === g.id ? `取消选择${g.name}并返回首页` : g.name}
+                title={currentGameId === g.id ? "返回首页" : g.name}
+                onClick={(e) => {
+                  if (currentGameId !== g.id) return;
+                  e.preventDefault();
+                  navigate("/");
+                }}
                 className={({ isActive }) =>
                   clsx(
                     "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
@@ -459,6 +485,7 @@ export default function Shell() {
                     isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
                   )
                 }
+                end
               >
                 <span className="relative inline-flex h-full w-full min-w-0">
                   <img

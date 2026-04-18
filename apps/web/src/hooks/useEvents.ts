@@ -8,6 +8,7 @@ type UseEventsState =
   | { status: "error"; data: null; error: Error; updatedAtMs: null };
 
 const memory = new Map<string, { at: number; data: CalendarEvent[]; updatedAtMs: number }>();
+const inFlight = new Map<string, Promise<{ data: CalendarEvent[]; updatedAtMs: number }>>();
 const TTL_MS = 60_000;
 
 export function useEvents(game: GameId) {
@@ -29,12 +30,24 @@ export function useEvents(game: GameId) {
     }
 
     setState({ status: "loading", data: null, error: null, updatedAtMs: null });
-    apiGetWithUpdatedAt<CalendarEvent[]>(`/api/events/${game}`)
-      .then(({ json, updatedAtMs }) => {
+    let request = inFlight.get(key);
+    if (!request) {
+      request = apiGetWithUpdatedAt<CalendarEvent[]>(`/api/events/${game}`)
+        .then(({ json, updatedAtMs }) => {
+          const safeUpdatedAtMs = updatedAtMs ?? Date.now();
+          memory.set(key, { at: Date.now(), data: json.data, updatedAtMs: safeUpdatedAtMs });
+          return { data: json.data, updatedAtMs: safeUpdatedAtMs };
+        })
+        .finally(() => {
+          if (inFlight.get(key) === request) inFlight.delete(key);
+        });
+      inFlight.set(key, request);
+    }
+
+    request
+      .then(({ data, updatedAtMs }) => {
         if (cancelled) return;
-        const safeUpdatedAtMs = updatedAtMs ?? Date.now();
-        memory.set(key, { at: Date.now(), data: json.data, updatedAtMs: safeUpdatedAtMs });
-        setState({ status: "success", data: json.data, error: null, updatedAtMs: safeUpdatedAtMs });
+        setState({ status: "success", data, error: null, updatedAtMs });
       })
       .catch((err) => {
         if (cancelled) return;
