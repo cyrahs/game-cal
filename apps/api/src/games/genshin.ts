@@ -67,7 +67,6 @@ const IGNORE_WORDS = [
   "防沉迷",
   "问卷",
   "公平运营",
-  "纪行",
   "有奖活动",
   "反馈功能",
 ];
@@ -75,6 +74,7 @@ const IGNORE_WORDS = [
 const IGNORE_TITLE_PATTERNS = [
   /礼包.*(?:限时)?上架/,
   /(?:限时)?上架.*礼包/,
+  /「.*纪行」活动说明/,
 ];
 
 function shouldIgnoreGenshinTitle(title: string): boolean {
