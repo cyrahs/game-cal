@@ -72,6 +72,8 @@ const ZZZ_DEFAULT_LIST_API =
 const ZZZ_DEFAULT_CONTENT_API =
   "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getAnnContent?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 const ZZZ_SOURCE_TZ_OFFSET = "+08:00";
+const ZZZ_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
+const ZZZ_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
 
 function stripHtml(input: string | undefined): string {
   // Titles are frequently wrapped in <p ...>...</p>. Strip tags for matching.
@@ -180,6 +182,48 @@ function normalizeDateTimeCandidate(input: string | undefined): string | null {
   const mi = m[5]!;
   const ss = m[6] ? m[6] : "00";
   return `${yyyy}-${mo}-${dd} ${hh}:${mi}:${ss}`;
+}
+
+function toSourceIsoFromDateTimeCandidate(input: string | undefined): string | null {
+  const normalized = normalizeDateTimeCandidate(input);
+  return normalized ? toIsoWithSourceOffset(normalized, ZZZ_SOURCE_TZ_OFFSET) : null;
+}
+
+function addHoursToSourceIso(input: string, hours: number): string | null {
+  const startMs = Date.parse(input);
+  if (!Number.isFinite(startMs) || !Number.isFinite(hours) || hours <= 0) return null;
+
+  return unixSecondsToIsoWithSourceOffset(
+    Math.round((startMs + hours * 60 * 60 * 1000) / 1000),
+    ZZZ_SOURCE_TZ_OFFSET
+  );
+}
+
+function extractMaintenanceEndIsoFromVersionContent(content: string | undefined): string | null {
+  const text = stripHtml(content);
+  if (!text) return null;
+
+  const rangeRe = new RegExp(
+    `(?:更新维护时间|维护时间)[^\\d]{0,80}(${ZZZ_DATE_TIME_PATTERN})\\s*${ZZZ_RANGE_SEPARATOR_PATTERN}\\s*(${ZZZ_DATE_TIME_PATTERN})`
+  );
+  const range = rangeRe.exec(text);
+  const rangeEndIso = toSourceIsoFromDateTimeCandidate(range?.[2]);
+  if (rangeEndIso) return rangeEndIso;
+
+  const startRe = new RegExp(
+    `(?:更新开始时间|维护开始时间|停服更新时间|更新维护开始时间)[^\\d]{0,80}(${ZZZ_DATE_TIME_PATTERN})`
+  );
+  const start = startRe.exec(text);
+  if (!start?.[1]) return null;
+
+  const duration = /预计\s*([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
+    text.slice(start.index)
+  );
+  const durationHours = Number(duration?.[1]);
+  if (!Number.isFinite(durationHours) || durationHours <= 0 || durationHours > 24) return null;
+
+  const startIso = toSourceIsoFromDateTimeCandidate(start[1]);
+  return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
 function extractTimeRangeFromContentHtml(html: string): ParsedTimeRange {
@@ -448,7 +492,6 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     categories.find((c) => c.type_id === 3) ??
     categories.find((c) => c.type_label.includes("游戏公告"));
   const versionNotice = pickCurrentVersionNotice(noticeCategory?.list ?? []);
-  const fallbackStartIso = versionNotice?.startIso ?? null;
 
   const candidates: ContentCandidate[] = [];
   const contentItems: MihoyoNapAnnContentItem[] = [];
@@ -478,6 +521,14 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       });
     }
   }
+
+  const versionContentItem = versionNotice
+    ? pickContentItemForNotice(versionNotice.item, contentItemsByAnnId)
+    : undefined;
+  const fallbackStartIso =
+    extractMaintenanceEndIsoFromVersionContent(versionContentItem?.content) ??
+    versionNotice?.startIso ??
+    null;
 
   const list = activityRes.data?.activity_list ?? [];
   const normalEvents = list
