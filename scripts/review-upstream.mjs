@@ -668,25 +668,16 @@ function buildGameDataset(game, rawNotices, apiEvents, maxItems) {
   };
 }
 
-function getReviewerSuppressedApiEventTitles(game, suppressions) {
-  const titles = new Set();
-  for (const suppression of suppressions) {
-    if (suppression.kind && suppression.kind !== "non_event_included") continue;
-    if (suppression.game && suppression.game !== game) continue;
-    for (const title of suppression.titles) {
-      titles.add(title);
-    }
-  }
-  return titles;
-}
-
 function filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt) {
-  const suppressedTitles = getReviewerSuppressedApiEventTitles(game, suppressions);
   const generatedAtMs = Date.parse(generatedAt);
 
   return apiEvents.filter((event) => {
     const title = normalizeWhitespace(event?.title || "");
-    if (title && suppressedTitles.has(title)) {
+    if (findMatchingReviewerInputSuppression(game, "non_event_included", {
+      title,
+      api_title: title,
+      raw_title: "",
+    }, suppressions)) {
       return false;
     }
 
@@ -696,6 +687,19 @@ function filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt) 
     }
 
     return true;
+  });
+}
+
+function filterRawNoticesForReviewer(game, rawNotices, suppressions) {
+  return rawNotices.filter((notice) => {
+    const title = normalizeWhitespace(notice?.title || notice?.subtitle || "");
+    if (!title) return true;
+
+    return !findMatchingReviewerInputSuppression(game, "missing_event", {
+      title,
+      api_title: "",
+      raw_title: title,
+    }, suppressions);
   });
 }
 
@@ -744,8 +748,63 @@ function normalizeFinding(raw, fallbackGame = "unknown") {
   };
 }
 
-function getFindingTitleCandidates(finding) {
-  return [...new Set([finding.api_title, finding.raw_title, finding.title].filter(Boolean))];
+function getTitleValues(input) {
+  return {
+    title: normalizeWhitespace(input?.title || ""),
+    api_title: normalizeWhitespace(input?.api_title || ""),
+    raw_title: normalizeWhitespace(input?.raw_title || ""),
+  };
+}
+
+function getTitleCandidates(values) {
+  return [...new Set([values.api_title, values.raw_title, values.title].filter(Boolean))];
+}
+
+function getTargetTitleCandidates(values, target) {
+  if (target === "api_title") return values.api_title ? [values.api_title] : [];
+  if (target === "raw_title") return values.raw_title ? [values.raw_title] : [];
+  if (target === "title") return values.title ? [values.title] : [];
+  return getTitleCandidates(values);
+}
+
+function stringListFromValue(value, index, fieldName) {
+  if (value == null || value === "") return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((item, itemIndex) => {
+    if (typeof item !== "string") {
+      const suffix = Array.isArray(value) ? `[${itemIndex}]` : "";
+      throw new Error(
+        `Invalid suppression matcher at index ${index} (${fieldName}${suffix}): expected string`
+      );
+    }
+    return normalizeWhitespace(item);
+  }).filter(Boolean);
+}
+
+function collectSuppressionStringMatchers(raw, index, fieldName, target) {
+  return stringListFromValue(raw[fieldName], index, fieldName).map((value) => ({
+    target,
+    value,
+    field: fieldName,
+  }));
+}
+
+function collectSuppressionRegexMatchers(raw, index, fieldName, target) {
+  return stringListFromValue(raw[fieldName], index, fieldName).map((pattern) => {
+    let regex;
+    try {
+      regex = new RegExp(pattern);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid suppression regex at index ${index} (${fieldName}): ${message}`);
+    }
+    return {
+      target,
+      pattern,
+      regex,
+      field: fieldName,
+    };
+  });
 }
 
 function normalizeSuppression(raw, index) {
@@ -759,20 +818,34 @@ function normalizeSuppression(raw, index) {
   }
 
   const kind = raw.kind == null || raw.kind === "" ? null : String(raw.kind).trim();
-  const titles = [...new Set(
-    [raw.title, raw.api_title, raw.raw_title]
-      .filter((value) => value != null && value !== "")
-      .map((value) => normalizeWhitespace(value))
-      .filter(Boolean)
-  )];
-  if (titles.length === 0) {
-    throw new Error(`Suppression at index ${index} must include title, api_title, or raw_title`);
+  const exacts = [
+    ...collectSuppressionStringMatchers(raw, index, "title", "any"),
+    ...collectSuppressionStringMatchers(raw, index, "api_title", "any"),
+    ...collectSuppressionStringMatchers(raw, index, "raw_title", "any"),
+  ];
+  const contains = [
+    ...collectSuppressionStringMatchers(raw, index, "title_contains", "any"),
+    ...collectSuppressionStringMatchers(raw, index, "api_title_contains", "api_title"),
+    ...collectSuppressionStringMatchers(raw, index, "raw_title_contains", "raw_title"),
+  ];
+  const regexes = [
+    ...collectSuppressionRegexMatchers(raw, index, "title_regex", "any"),
+    ...collectSuppressionRegexMatchers(raw, index, "api_title_regex", "api_title"),
+    ...collectSuppressionRegexMatchers(raw, index, "raw_title_regex", "raw_title"),
+  ];
+
+  if (exacts.length === 0 && contains.length === 0 && regexes.length === 0) {
+    throw new Error(
+      `Suppression at index ${index} must include title/api_title/raw_title or a *_contains/*_regex matcher`
+    );
   }
 
   return {
     game,
     kind,
-    titles,
+    exacts,
+    contains,
+    regexes,
     reason: normalizeWhitespace(raw.reason || ""),
   };
 }
@@ -795,14 +868,44 @@ async function loadSuppressions(configPath) {
 }
 
 function findMatchingSuppression(finding, suppressions) {
-  const titles = getFindingTitleCandidates(finding);
+  const values = getTitleValues(finding);
   return (
     suppressions.find((suppression) => {
       if (suppression.game && suppression.game !== finding.game) return false;
       if (suppression.kind && suppression.kind !== finding.kind) return false;
-      return suppression.titles.some((title) => titles.includes(title));
+      return matchesSuppressionTitleValues(suppression, values);
     }) ?? null
   );
+}
+
+function findMatchingReviewerInputSuppression(game, defaultKind, values, suppressions) {
+  return (
+    suppressions.find((suppression) => {
+      const kind = suppression.kind || "non_event_included";
+      if (kind !== defaultKind) return false;
+      if (suppression.game && suppression.game !== game) return false;
+      return matchesSuppressionTitleValues(suppression, values);
+    }) ?? null
+  );
+}
+
+function matchesSuppressionTitleValues(suppression, values) {
+  for (const matcher of suppression.exacts) {
+    const targetCandidates = getTargetTitleCandidates(values, matcher.target);
+    if (targetCandidates.some((title) => title === matcher.value)) return true;
+  }
+
+  for (const matcher of suppression.contains) {
+    const targetCandidates = getTargetTitleCandidates(values, matcher.target);
+    if (targetCandidates.some((title) => title.includes(matcher.value))) return true;
+  }
+
+  for (const matcher of suppression.regexes) {
+    const targetCandidates = getTargetTitleCandidates(values, matcher.target);
+    if (targetCandidates.some((title) => matcher.regex.test(title))) return true;
+  }
+
+  return false;
 }
 
 function applySuppressions(findings, suppressions) {
@@ -1133,13 +1236,19 @@ async function main() {
   const datasets = collectedDatasets.map(({ game, rawNotices, apiEvents }) =>
     buildGameDataset(game, rawNotices, apiEvents, maxItems)
   );
-  const reviewDatasets = collectedDatasets.map(({ game, rawNotices, apiEvents }) =>
-    buildGameDataset(
+  const reviewInputs = collectedDatasets.map(({ game, rawNotices, apiEvents }) => {
+    const reviewRawNotices = filterRawNoticesForReviewer(game, rawNotices, suppressions);
+    const reviewApiEvents = filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt);
+    return {
       game,
-      rawNotices,
-      filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt),
-      maxItems
-    )
+      rawNotices: reviewRawNotices,
+      apiEvents: reviewApiEvents,
+      excluded_raw_notice_count: rawNotices.length - reviewRawNotices.length,
+      excluded_api_event_count: apiEvents.length - reviewApiEvents.length,
+    };
+  });
+  const reviewDatasets = reviewInputs.map(({ game, rawNotices, apiEvents }) =>
+    buildGameDataset(game, rawNotices, apiEvents, maxItems)
   );
 
   const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets: reviewDatasets });
@@ -1151,6 +1260,11 @@ async function main() {
     suppressions: {
       path: suppressionsPath,
       count: suppressions.length,
+      review_input_exclusions: reviewInputs.map((input) => ({
+        game: input.game,
+        raw_notices: input.excluded_raw_notice_count,
+        api_events: input.excluded_api_event_count,
+      })),
     },
     review: {
       model: review.model,

@@ -202,7 +202,14 @@ pnpm --filter @game-cal/api start
 - `UPSTREAM_REVIEW_DRY_RUN=1`（只生成报告，不操作 GitHub issue）
 - `OPENAI_REASONING_EFFORT`（未设置时使用模型默认值）
 
-Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除。
+Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除；对于 `kind: "missing_event"` 的规则，对应 raw notice 会在送审前从 reviewer 输入中排除。
+
+匹配字段支持精确标题和模式匹配：
+- 精确匹配：`title` / `api_title` / `raw_title`
+- 包含匹配：`title_contains` / `api_title_contains` / `raw_title_contains`
+- 正则匹配：`title_regex` / `api_title_regex` / `raw_title_regex`
+
+精确匹配字段 `title` / `api_title` / `raw_title` 会按历史兼容行为匹配 finding 的任意标题候选；`api_title_contains` / `raw_title_contains` 和 `api_title_regex` / `raw_title_regex` 只匹配对应来源。每个匹配字段都可以写字符串或字符串数组。
 
 示例：
 
@@ -214,6 +221,18 @@ Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，
       "kind": "non_event_included",
       "title": "「联动跃迁」说明",
       "reason": "联动跃迁说明属于预期保留项，不需要重复告警。"
+    },
+    {
+      "game": "genshin",
+      "kind": "missing_event",
+      "raw_title_regex": "^「[^」]*纪行」活动说明$",
+      "reason": "纪行 / battle pass 说明不属于日历收录范围。"
+    },
+    {
+      "game": "starrail",
+      "kind": "missing_event",
+      "raw_title_contains": "绘画征集",
+      "reason": "社区绘画征集不属于日历收录范围。"
     }
   ]
 }

@@ -5,6 +5,18 @@
       "kind": "non_event_included",
       "title": "「联动跃迁」说明",
       "reason": "联动跃迁说明属于预期保留项，不需要重复告警。"
+    },
+    {
+      "game": "genshin",
+      "kind": "missing_event",
+      "raw_title_regex": "^「[^」]*纪行」活动说明$",
+      "reason": "纪行 / battle pass 说明不属于日历收录范围，不需要作为漏收事件告警。"
+    },
+    {
+      "game": "starrail",
+      "kind": "missing_event",
+      "raw_title_contains": "绘画征集",
+      "reason": "社区绘画征集不属于日历收录范围，不需要作为漏收事件告警。"
     }
   ]
 }
