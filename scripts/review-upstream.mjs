@@ -19,6 +19,7 @@ const DEFAULT_API_BASE_URL = "http://127.0.0.1:8787";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "gpt-5-mini";
 const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
+const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
 const DEFAULT_GAMES = ["genshin", "starrail", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
 const GITHUB_API_VERSION = "2022-11-28";
@@ -392,6 +393,95 @@ function normalizeFinding(raw) {
   };
 }
 
+function getFindingTitleCandidates(finding) {
+  return [...new Set([finding.api_title, finding.raw_title, finding.title].filter(Boolean))];
+}
+
+function normalizeSuppression(raw, index) {
+  if (!isRecord(raw)) {
+    throw new Error(`Invalid suppression at index ${index}`);
+  }
+
+  const game = raw.game == null || raw.game === "" ? null : String(raw.game).trim();
+  if (game != null && !SUPPORTED_GAMES.has(game)) {
+    throw new Error(`Invalid suppression game at index ${index}: ${game}`);
+  }
+
+  const kind = raw.kind == null || raw.kind === "" ? null : String(raw.kind).trim();
+  const titles = [...new Set(
+    [raw.title, raw.api_title, raw.raw_title]
+      .filter((value) => value != null && value !== "")
+      .map((value) => normalizeWhitespace(value))
+      .filter(Boolean)
+  )];
+  if (titles.length === 0) {
+    throw new Error(`Suppression at index ${index} must include title, api_title, or raw_title`);
+  }
+
+  return {
+    game,
+    kind,
+    titles,
+    reason: normalizeWhitespace(raw.reason || ""),
+  };
+}
+
+async function loadSuppressions(configPath) {
+  const resolved = path.resolve(configPath);
+  let text;
+  try {
+    text = await fs.readFile(resolved, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(text);
+  const list = ensureArray(parsed?.suppressions);
+  return list.map((item, index) => normalizeSuppression(item, index));
+}
+
+function findMatchingSuppression(finding, suppressions) {
+  const titles = getFindingTitleCandidates(finding);
+  return (
+    suppressions.find((suppression) => {
+      if (suppression.game && suppression.game !== finding.game) return false;
+      if (suppression.kind && suppression.kind !== finding.kind) return false;
+      return suppression.titles.some((title) => titles.includes(title));
+    }) ?? null
+  );
+}
+
+function applySuppressions(findings, suppressions) {
+  const filteredFindings = [];
+  const suppressedFindings = [];
+
+  for (const finding of findings) {
+    const suppression = findMatchingSuppression(finding, suppressions);
+    if (!suppression) {
+      filteredFindings.push(finding);
+      continue;
+    }
+
+    suppressedFindings.push({
+      ...finding,
+      suppression_reason: suppression.reason,
+    });
+  }
+
+  return { filteredFindings, suppressedFindings };
+}
+
+function summarizeFilteredReview(summary, unsuppressedCount, suppressedCount) {
+  if (suppressedCount === 0) return summary;
+  if (unsuppressedCount === 0) {
+    return `No unsuppressed findings. ${suppressedCount} finding(s) matched suppression rules.`;
+  }
+  return `${unsuppressedCount} unsuppressed finding(s) detected. ${suppressedCount} finding(s) matched suppression rules.`;
+}
+
 async function reviewWithOpenAi(payload) {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
@@ -491,10 +581,13 @@ function renderIssueBody(report) {
     let index = 1;
     for (const finding of report.review.findings) {
       const label = GAME_LABELS[finding.game] ?? finding.game;
-      const title = finding.title || finding.api_title || finding.raw_title || "(untitled)";
+      const title = finding.api_title || finding.raw_title || finding.title || "(untitled)";
       lines.push(
         `${index}. [${finding.severity}] ${label} / ${finding.kind} / \`${title}\``
       );
+      if (finding.title && finding.title !== title) {
+        lines.push(`Finding title: \`${finding.title}\``);
+      }
       if (finding.api_title && finding.api_title !== title) {
         lines.push(`API title: \`${finding.api_title}\``);
       }
@@ -628,6 +721,8 @@ async function main() {
   const apiBaseUrl = trimTrailingSlash(
     process.env.UPSTREAM_REVIEW_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL
   );
+  const suppressionsPath =
+    process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() || DEFAULT_SUPPRESSIONS_PATH;
   const games = parseGameList(process.env.UPSTREAM_REVIEW_GAMES);
   const maxItems = parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
   const generatedAt = new Date().toISOString();
@@ -641,15 +736,27 @@ async function main() {
     datasets.push(buildGameDataset(game, rawNotices, apiEvents, maxItems));
   }
 
+  const suppressions = await loadSuppressions(suppressionsPath);
   const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets });
+  const { filteredFindings, suppressedFindings } = applySuppressions(review.findings, suppressions);
   const report = {
     generated_at: generatedAt,
     api_base_url: apiBaseUrl,
     datasets,
+    suppressions: {
+      path: suppressionsPath,
+      count: suppressions.length,
+    },
     review: {
       model: review.model,
-      summary: review.summary,
-      findings: review.findings,
+      raw_summary: review.summary,
+      summary: summarizeFilteredReview(
+        review.summary,
+        filteredFindings.length,
+        suppressedFindings.length
+      ),
+      findings: filteredFindings,
+      suppressed_findings: suppressedFindings,
     },
   };
 

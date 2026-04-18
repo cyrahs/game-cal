@@ -1,0 +1,10 @@
+{
+  "suppressions": [
+    {
+      "game": "starrail",
+      "kind": "non_event_included",
+      "title": "「联动跃迁」说明",
+      "reason": "联动跃迁说明属于预期保留项，不需要重复告警。"
+    }
+  ]
+}

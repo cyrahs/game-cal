@@ -174,6 +174,7 @@ pnpm --filter @game-cal/api start
 - 启动本仓库的本地 Node API
 - 抓取上游原始公告（当前覆盖：原神、星铁、终末地）
 - 调用 LLM API 对比“原始公告”与“当前 `/api/events/:game` 输出”
+- 按仓库内的 suppression 配置过滤已知合理项
 - 有疑似问题时创建或更新固定 issue：`Upstream Review Alerts`
 - 无问题时自动关闭该 issue
 
@@ -195,8 +196,26 @@ pnpm --filter @game-cal/api start
 - `UPSTREAM_REVIEW_GAMES`（默认 `genshin,starrail,endfield`）
 - `UPSTREAM_REVIEW_MAX_ITEMS`（默认 `60`）
 - `UPSTREAM_REVIEW_REPORT_PATH`（写出 JSON 报告）
+- `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_DRY_RUN=1`（只生成报告，不操作 GitHub issue）
 - `OPENAI_REASONING_EFFORT`（未设置时使用模型默认值）
+
+Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。
+
+示例：
+
+```json
+{
+  "suppressions": [
+    {
+      "game": "starrail",
+      "kind": "non_event_included",
+      "title": "「联动跃迁」说明",
+      "reason": "联动跃迁说明属于预期保留项，不需要重复告警。"
+    }
+  ]
+}
+```
 
 ## 缓存策略
 
