@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import type { GameId } from "../api/types";
 import TimelineCalendar, { type TimelineCalendarEvent } from "../components/TimelineCalendar/TimelineCalendar";
+import { usePrefs } from "../context/prefs";
 import { useEvents } from "../hooks/useEvents";
 import { useCurrentVersion } from "../hooks/useCurrentVersion";
 
@@ -15,6 +16,7 @@ const GAME_LABELS: Record<GameId, string> = {
 };
 
 export default function HomePage() {
+  const { prefs } = usePrefs();
   const genshinEvents = useEvents("genshin");
   const starrailEvents = useEvents("starrail");
   const zzzEvents = useEvents("zzz");
@@ -27,6 +29,7 @@ export default function HomePage() {
   const wwVersion = useCurrentVersion("ww");
   const snowbreakVersion = useCurrentVersion("snowbreak");
   const endfieldVersion = useCurrentVersion("endfield");
+  const visibleGameIdSet = useMemo(() => new Set<GameId>(prefs.visibleGameIds), [prefs.visibleGameIds]);
 
   const aggregatedEvents = useMemo<TimelineCalendarEvent[]>(() => {
     const pairs = [
@@ -39,20 +42,40 @@ export default function HomePage() {
     ] as const;
 
     return pairs.flatMap(([gameId, state]) => {
+      if (!visibleGameIdSet.has(gameId)) return [];
       if (state.status !== "success") return [];
       return state.data.map((event) => ({ ...event, gameId }));
     });
-  }, [endfieldEvents, genshinEvents, snowbreakEvents, starrailEvents, wwEvents, zzzEvents]);
+  }, [endfieldEvents, genshinEvents, snowbreakEvents, starrailEvents, visibleGameIdSet, wwEvents, zzzEvents]);
 
   const currentVersions = useMemo(() => {
     return [genshinVersion, starrailVersion, zzzVersion, wwVersion, snowbreakVersion, endfieldVersion].flatMap((state) => {
       if (state.status !== "success" || !state.data) return [];
+      if (!visibleGameIdSet.has(state.data.game)) return [];
       return state.data;
     });
-  }, [endfieldVersion, genshinVersion, snowbreakVersion, starrailVersion, wwVersion, zzzVersion]);
+  }, [endfieldVersion, genshinVersion, snowbreakVersion, starrailVersion, visibleGameIdSet, wwVersion, zzzVersion]);
 
-  const states = [genshinEvents, starrailEvents, zzzEvents, wwEvents, snowbreakEvents, endfieldEvents] as const;
-  const versionStates = [genshinVersion, starrailVersion, zzzVersion, wwVersion, snowbreakVersion, endfieldVersion] as const;
+  const states = (
+    [
+      ["genshin", genshinEvents],
+      ["starrail", starrailEvents],
+      ["zzz", zzzEvents],
+      ["ww", wwEvents],
+      ["snowbreak", snowbreakEvents],
+      ["endfield", endfieldEvents],
+    ] as const
+  ).flatMap(([gameId, state]) => (visibleGameIdSet.has(gameId) ? [state] : []));
+  const versionStates = (
+    [
+      ["genshin", genshinVersion],
+      ["starrail", starrailVersion],
+      ["zzz", zzzVersion],
+      ["ww", wwVersion],
+      ["snowbreak", snowbreakVersion],
+      ["endfield", endfieldVersion],
+    ] as const
+  ).flatMap(([gameId, state]) => (visibleGameIdSet.has(gameId) ? [state] : []));
   const hasSuccess = states.some((state) => state.status === "success");
   const isLoading = states.some((state) => state.status === "loading") || versionStates.some((state) => state.status === "loading");
   const eventErrors = [
@@ -64,6 +87,7 @@ export default function HomePage() {
     ["endfield", endfieldEvents],
   ] as const;
   const failedEventLoads = eventErrors.flatMap(([gameId, state]) => {
+    if (!visibleGameIdSet.has(gameId)) return [];
     if (state.status !== "error") return [];
     return `${GAME_LABELS[gameId]}: ${state.error.message}`;
   });

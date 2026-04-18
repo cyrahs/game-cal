@@ -1688,6 +1688,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const monthlyCardState = prefs.timeline.monthlyCardByGame[primaryGameId] ?? null;
   const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(primaryGameId);
   const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(primaryGameId);
+  const sourceGameIds = useMemo<GameId[]>(() => {
+    if (!isHome) return [primaryGameId];
+    return prefs.visibleGameIds.length > 0 ? prefs.visibleGameIds : ALL_GAME_IDS;
+  }, [isHome, prefs.visibleGameIds, primaryGameId]);
+  const sourceGameIdSet = useMemo(() => new Set<GameId>(sourceGameIds), [sourceGameIds]);
   const completedIdsByGame = useMemo(() => {
     const next: Partial<Record<GameId, Set<string | number>>> = {};
     for (const gameId of ALL_GAME_IDS) {
@@ -1841,6 +1846,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       .map((e) => {
         const sourceGameId = resolveEventGameId(e, props.gameId);
         if (!sourceGameId) return null;
+        if (isHome && !sourceGameIdSet.has(sourceGameId)) return null;
         const s = parseDateTime(e.start_time);
         const ed = parseDateTime(e.end_time);
         const title = normalizeEventTitle(e.title);
@@ -1857,7 +1863,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       })
       .filter((e): e is ParsedUpstreamEvent => Boolean(e && e._s.isValid() && e._e.isValid() && e._e.isAfter(e._s)));
     return items;
-  }, [props.events, props.gameId]);
+  }, [isHome, props.events, props.gameId, sourceGameIdSet]);
 
   const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now), [parsedUpstream, now]);
 
@@ -1875,7 +1881,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const parsedRecurring = useMemo(() => {
     const items: ParsedRecurringEvent[] = [];
-    const sourceGameIds = isHome ? ALL_GAME_IDS : [primaryGameId];
 
     for (const gameId of sourceGameIds) {
       const defs = prefs.timeline.recurringActivitiesByGame[gameId] ?? [];
@@ -1907,7 +1912,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     return sortByPhase(items, now);
-  }, [isHome, now, prefs.timeline.recurringActivitiesByGame, primaryGameId]);
+  }, [now, prefs.timeline.recurringActivitiesByGame, sourceGameIds]);
 
   const visibleRecurring = useMemo(() => {
     if (!isHome) return parsedRecurring;
@@ -1942,7 +1947,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const homeEndMs = homeRangeEnd.valueOf();
     const items: TimelineOnlyParsedEvent[] = [];
 
-    for (const gameId of ALL_GAME_IDS) {
+    for (const gameId of sourceGameIds) {
       const entry = prefs.timeline.monthlyCardByGame[gameId];
       const remainingDays = getMonthlyCardRemainingDays(
         entry,
@@ -1980,6 +1985,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     for (const version of props.currentVersions ?? []) {
+      if (!sourceGameIdSet.has(version.game)) continue;
       const start = parseDateTime(version.start_time);
       const end = parseDateTime(version.end_time);
       if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
@@ -2007,7 +2013,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     return sortByPhase(items, now);
-  }, [homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions]);
+  }, [homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions, sourceGameIds, sourceGameIdSet]);
 
   const activeTimelineEvents = useMemo(() => {
     return sortByPhase(
