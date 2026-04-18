@@ -31,6 +31,14 @@ type EndfieldVersionNotice = {
   maintenanceEndIso: string;
 };
 
+type EndfieldVersionScheduleEntry = {
+  title: string;
+  titleKey: string;
+  family: string;
+  startNaive: string;
+  endNaive: string | null;
+};
+
 const ENDFIELD_WEBVIEW_DEFAULT =
   "https://ef-webview.hypergryph.com/page/game_bulletin?target=IOS";
 
@@ -253,23 +261,37 @@ function inferEndfieldVersionEndIsoFromSchedule(
   return latest?.endIso ?? null;
 }
 
-function extractVersionRelativeEnd(input: string): string | null {
+function extractDateTimeCandidates(input: string): string[] {
   const dates = [...input.matchAll(/(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g)]
     .map((match) => normalizeDateTimeCandidate(match[1]))
     .filter((value): value is string => value != null);
+  return dates;
+}
+
+function extractVersionRelativeEnd(input: string): string | null {
+  const dates = extractDateTimeCandidates(input);
   return dates[dates.length - 1] ?? null;
+}
+
+function extractVersionRelativeStart(
+  input: string,
+  versionStartNaive: string | null
+): string | null {
+  if (!versionStartNaive) return null;
+  if (!/版本(?:开启后|更新后(?:开启)?)/.test(input)) return null;
+  return versionStartNaive;
 }
 
 function extractVersionRelativeRanges(
   input: string,
   versionStartNaive: string | null
 ): Array<{ start: string; end: string }> {
-  if (!versionStartNaive) return [];
-  if (!/版本(?:开启后|更新后(?:开启)?)/.test(input)) return [];
+  const start = extractVersionRelativeStart(input, versionStartNaive);
+  if (!start) return [];
 
   const end = extractVersionRelativeEnd(input);
   if (!end) return [];
-  return [{ start: versionStartNaive, end }];
+  return [{ start, end }];
 }
 
 function isEndfieldVersionNotice(item: HypergryphAggregateItem): boolean {
@@ -341,8 +363,93 @@ function parseVersionNoticeTimeRanges(
   return extractVersionRelativeRanges(input, versionStartNaive);
 }
 
+function parseVersionScheduleWindow(
+  input: string,
+  versionStartNaive: string | null
+): { start: string | null; end: string | null } {
+  const ranges = parseVersionNoticeTimeRanges(input, versionStartNaive);
+  if (ranges[0]) return ranges[0];
+
+  const start =
+    extractVersionRelativeStart(input, versionStartNaive) ??
+    extractDateTimeCandidates(input)[0] ??
+    null;
+  return { start, end: null };
+}
+
 function isEndfieldEventWindowLabel(label: string): boolean {
   return /^(?:活动(?:开放|开启|开始)?时间|(?:开放|开启|开始)时间)$/.test(label);
+}
+
+function normalizeEndfieldVersionScheduleTitle(input: string): string {
+  const normalized = normalizeTitle(input);
+  const quoted = /^[「『“"]([^」』”"]+)[」』”"]\s*(.*)$/.exec(normalized);
+  if (quoted?.[1]) {
+    const suffix = normalizeTitle(quoted[2])
+      .replace(/^(?:开放|开启)\s*/, "")
+      .replace(/\s*(?:开放|开启|说明)$/, "");
+    return normalizeTitle(`${quoted[1]} ${suffix}`);
+  }
+
+  return normalized.replace(/\s*(?:开放|开启|说明)$/, "");
+}
+
+function getEndfieldVersionScheduleFamily(title: string): string | null {
+  const normalized = normalizeTitle(title);
+  if (normalized.includes("申领")) return "申领";
+  if (normalized.includes("寻访")) return "寻访";
+  return null;
+}
+
+function parseEndfieldVersionScheduleEntries(
+  item: HypergryphAggregateItem,
+  versionStartNaive: string | null
+): EndfieldVersionScheduleEntry[] {
+  const html = item.data?.html;
+  if (!html) return [];
+
+  const lines = tokenizeHtmlLines(html);
+  const out: EndfieldVersionScheduleEntry[] = [];
+  let inScheduleSection = false;
+  let currentTitle: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("■ ")) {
+      const section = line.slice(2).trim();
+      inScheduleSection = section === "全新寻访及申领";
+      currentTitle = null;
+      continue;
+    }
+
+    if (!inScheduleSection) continue;
+
+    const numberedTitle = /^\d+\.\s*(.+)$/.exec(line);
+    if (numberedTitle?.[1]) {
+      currentTitle = normalizeEndfieldVersionScheduleTitle(numberedTitle[1]);
+      continue;
+    }
+
+    if (!currentTitle) continue;
+
+    const timeLine = /^·\s*开放时间\s*[:：]\s*(.+)$/.exec(line);
+    if (!timeLine?.[1]) continue;
+
+    const family = getEndfieldVersionScheduleFamily(currentTitle);
+    if (!family) continue;
+
+    const window = parseVersionScheduleWindow(timeLine[1], versionStartNaive);
+    if (!window.start) continue;
+
+    out.push({
+      title: currentTitle,
+      titleKey: normalizeTitleKey(currentTitle),
+      family,
+      startNaive: window.start,
+      endNaive: window.end,
+    });
+  }
+
+  return out;
 }
 
 function buildEndfieldEvent(
@@ -459,6 +566,41 @@ function resolveEndfieldStartNaive(
   return null;
 }
 
+function inferEndfieldMissingWindow(
+  item: HypergryphAggregateItem,
+  opts: {
+    title: string;
+    versionScheduleEntries: EndfieldVersionScheduleEntry[];
+  }
+): { startNaive: string; endNaive: string } | null {
+  const titleKey = normalizeTitleKey(opts.title || item.title);
+  const family = getEndfieldVersionScheduleFamily(opts.title);
+  if (!titleKey || !family) return null;
+
+  const scheduleEntry = opts.versionScheduleEntries.find((entry) => entry.titleKey === titleKey);
+  if (!scheduleEntry) return null;
+
+  const startMs = Date.parse(toEndfieldIso(scheduleEntry.startNaive));
+  if (!Number.isFinite(startMs)) return null;
+
+  if (scheduleEntry.endNaive) {
+    return { startNaive: scheduleEntry.startNaive, endNaive: scheduleEntry.endNaive };
+  }
+
+  const nextSameFamilyStart = opts.versionScheduleEntries
+    .filter((entry) => entry !== scheduleEntry && entry.family === family)
+    .map((entry) => ({
+      startNaive: entry.startNaive,
+      startMs: Date.parse(toEndfieldIso(entry.startNaive)),
+    }))
+    .filter((entry) => Number.isFinite(entry.startMs) && entry.startMs > startMs)
+    .sort((a, b) => a.startMs - b.startMs)[0];
+
+  return nextSameFamilyStart
+    ? { startNaive: scheduleEntry.startNaive, endNaive: nextSameFamilyStart.startNaive }
+    : null;
+}
+
 function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
   const merged = new Map<string, CalendarEvent>();
   const aliases = new Map<string, string>();
@@ -563,6 +705,9 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
   const items = await fetchEndfieldAggregateItems(env);
   const versionNotice = pickCurrentEndfieldVersionNotice(items);
   const versionStartNaive = versionNotice?.maintenanceEndNaive ?? null;
+  const versionScheduleEntries = versionNotice
+    ? parseEndfieldVersionScheduleEntries(versionNotice.item, versionStartNaive)
+    : [];
 
   const tabEvents = items
     .filter((it) => {
@@ -574,20 +719,29 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
       if (!html) return [];
 
       const { start, end } = extractTimeRangeFromHtml(html);
-      if (!end) {
-        // End time is missing or fuzzy -> treat as long-term and hide.
-        return [];
-      }
-
       const startNaive = resolveEndfieldStartNaive(it, start, html, versionStartNaive);
       if (!startNaive) return [];
 
       const title = normalizeTitle(it.title) || it.cid || "活动";
+      const inferredWindow =
+        end == null
+          ? inferEndfieldMissingWindow(it, {
+              title,
+              versionScheduleEntries,
+            })
+          : null;
+      const eventStartNaive = inferredWindow?.startNaive ?? startNaive;
+      const endNaive = end ?? inferredWindow?.endNaive ?? null;
+      if (!endNaive) {
+        // End time is missing or fuzzy -> treat as long-term and hide.
+        return [];
+      }
+
       const event = buildEndfieldEvent({
         id: it.cid ?? `${normalizeTitle(it.title)}:${it.startAt ?? startNaive}`,
         title,
-        startNaive,
-        endNaive: end,
+        startNaive: eventStartNaive,
+        endNaive,
         banner: extractFirstImgSrc(html),
         content: html,
       });

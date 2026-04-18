@@ -208,6 +208,7 @@ type WwParsedTimeRange = {
 };
 
 const WW_TIME_SECTION_LABELS = ["活动时间", "唤取时间", "开放时间", "领取时间", "开启时间"];
+const WW_MAINTENANCE_TIME_SECTION_LABELS = ["更新维护时间", "维护时间"];
 const WW_DATE_TIME_PATTERN =
   String.raw`(?:\d{4}\s*[\/.\-年]\s*\d{1,2}\s*[\/.\-月]\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?|\d{1,2}\s*月\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?)`;
 const WW_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -274,6 +275,21 @@ function normalizeWwDateTimeCandidate(
   return null;
 }
 
+function parseExplicitWwTimeRange(
+  input: string,
+  opts: { fallbackYear: number }
+): WwParsedTimeRange {
+  const explicit = WW_EXPLICIT_TIME_RANGE_RE.exec(input);
+  if (!explicit) return { startIso: null, endIso: null };
+
+  const start = normalizeWwDateTimeCandidate(explicit[1], opts.fallbackYear);
+  const end = normalizeWwDateTimeCandidate(explicit[2], opts.fallbackYear);
+  return {
+    startIso: start ? toIsoWithSourceOffset(start, WW_SOURCE_TZ_OFFSET) : null,
+    endIso: end ? toIsoWithSourceOffset(end, WW_SOURCE_TZ_OFFSET) : null,
+  };
+}
+
 function parseTimeRangeFromContent(
   content: string | undefined,
   opts: { fallbackYear: number }
@@ -284,15 +300,8 @@ function parseTimeRangeFromContent(
   const section = extractWwTimeSection(text);
   if (!section) return { startIso: null, endIso: null };
 
-  const explicit = WW_EXPLICIT_TIME_RANGE_RE.exec(section);
-  if (explicit) {
-    const start = normalizeWwDateTimeCandidate(explicit[1], opts.fallbackYear);
-    const end = normalizeWwDateTimeCandidate(explicit[2], opts.fallbackYear);
-    return {
-      startIso: start ? toIsoWithSourceOffset(start, WW_SOURCE_TZ_OFFSET) : null,
-      endIso: end ? toIsoWithSourceOffset(end, WW_SOURCE_TZ_OFFSET) : null,
-    };
-  }
+  const explicit = parseExplicitWwTimeRange(section, opts);
+  if (explicit.startIso || explicit.endIso) return explicit;
 
   const fuzzyStart = WW_FUZZY_START_TIME_RANGE_RE.exec(section);
   if (fuzzyStart) {
@@ -315,16 +324,87 @@ function parseTimeRangeFromContent(
   return { startIso: null, endIso: null };
 }
 
+function extractWwMaintenanceTimeRangeFromContent(
+  content: string | undefined,
+  opts: { fallbackYear: number }
+): WwParsedTimeRange {
+  const text = stripHtml(content);
+  if (!text) return { startIso: null, endIso: null };
+
+  for (const label of WW_MAINTENANCE_TIME_SECTION_LABELS) {
+    const idx = text.indexOf(label);
+    if (idx < 0) continue;
+
+    const section = text.slice(idx, idx + 220);
+    const parsed = parseExplicitWwTimeRange(section, opts);
+    if (parsed.startIso && parsed.endIso) return parsed;
+  }
+
+  return { startIso: null, endIso: null };
+}
+
+function extractWwNumericVersionLabel(input: string): string | null {
+  const normalized = normalizeTitle(input);
+  const match = /(\d+(?:\.\d+)+)\s*版本/.exec(normalized);
+  return match?.[1] ?? null;
+}
+
+function buildWwVersionStartIsoByNumericLabel(
+  items: WwOfficialNoticeItem[]
+): Map<string, string> {
+  const out = new Map<string, string>();
+
+  for (const item of items) {
+    const title = item.tabTitle?.trim();
+    if (!title || !isWwVersionNoticeTitle(title)) continue;
+
+    const version = extractWwNumericVersionLabel(title);
+    if (!version) continue;
+
+    const startMs = parseMs(item.startTimeMs);
+    const fallbackYear = startMs == null ? new Date().getFullYear() : sourceYearFromMs(startMs);
+    const maintenance = extractWwMaintenanceTimeRangeFromContent(item.content, { fallbackYear });
+    if (maintenance.endIso) out.set(version, maintenance.endIso);
+  }
+
+  return out;
+}
+
+function resolveWwVersionRelativeStartIso(
+  content: string | undefined,
+  versionStartIsoByNumericLabel: Map<string, string>
+): string | null {
+  const text = stripHtml(content);
+  if (!text || !/版本(?:更新|开启)后/.test(text)) return null;
+
+  const version = /(\d+(?:\.\d+)+)\s*版本(?:更新|开启)后/.exec(text)?.[1];
+  if (version) return versionStartIsoByNumericLabel.get(version) ?? null;
+
+  if (versionStartIsoByNumericLabel.size === 1) {
+    return [...versionStartIsoByNumericLabel.values()][0] ?? null;
+  }
+
+  return null;
+}
+
 function resolveWwEventTimeRange(
   item: WwOfficialNoticeItem,
-  opts: { startMs: number; endMs: number }
+  opts: {
+    startMs: number;
+    endMs: number;
+    versionStartIsoByNumericLabel: Map<string, string>;
+  }
 ): { startIso: string; endIso: string } {
   const fallbackStartIso = msToIsoWithSourceOffset(opts.startMs);
   const fallbackEndIso = msToIsoWithSourceOffset(opts.endMs);
   const parsed = parseTimeRangeFromContent(item.content, {
     fallbackYear: sourceYearFromMs(opts.startMs),
   });
-  const startIso = parsed.startIso ?? fallbackStartIso;
+  const versionRelativeStartIso = resolveWwVersionRelativeStartIso(
+    item.content,
+    opts.versionStartIsoByNumericLabel
+  );
+  const startIso = parsed.startIso ?? versionRelativeStartIso ?? fallbackStartIso;
   const endIso = parsed.endIso ?? fallbackEndIso;
 
   const startMs = Date.parse(startIso);
@@ -378,6 +458,7 @@ export async function fetchWwEvents(
   ];
 
   const deduped = new Map<string, CalendarEvent>();
+  const versionStartIsoByNumericLabel = buildWwVersionStartIsoByNumericLabel(merged);
 
   for (const item of merged) {
     const title = item.tabTitle?.trim();
@@ -391,7 +472,11 @@ export async function fetchWwEvents(
     const idText = String(item.id ?? "").trim();
     const fallbackId = stableEventIdFromTitleAndStartTime(title, String(startMs));
     const id = idText || fallbackId;
-    const { startIso, endIso } = resolveWwEventTimeRange(item, { startMs, endMs });
+    const { startIso, endIso } = resolveWwEventTimeRange(item, {
+      startMs,
+      endMs,
+      versionStartIsoByNumericLabel,
+    });
 
     const event: CalendarEvent = {
       id,

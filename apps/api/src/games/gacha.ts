@@ -6,7 +6,11 @@ export function isGachaEventTitle(game: GameId, title: string): boolean {
 
   switch (game) {
     case "endfield":
-      return normalized.includes("特许寻访");
+      return (
+        normalized.includes("特许寻访") ||
+        normalized.includes("特殊寻访") ||
+        normalized.includes("申领")
+      );
     case "starrail":
       return normalized.includes("跃迁");
     case "genshin":
