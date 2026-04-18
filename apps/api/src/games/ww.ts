@@ -140,6 +140,26 @@ function normalizeTitle(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
 
+function hasPermanentAvailabilityText(text: string): boolean {
+  return /(?:永久开放|常驻活动|常驻玩法)/.test(text);
+}
+
+function hasLimitedRewardText(text: string): boolean {
+  return /(?:限时奖励|限时.*奖励|奖励.*限时|奖励领取期间|限时.*领取)/.test(text);
+}
+
+function shouldIgnorePermanentOnlyWwItem(item: WwOfficialNoticeItem): boolean {
+  const text = stripHtml(item.content);
+  const timeSection = extractWwTimeSection(text);
+  if (!timeSection || !hasPermanentAvailabilityText(timeSection)) return false;
+  if (hasLimitedRewardText(text)) return false;
+
+  const startMs = parseMs(item.startTimeMs);
+  const fallbackYear = startMs == null ? new Date().getFullYear() : sourceYearFromMs(startMs);
+  const parsed = parseTimeRangeFromContent(item.content, { fallbackYear });
+  return parsed.endIso == null;
+}
+
 function shouldIgnoreWwItem(
   item: WwOfficialNoticeItem,
   opts: { title: string }
@@ -152,6 +172,7 @@ function shouldIgnoreWwItem(
 
   const normalizedTitle = normalizeTitle(opts.title);
   if (isGachaEventTitle("ww", normalizedTitle)) return false;
+  if (shouldIgnorePermanentOnlyWwItem(item)) return true;
   if (WW_IGNORE_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
   if (WW_PROMOTION_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;
 
@@ -186,7 +207,7 @@ type WwParsedTimeRange = {
   endIso: string | null;
 };
 
-const WW_TIME_SECTION_LABELS = ["活动时间", "唤取时间", "开放时间", "领取时间"];
+const WW_TIME_SECTION_LABELS = ["活动时间", "唤取时间", "开放时间", "领取时间", "开启时间"];
 const WW_DATE_TIME_PATTERN =
   String.raw`(?:\d{4}\s*[\/.\-年]\s*\d{1,2}\s*[\/.\-月]\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?|\d{1,2}\s*月\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?)`;
 const WW_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -195,6 +216,9 @@ const WW_EXPLICIT_TIME_RANGE_RE = new RegExp(
 );
 const WW_FUZZY_START_TIME_RANGE_RE = new RegExp(
   `${WW_RANGE_SEPARATOR_PATTERN}\\s*(${WW_DATE_TIME_PATTERN})`
+);
+const WW_SINGLE_START_TIME_RE = new RegExp(
+  `(?:活动时间|唤取时间|开放时间|领取时间|开启时间)\\s*[：:]?\\s*(${WW_DATE_TIME_PATTERN})`
 );
 
 function extractWwTimeSection(text: string): string {
@@ -276,6 +300,15 @@ function parseTimeRangeFromContent(
     return {
       startIso: null,
       endIso: end ? toIsoWithSourceOffset(end, WW_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  const singleStart = WW_SINGLE_START_TIME_RE.exec(section);
+  if (singleStart) {
+    const start = normalizeWwDateTimeCandidate(singleStart[1], opts.fallbackYear);
+    return {
+      startIso: start ? toIsoWithSourceOffset(start, WW_SOURCE_TZ_OFFSET) : null,
+      endIso: null,
     };
   }
 

@@ -90,6 +90,30 @@ function normalizeTitleKey(input: string | undefined): string {
     .replace(/[「」『』“”"'’‘]/g, "");
 }
 
+function normalizeAnnouncementEventTitle(input: string | undefined): string {
+  let title = stripHtml(input).replace(/\s*活动说明\s*$/, "").trim();
+  const outerQuoted =
+    /^「(.+)」$/.exec(title) ??
+    /^『(.+)』$/.exec(title) ??
+    /^“(.+)”$/.exec(title) ??
+    /^"(.+)"$/.exec(title);
+  if (outerQuoted?.[1]) title = outerQuoted[1].trim();
+  return title;
+}
+
+function isSupplementalActivityNotice(item: MihoyoNapAnnItem): boolean {
+  const title = stripHtml(item.title || item.subtitle);
+  if (!title.endsWith("活动说明")) return false;
+  if (isGachaEventTitle("zzz", title)) return false;
+  return true;
+}
+
+function canUseVersionStartForSupplementalActivity(content: string | undefined): boolean {
+  const text = stripHtml(content);
+  if (!text.includes("版本更新后")) return false;
+  return /版本更新后\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}/.test(text);
+}
+
 type ContentCandidate = {
   titleText: string;
   key: string;
@@ -243,6 +267,84 @@ function parseGachaEventsFromAnnContent(
   return [...out.values()];
 }
 
+function addContentItemByAnnId(
+  out: Map<number, MihoyoNapAnnContentItem[]>,
+  item: MihoyoNapAnnContentItem
+): void {
+  if (typeof item.ann_id !== "number") return;
+  const list = out.get(item.ann_id);
+  if (!list) {
+    out.set(item.ann_id, [item]);
+    return;
+  }
+  list.push(item);
+}
+
+function pickContentItemForNotice(
+  item: MihoyoNapAnnItem,
+  contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>
+): MihoyoNapAnnContentItem | undefined {
+  if (typeof item.ann_id !== "number") return undefined;
+  const items = contentItemsByAnnId.get(item.ann_id);
+  if (!items || items.length === 0) return undefined;
+  if (items.length === 1) return items[0];
+
+  const targetKeys = [item.title, item.subtitle]
+    .map((value) => normalizeTitleKey(value))
+    .filter(Boolean);
+  for (const targetKey of targetKeys) {
+    const match = items.find(
+      (x) => normalizeTitleKey(x.title) === targetKey || normalizeTitleKey(x.subtitle) === targetKey
+    );
+    if (match) return match;
+  }
+
+  return items.find((x) => Boolean(x.content?.trim())) ?? items[0];
+}
+
+function parseSupplementalActivityEventsFromAnnContent(
+  items: MihoyoNapAnnItem[],
+  contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>,
+  opts: {
+    fallbackStartIso: string | null;
+    existingTitleKeys: Set<string>;
+  }
+): CalendarEvent[] {
+  const out = new Map<string, CalendarEvent>();
+
+  for (const item of items) {
+    if (!isSupplementalActivityNotice(item)) continue;
+
+    const title = normalizeAnnouncementEventTitle(item.title || item.subtitle);
+    const titleKey = normalizeTitleKey(title);
+    if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
+
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    const { startIso, endIso } = extractTimeRangeFromContentHtml(contentItem?.content ?? "");
+    const resolvedStart =
+      startIso ??
+      (canUseVersionStartForSupplementalActivity(contentItem?.content) ? opts.fallbackStartIso : null);
+    if (!resolvedStart || !endIso) continue;
+
+    const sMs = Date.parse(resolvedStart);
+    const eMs = Date.parse(endIso);
+    if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) continue;
+
+    const id = `zzz-ann:${item.ann_id ?? titleKey}`;
+    out.set(id, {
+      id,
+      title,
+      start_time: resolvedStart,
+      end_time: endIso,
+      is_gacha: false,
+      banner: (contentItem?.banner?.trim() || contentItem?.img?.trim() || undefined) ?? undefined,
+      content: contentItem?.content,
+    });
+  }
+
+  return [...out.values()];
+}
+
 type ZzzVersionNotice = {
   item: MihoyoNapAnnItem;
   startIso: string;
@@ -350,6 +452,7 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
 
   const candidates: ContentCandidate[] = [];
   const contentItems: MihoyoNapAnnContentItem[] = [];
+  const contentItemsByAnnId = new Map<number, MihoyoNapAnnContentItem[]>();
   if (contentRes) {
     const items: MihoyoNapAnnContentItem[] = [
       ...(contentRes.data?.list ?? []),
@@ -358,6 +461,8 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     contentItems.push(...items);
 
     for (const it of items) {
+      addContentItemByAnnId(contentItemsByAnnId, it);
+
       const titleText = stripHtml(it.title);
       const key = normalizeTitleKey(titleText);
       if (!key) continue;
@@ -399,9 +504,17 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     });
 
   const gachaEvents = parseGachaEventsFromAnnContent(contentItems, { fallbackStartIso });
+  const supplementalEvents = parseSupplementalActivityEventsFromAnnContent(
+    noticeCategory?.list ?? [],
+    contentItemsByAnnId,
+    {
+      fallbackStartIso,
+      existingTitleKeys: new Set(normalEvents.map((event) => normalizeTitleKey(event.title))),
+    }
+  );
 
   const merged = new Map<string, CalendarEvent>();
-  for (const event of [...normalEvents, ...gachaEvents]) {
+  for (const event of [...normalEvents, ...supplementalEvents, ...gachaEvents]) {
     merged.set(String(event.id), event);
   }
 
