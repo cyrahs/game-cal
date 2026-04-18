@@ -668,6 +668,37 @@ function buildGameDataset(game, rawNotices, apiEvents, maxItems) {
   };
 }
 
+function getReviewerSuppressedApiEventTitles(game, suppressions) {
+  const titles = new Set();
+  for (const suppression of suppressions) {
+    if (suppression.kind && suppression.kind !== "non_event_included") continue;
+    if (suppression.game && suppression.game !== game) continue;
+    for (const title of suppression.titles) {
+      titles.add(title);
+    }
+  }
+  return titles;
+}
+
+function filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt) {
+  const suppressedTitles = getReviewerSuppressedApiEventTitles(game, suppressions);
+  const generatedAtMs = Date.parse(generatedAt);
+
+  return apiEvents.filter((event) => {
+    const title = normalizeWhitespace(event?.title || "");
+    if (title && suppressedTitles.has(title)) {
+      return false;
+    }
+
+    const endTimeMs = Date.parse(String(event?.end_time ?? ""));
+    if (Number.isFinite(generatedAtMs) && Number.isFinite(endTimeMs) && endTimeMs <= generatedAtMs) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 function extractJsonObjectFromText(input) {
   const text = String(input ?? "").trim();
   if (!text) {
@@ -1085,21 +1116,33 @@ async function main() {
   const games = parseGameList(process.env.UPSTREAM_REVIEW_GAMES);
   const maxItems = parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
   const generatedAt = new Date().toISOString();
+  const suppressions = await loadSuppressions(suppressionsPath);
 
-  const datasets = await Promise.all(
+  const collectedDatasets = await Promise.all(
     games.map((game) =>
       withRetry(`dataset collection for ${game}`, async () => {
         const [rawNotices, apiEvents] = await Promise.all([
           fetchRawNotices(game),
           fetchApiEvents(apiBaseUrl, game),
         ]);
-        return buildGameDataset(game, rawNotices, apiEvents, maxItems);
+        return { game, rawNotices, apiEvents };
       })
     )
   );
 
-  const suppressions = await loadSuppressions(suppressionsPath);
-  const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets });
+  const datasets = collectedDatasets.map(({ game, rawNotices, apiEvents }) =>
+    buildGameDataset(game, rawNotices, apiEvents, maxItems)
+  );
+  const reviewDatasets = collectedDatasets.map(({ game, rawNotices, apiEvents }) =>
+    buildGameDataset(
+      game,
+      rawNotices,
+      filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt),
+      maxItems
+    )
+  );
+
+  const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets: reviewDatasets });
   const { filteredFindings, suppressedFindings } = applySuppressions(review.findings, suppressions);
   const report = {
     generated_at: generatedAt,

@@ -175,6 +175,7 @@ pnpm --filter @game-cal/api start
 - 抓取上游原始公告（当前覆盖：原神、星铁、鸣潮、绝区零、尘白禁区、终末地）
 - 按游戏并行调用 LLM API，对比“原始公告”与“当前 `/api/events/:game` 输出”
 - 单游戏的数据收集和 LLM 分析失败时会各自重试 3 次
+- 传给 LLM 的 API event 会先排除已过期项，以及 suppression 中标记为保留的 `non_event_included` 项
 - 按仓库内的 suppression 配置过滤已知合理项
 - 有疑似问题时创建或更新固定 issue：`Upstream Review Alerts`
 - 无问题时自动关闭该 issue
@@ -201,7 +202,7 @@ pnpm --filter @game-cal/api start
 - `UPSTREAM_REVIEW_DRY_RUN=1`（只生成报告，不操作 GitHub issue）
 - `OPENAI_REASONING_EFFORT`（未设置时使用模型默认值）
 
-Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。
+Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除。
 
 示例：
 
