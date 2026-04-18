@@ -83,7 +83,8 @@ function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
   const keys = [normalizeTitleKey(event.title)].filter(Boolean);
   const quotedKey = extractLeadingQuotedTitleKey(event.title);
   if (quotedKey && !keys.includes(quotedKey)) keys.push(quotedKey);
-  return keys.map((key) => `${key}|${event.start_time}|${event.end_time}`);
+  const endKey = event.end_time ?? event.end_time_text ?? "";
+  return keys.map((key) => `${key}|${event.start_time}|${endKey}`);
 }
 
 function stripHtml(input: string): string {
@@ -406,6 +407,14 @@ function hasUnresolvedRelativeEnd(input: string): boolean {
   return /后结束/.test(normalizeTitle(input));
 }
 
+function extractRelativeEndText(input: string): string | null {
+  const text = normalizeTitle(input);
+  if (!hasUnresolvedRelativeEnd(text)) return null;
+
+  const match = /(?:，|,)?\s*(于[^，,。]*?后结束(?:（[^）]*）)?)/.exec(text);
+  return match?.[1]?.trim() || text;
+}
+
 function parseEndfieldVersionScheduleEntries(
   item: HypergryphAggregateItem,
   versionStartNaive: string | null
@@ -463,16 +472,36 @@ function buildEndfieldEvent(
     id: string;
     title: string;
     startNaive: string;
-    endNaive: string;
+    endNaive?: string | null;
+    endTimeText?: string;
     banner?: string;
     content?: string;
   }
 ): CalendarEvent | null {
   const startIso = toIsoWithSourceOffset(opts.startNaive, ENDFIELD_SOURCE_TZ_OFFSET);
-  const endIso = toIsoWithSourceOffset(opts.endNaive, ENDFIELD_SOURCE_TZ_OFFSET);
   const sMs = Date.parse(startIso);
+  if (!Number.isFinite(sMs)) return null;
+
+  const relativeEndText = opts.endTimeText?.trim();
+  if (relativeEndText && !opts.endNaive) {
+    return {
+      id: opts.id,
+      title: opts.title,
+      start_time: startIso,
+      end_time: null,
+      end_time_kind: "relative",
+      end_time_text: relativeEndText,
+      is_gacha: isGachaEventTitle("endfield", opts.title),
+      banner: opts.banner,
+      content: opts.content,
+    };
+  }
+
+  if (!opts.endNaive) return null;
+
+  const endIso = toIsoWithSourceOffset(opts.endNaive, ENDFIELD_SOURCE_TZ_OFFSET);
   const eMs = Date.parse(endIso);
-  if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) return null;
+  if (!Number.isFinite(eMs) || eMs <= sMs) return null;
 
   return {
     id: opts.id,
@@ -578,7 +607,7 @@ function inferEndfieldMissingWindow(
     title: string;
     versionScheduleEntries: EndfieldVersionScheduleEntry[];
   }
-): { startNaive: string; endNaive: string } | null {
+): { startNaive: string; endNaive?: string | null; endTimeText?: string } | null {
   const titleKey = normalizeTitleKey(opts.title || item.title);
   const family = getEndfieldVersionScheduleFamily(opts.title);
   if (!titleKey || !family) return null;
@@ -592,7 +621,15 @@ function inferEndfieldMissingWindow(
   if (scheduleEntry.endNaive) {
     return { startNaive: scheduleEntry.startNaive, endNaive: scheduleEntry.endNaive };
   }
-  if (hasUnresolvedRelativeEnd(scheduleEntry.timeText)) return null;
+
+  const relativeEndText = extractRelativeEndText(scheduleEntry.timeText);
+  if (relativeEndText) {
+    return {
+      startNaive: scheduleEntry.startNaive,
+      endNaive: null,
+      endTimeText: relativeEndText,
+    };
+  }
 
   const nextSameFamilyStart = opts.versionScheduleEntries
     .filter((entry) => entry !== scheduleEntry && entry.family === family)
@@ -739,8 +776,8 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
           : null;
       const eventStartNaive = inferredWindow?.startNaive ?? startNaive;
       const endNaive = end ?? inferredWindow?.endNaive ?? null;
-      if (!endNaive) {
-        // End time is missing or fuzzy -> treat as long-term and hide.
+      if (!endNaive && !inferredWindow?.endTimeText) {
+        // End time is missing with no usable relative wording -> treat as long-term and hide.
         return [];
       }
 
@@ -749,6 +786,7 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
         title,
         startNaive: eventStartNaive,
         endNaive,
+        endTimeText: inferredWindow?.endTimeText,
         banner: extractFirstImgSrc(html),
         content: html,
       });

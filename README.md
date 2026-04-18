@@ -251,11 +251,14 @@ Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，
 
 ## 时区说明
 
-`/api/events*` 返回的 `start_time` / `end_time` 为带时区偏移的 ISO-8601 时间，例如：
+`/api/events*` 返回的明确 `start_time` / `end_time` 为带时区偏移的 ISO-8601 时间，例如：
 `2026-02-10T12:00:00+08:00`
 
 这样前端可安全转换为浏览器本地时区显示。
 如果上游返回无时区时间（如 `YYYY-MM-DD HH:mm:ss`），抓取器会按对应游戏的默认时区常量处理（当前为 `+08:00`）。
+
+若上游公告只有相对截止条件，事件会返回 `end_time: null`、`end_time_kind: "relative"` 和
+`end_time_text`。前端会将这类事件显示为右端截断的时间轴条，并在详情中展示原始相对截止描述。
 
 ## 循环活动
 

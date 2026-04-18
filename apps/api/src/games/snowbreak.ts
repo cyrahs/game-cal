@@ -41,6 +41,10 @@ const SNOWBREAK_DEFAULT_ANNOUNCE_API =
 const SNOWBREAK_SOURCE_TZ_OFFSET = "+08:00";
 const SNOWBREAK_VERSION_NOTICE_SUFFIX = "限时活动公告";
 
+function parseEventEndMs(event: CalendarEvent): number {
+  return event.end_time ? Date.parse(event.end_time) : Number.POSITIVE_INFINITY;
+}
+
 const SNOWBREAK_ACTIVITY_INCLUDE_WORDS = [
   "玩法",
   "关卡",
@@ -430,7 +434,7 @@ function extractSnowbreakGachaEventsFromAnnouncements(list: SnowbreakAnnItem[]):
       banner: prev.banner ?? next.banner,
       content: prev.content ?? next.content,
       start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
-      end_time: Date.parse(prev.end_time) >= Date.parse(next.end_time) ? prev.end_time : next.end_time,
+      end_time: parseEventEndMs(prev) >= parseEventEndMs(next) ? prev.end_time : next.end_time,
     });
   }
 
@@ -576,7 +580,7 @@ export async function fetchSnowbreakEvents(
   return [...merged.values()].sort((a, b) => {
     const sDiff = Date.parse(a.start_time) - Date.parse(b.start_time);
     if (sDiff !== 0) return sDiff;
-    const eDiff = Date.parse(a.end_time) - Date.parse(b.end_time);
+    const eDiff = parseEventEndMs(a) - parseEventEndMs(b);
     if (eDiff !== 0) return eDiff;
     return String(a.title).localeCompare(String(b.title), "zh-Hans-CN");
   });

@@ -284,7 +284,9 @@ async function fetchApiEvents(apiBaseUrl, game) {
   return json.data.map((item) => ({
     title: normalizeWhitespace(item?.title),
     start_time: String(item?.start_time ?? ""),
-    end_time: String(item?.end_time ?? ""),
+    end_time: item?.end_time == null ? null : String(item.end_time),
+    end_time_kind: normalizeWhitespace(item?.end_time_kind || ""),
+    end_time_text: normalizeWhitespace(item?.end_time_text || ""),
     is_gacha: Boolean(item?.is_gacha),
   }));
 }
@@ -971,6 +973,7 @@ async function reviewGameWithOpenAi(payload) {
       "Focus on: non-event notices incorrectly included, real events incorrectly filtered out, duplicate events, and clearly wrong time windows.",
       "Ignore pure style or wording preferences.",
       "For Endfield, API events may come from version-note extraction, so lack of a standalone raw notice is not enough to flag an issue.",
+      "Some API events may have end_time: null with end_time_kind: 'relative' and end_time_text. Treat those as present events with an intentionally relative ending; do not flag them as missing or as wrong_time_window merely because no exact end timestamp is available.",
       "Return JSON only with shape { summary: string, findings: Finding[] }.",
       "Each Finding must include game, severity, confidence, kind, title, raw_title, api_title, start_time, end_time, reason.",
       "Use findings: [] when there is nothing clearly wrong.",

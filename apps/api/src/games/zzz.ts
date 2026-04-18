@@ -75,6 +75,10 @@ const ZZZ_SOURCE_TZ_OFFSET = "+08:00";
 const ZZZ_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const ZZZ_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
 
+function parseEventEndMs(event: CalendarEvent): number {
+  return event.end_time ? Date.parse(event.end_time) : Number.POSITIVE_INFINITY;
+}
+
 function stripHtml(input: string | undefined): string {
   // Titles are frequently wrapped in <p ...>...</p>. Strip tags for matching.
   return (input ?? "")
@@ -304,7 +308,7 @@ function parseGachaEventsFromAnnContent(
       banner: prev.banner ?? next.banner,
       content: prev.content ?? next.content,
       start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
-      end_time: Date.parse(prev.end_time) >= Date.parse(next.end_time) ? prev.end_time : next.end_time,
+      end_time: parseEventEndMs(prev) >= parseEventEndMs(next) ? prev.end_time : next.end_time,
     });
   }
 
@@ -572,7 +576,7 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
   return [...merged.values()].sort((a, b) => {
     const sDiff = Date.parse(a.start_time) - Date.parse(b.start_time);
     if (sDiff !== 0) return sDiff;
-    const eDiff = Date.parse(a.end_time) - Date.parse(b.end_time);
+    const eDiff = parseEventEndMs(a) - parseEventEndMs(b);
     if (eDiff !== 0) return eDiff;
     return String(a.id).localeCompare(String(b.id), "zh-Hans-CN");
   });

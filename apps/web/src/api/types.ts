@@ -11,8 +11,11 @@ export interface CalendarEvent {
   title: string;
   // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00"
   start_time: string;
-  // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00"
-  end_time: string;
+  // ISO-8601 datetime with explicit timezone offset, e.g. "2026-02-10T12:00:00+08:00".
+  // Relative-end events keep this null and expose the upstream wording in end_time_text.
+  end_time: string | null;
+  end_time_kind?: "explicit" | "relative";
+  end_time_text?: string;
   is_gacha?: boolean;
   banner?: string;
   content?: string;

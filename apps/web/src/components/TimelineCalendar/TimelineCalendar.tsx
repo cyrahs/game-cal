@@ -33,6 +33,7 @@ const HOME_TIMELINE_PAST_DAYS = 3;
 const HOME_TIMELINE_FUTURE_DAYS = 7;
 const UPSTREAM_URGENT_WINDOW_MS = 3 * DAY_MS;
 const RECURRING_URGENT_WINDOW_MS = DAY_MS;
+const RELATIVE_END_LAYOUT_YEARS = 100;
 const MONTH_LABEL_MIN_WIDTH = 36;
 const TIMELINE_BAR_TOP_OFFSET_PX = 8;
 const TIMELINE_ROW_HEIGHT_PX = 56;
@@ -85,7 +86,13 @@ type TimelineCalendarProps =
       gameId?: never;
       currentVersionState?: never;
     };
-type ParsedEvent = CalendarEvent & { _s: Dayjs; _e: Dayjs; sourceGameId: GameId; eventKey: string };
+type ParsedEvent = CalendarEvent & {
+  _s: Dayjs;
+  _e: Dayjs;
+  _hasRelativeEnd: boolean;
+  sourceGameId: GameId;
+  eventKey: string;
+};
 type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream"; is_gacha: boolean };
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
@@ -689,7 +696,8 @@ function getEventAccessibleTitle(event: ParsedEvent, showGameMeta: boolean): str
   return `${GAME_META[event.sourceGameId].name} · ${event.title}`;
 }
 
-export function parseDateTime(input: string): Dayjs {
+export function parseDateTime(input: string | null | undefined): Dayjs {
+  if (!input) return dayjs("invalid");
   // Safari does not reliably parse "YYYY-MM-DD HH:mm" without custom parsing.
   const formats = ["YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm", "YYYY-MM-DD"];
   for (const fmt of formats) {
@@ -732,7 +740,25 @@ export function isGachaEventTitle(gameId: GameId, title: string): boolean {
   }
 }
 
-function formatRange(s: string, e: string) {
+function hasRelativeEnd(event: CalendarEvent): boolean {
+  return event.end_time_kind === "relative" || (!event.end_time && Boolean(event.end_time_text));
+}
+
+function getRelativeEndText(event: CalendarEvent): string {
+  return normalizeEventTitle(event.end_time_text || "结束时间以公告描述为准");
+}
+
+function formatEventRange(event: CalendarEvent): string {
+  if (hasRelativeEnd(event)) {
+    const sd = parseDateTime(event.start_time);
+    const start = sd.isValid() ? sd.format("MM/DD HH:mm") : event.start_time;
+    return `${start} ~ ${getRelativeEndText(event)}`;
+  }
+
+  return formatRange(event.start_time, event.end_time);
+}
+
+function formatRange(s: string, e: string | null | undefined) {
   const sd = parseDateTime(s);
   const ed = parseDateTime(e);
   if (!sd.isValid() || !ed.isValid()) return `${s} ~ ${e}`;
@@ -1181,7 +1207,7 @@ function EventDetail(props: {
   const shouldStrike = isEnd && !props.checked;
   const hasBanner = Boolean(props.event.banner);
   const showBanner = props.variant !== "none" && hasBanner;
-  const remainingLabel = formatRemainingTimeLabel(props.event._e, props.now);
+  const remainingLabel = props.event._hasRelativeEnd ? null : formatRemainingTimeLabel(props.event._e, props.now);
   const gameMeta = GAME_META[props.event.sourceGameId];
   const renderedContent = useMemo(() => {
     const raw = props.event.content;
@@ -1212,7 +1238,7 @@ function EventDetail(props: {
         </div>
       ) : null}
       <div className="text-xs text-[color:var(--muted)] font-mono">
-        {formatRange(props.event.start_time, props.event.end_time)}
+        {formatEventRange(props.event)}
         {remainingLabel ? <span>{` (${remainingLabel})`}</span> : null}
       </div>
       <div
@@ -1322,7 +1348,7 @@ function EventListRow(props: {
           <span className="min-w-0 flex-1">{props.event.title}</span>
         </div>
         <div className="mt-1 text-[11px] text-[color:var(--muted)] font-mono">
-          {formatRange(props.event.start_time, props.event.end_time)}
+          {formatEventRange(props.event)}
         </div>
       </div>
 
@@ -1852,7 +1878,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         if (!sourceGameId) return null;
         if (isHome && !sourceGameIdSet.has(sourceGameId)) return null;
         const s = parseDateTime(e.start_time);
-        const ed = parseDateTime(e.end_time);
+        const relativeEnd = hasRelativeEnd(e);
+        const ed = relativeEnd ? now.add(RELATIVE_END_LAYOUT_YEARS, "year") : parseDateTime(e.end_time);
         const title = normalizeEventTitle(e.title);
         return {
           ...e,
@@ -1861,13 +1888,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           is_gacha: Boolean(e.is_gacha) || isGachaEventTitle(sourceGameId, title),
           _s: s,
           _e: ed,
+          _hasRelativeEnd: relativeEnd,
           sourceGameId,
           eventKey: makeEventKey("upstream", sourceGameId, e.id),
         };
       })
       .filter((e): e is ParsedUpstreamEvent => Boolean(e && e._s.isValid() && e._e.isValid() && e._e.isAfter(e._s)));
     return items;
-  }, [isHome, props.events, props.gameId, sourceGameIdSet]);
+  }, [isHome, now, props.events, props.gameId, sourceGameIdSet]);
 
   const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now), [parsedUpstream, now]);
 
@@ -1876,6 +1904,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const homeEndMs = homeRangeEnd.valueOf();
     return sortedUpstream.filter((e) => {
       if (!showGacha && e.is_gacha) return false;
+      if (isHome && e._hasRelativeEnd) return e._s.valueOf() <= homeEndMs;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
       if (showNotStarted) return true;
@@ -1906,6 +1935,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           ...event,
           _s: w.start,
           _e: w.end,
+          _hasRelativeEnd: false,
           kind: "recurring",
           sourceGameId: gameId,
           eventKey: makeEventKey("recurring", gameId, a.id, w.cycleKey),
@@ -1982,6 +2012,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         ...event,
         _s: start,
         _e: end,
+        _hasRelativeEnd: false,
         kind: "monthlyCard",
         sourceGameId: gameId,
         eventKey: makeEventKey("monthlyCard", gameId, event.id),
@@ -2010,6 +2041,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         ...event,
         _s: start,
         _e: end,
+        _hasRelativeEnd: false,
         kind: "version",
         sourceGameId: version.game,
         eventKey: makeEventKey("version", version.game, event.id),
@@ -2462,6 +2494,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   const showCompleteToggle =
                     canComplete && ((isSelected && selectedFrom === "timeline" && isTimelineCheckboxVisible) || isHovered);
                   const isEnd = now.isAfter(e._e);
+                  const hasRelativeDeadline = e._hasRelativeEnd;
                   const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
                   const remainingDays = Math.floor(remainingMs / DAY_MS);
                   const remainingHours = Math.floor(remainingMs / HOUR_MS);
@@ -2488,14 +2521,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   const isUrgent = !isHome && isUrgentByRemainingMs(urgentKind, remainingMs);
 
                   const isTruncatedStart = e._s.isBefore(rangeStart);
-                  const isTruncatedEnd = e._e.isAfter(rangeEnd);
+                  const isTruncatedEnd = hasRelativeDeadline || e._e.isAfter(rangeEnd);
 
                   const startMs = Math.max(e._s.valueOf(), rangeStart.valueOf());
                   const endMs = Math.min(e._e.valueOf(), rangeEnd.valueOf());
 
                   const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
                   const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
-                  const showCountdownOnly = width <= 88;
+                  const showCountdownOnly = !hasRelativeDeadline && width <= 88;
                   const showBarIcon = showGameMeta && width >= 32;
                   const barIconWidth = showBarIcon ? Math.min(TIMELINE_BAR_ICON_WIDTH_PX, width) : 0;
                   const hasTruncatedTitle = Boolean(truncatedTimelineTitleIds[eventKey]);
@@ -2673,88 +2706,90 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                             </div>
                           </div>
                         ) : null}
-                        <div
-                          className={clsx(
-                            "relative z-10",
-                            showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
-                          )}
-                          style={
-                            showCountdownOnly && showBarIcon
-                              ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
-                              : undefined
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={clsx(
-                              "absolute inline-flex items-center justify-center",
-                              // When the bar is very short we render countdown-only text centered.
-                              // Avoid turning the whole bar into a huge invisible button by sizing
-                              // the hit-target to the chip only.
-                              showCountdownOnly
-                                ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-                                : "inset-0",
-                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                              showCompleteToggle
-                                ? "opacity-100 scale-100 pointer-events-auto"
-                                : "opacity-0 scale-95 pointer-events-none"
-                            )}
-                            style={
-                              showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
-                            }
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              if (!canComplete) return;
-                              toggleTimelineEventCompleted(e);
-                            }}
-                            aria-label={`标记${accessibleTitle}为已完成`}
-                            title="标记为已完成"
-                            aria-hidden={!showCompleteToggle}
-                            tabIndex={showCompleteToggle ? 0 : -1}
-                            disabled={!showCompleteToggle}
-                          >
-                            <span
-                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                              style={
-                                showCountdownOnly
-                                  ? { width: "100%", height: "100%" }
-                                  : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
-                              }
-                            >
-                              <svg
-                                className="flex-none"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="3"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
-                                aria-hidden="true"
-                              >
-                                <path d="M5 12.5l4.2 4.2L19 7" />
-                              </svg>
-                            </span>
-                          </button>
+                        {hasRelativeDeadline ? null : (
                           <div
                             className={clsx(
-                              "leading-none font-mono tabular-nums font-medium",
-                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                              showCountdownOnly
-                                ? "w-full min-w-0 text-center whitespace-nowrap"
-                                : "text-[13px]",
-                              isUrgent ? "text-red-700" : "text-slate-800/70",
-                              showCompleteToggle
-                                ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
-                                : "opacity-100 scale-100 translate-y-0"
+                              "relative z-10",
+                              showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
                             )}
-                            style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
-                            aria-label={remainingAriaLabel}
-                            aria-hidden={showCompleteToggle}
+                            style={
+                              showCountdownOnly && showBarIcon
+                                ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
+                                : undefined
+                            }
                           >
-                            {remainingLabel}
+                            <button
+                              type="button"
+                              className={clsx(
+                                "absolute inline-flex items-center justify-center",
+                                // When the bar is very short we render countdown-only text centered.
+                                // Avoid turning the whole bar into a huge invisible button by sizing
+                                // the hit-target to the chip only.
+                                showCountdownOnly
+                                  ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+                                  : "inset-0",
+                                "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                                showCompleteToggle
+                                  ? "opacity-100 scale-100 pointer-events-auto"
+                                  : "opacity-0 scale-95 pointer-events-none"
+                              )}
+                              style={
+                                showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
+                              }
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                if (!canComplete) return;
+                                toggleTimelineEventCompleted(e);
+                              }}
+                              aria-label={`标记${accessibleTitle}为已完成`}
+                              title="标记为已完成"
+                              aria-hidden={!showCompleteToggle}
+                              tabIndex={showCompleteToggle ? 0 : -1}
+                              disabled={!showCompleteToggle}
+                            >
+                              <span
+                                className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                                style={
+                                  showCountdownOnly
+                                    ? { width: "100%", height: "100%" }
+                                    : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
+                                }
+                              >
+                                <svg
+                                  className="flex-none"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="3"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
+                                  aria-hidden="true"
+                                >
+                                  <path d="M5 12.5l4.2 4.2L19 7" />
+                                </svg>
+                              </span>
+                            </button>
+                            <div
+                              className={clsx(
+                                "leading-none font-mono tabular-nums font-medium",
+                                "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                                showCountdownOnly
+                                  ? "w-full min-w-0 text-center whitespace-nowrap"
+                                  : "text-[13px]",
+                                isUrgent ? "text-red-700" : "text-slate-800/70",
+                                showCompleteToggle
+                                  ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
+                                  : "opacity-100 scale-100 translate-y-0"
+                              )}
+                              style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
+                              aria-label={remainingAriaLabel}
+                              aria-hidden={showCompleteToggle}
+                            >
+                              {remainingLabel}
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     </div>
                   );
