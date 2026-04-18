@@ -1,5 +1,5 @@
 import { fetchJson } from "../lib/fetch.js";
-import { unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
+import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
 import { isGachaEventTitle } from "./gacha.js";
@@ -102,6 +102,32 @@ function msToIsoWithSourceOffset(ms: number): string {
   return unixSecondsToIsoWithSourceOffset(seconds, WW_SOURCE_TZ_OFFSET);
 }
 
+function sourceYearFromMs(ms: number): number {
+  const shiftedMs = ms + 8 * 60 * 60 * 1000;
+  return new Date(shiftedMs).getUTCFullYear();
+}
+
+function stripHtml(input: string | undefined): string {
+  return (input ?? "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|h\d|li|tr)>/gi, "\n")
+    .replace(/<(p|div|h\d|li|tr)[^>]*>/gi, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&ldquo;|&rdquo;/g, "\"")
+    .replace(/&lsquo;|&rsquo;/g, "'")
+    .replace(/&mdash;|&ndash;/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function pickBanner(item: WwOfficialNoticeItem): string | undefined {
   const tab = item.tabBanner?.trim();
   if (tab) return tab;
@@ -153,6 +179,128 @@ function extractWwVersionLabel(title: string): string | null {
   if (fromVPrefix?.[1]) return fromVPrefix[1];
 
   return null;
+}
+
+type WwParsedTimeRange = {
+  startIso: string | null;
+  endIso: string | null;
+};
+
+const WW_TIME_SECTION_LABELS = ["活动时间", "唤取时间", "开放时间", "领取时间"];
+const WW_DATE_TIME_PATTERN =
+  String.raw`(?:\d{4}\s*[\/.\-年]\s*\d{1,2}\s*[\/.\-月]\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?|\d{1,2}\s*月\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?)`;
+const WW_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
+const WW_EXPLICIT_TIME_RANGE_RE = new RegExp(
+  `(${WW_DATE_TIME_PATTERN})\\s*${WW_RANGE_SEPARATOR_PATTERN}\\s*(${WW_DATE_TIME_PATTERN})`
+);
+const WW_FUZZY_START_TIME_RANGE_RE = new RegExp(
+  `${WW_RANGE_SEPARATOR_PATTERN}\\s*(${WW_DATE_TIME_PATTERN})`
+);
+
+function extractWwTimeSection(text: string): string {
+  const starts = WW_TIME_SECTION_LABELS.map((label) => text.indexOf(label))
+    .filter((idx) => idx >= 0)
+    .sort((a, b) => a - b);
+
+  const start = starts[0];
+  if (start == null) return "";
+
+  // The time window is normally immediately after the section label. Keeping
+  // this narrow avoids picking later challenge-cycle dates from the body text.
+  return text.slice(start, start + 260);
+}
+
+function normalizeWwDateTimeCandidate(
+  input: string | undefined,
+  fallbackYear: number
+): string | null {
+  const s = (input ?? "").replace(/：/g, ":").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  const compact = s.replace(/\s+/g, "");
+
+  const full =
+    /^(\d{4})年(\d{1,2})月(\d{1,2})日?(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(
+      compact
+    ) ??
+    /^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(
+      s
+    );
+  if (full) {
+    const yyyy = full[1]!;
+    const mo = String(Number(full[2]!)).padStart(2, "0");
+    const dd = String(Number(full[3]!)).padStart(2, "0");
+    const hh = String(Number(full[4]!)).padStart(2, "0");
+    const mi = full[5]!;
+    const ss = full[6] ?? "00";
+    return `${yyyy}-${mo}-${dd} ${hh}:${mi}:${ss}`;
+  }
+
+  const monthDay = /^(\d{1,2})月(\d{1,2})日?(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(
+    compact
+  );
+  if (monthDay) {
+    const mo = String(Number(monthDay[1]!)).padStart(2, "0");
+    const dd = String(Number(monthDay[2]!)).padStart(2, "0");
+    const hh = String(Number(monthDay[3]!)).padStart(2, "0");
+    const mi = monthDay[4]!;
+    const ss = monthDay[5] ?? "00";
+    return `${fallbackYear}-${mo}-${dd} ${hh}:${mi}:${ss}`;
+  }
+
+  return null;
+}
+
+function parseTimeRangeFromContent(
+  content: string | undefined,
+  opts: { fallbackYear: number }
+): WwParsedTimeRange {
+  const text = stripHtml(content);
+  if (!text) return { startIso: null, endIso: null };
+
+  const section = extractWwTimeSection(text);
+  if (!section) return { startIso: null, endIso: null };
+
+  const explicit = WW_EXPLICIT_TIME_RANGE_RE.exec(section);
+  if (explicit) {
+    const start = normalizeWwDateTimeCandidate(explicit[1], opts.fallbackYear);
+    const end = normalizeWwDateTimeCandidate(explicit[2], opts.fallbackYear);
+    return {
+      startIso: start ? toIsoWithSourceOffset(start, WW_SOURCE_TZ_OFFSET) : null,
+      endIso: end ? toIsoWithSourceOffset(end, WW_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  const fuzzyStart = WW_FUZZY_START_TIME_RANGE_RE.exec(section);
+  if (fuzzyStart) {
+    const end = normalizeWwDateTimeCandidate(fuzzyStart[1], opts.fallbackYear);
+    return {
+      startIso: null,
+      endIso: end ? toIsoWithSourceOffset(end, WW_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  return { startIso: null, endIso: null };
+}
+
+function resolveWwEventTimeRange(
+  item: WwOfficialNoticeItem,
+  opts: { startMs: number; endMs: number }
+): { startIso: string; endIso: string } {
+  const fallbackStartIso = msToIsoWithSourceOffset(opts.startMs);
+  const fallbackEndIso = msToIsoWithSourceOffset(opts.endMs);
+  const parsed = parseTimeRangeFromContent(item.content, {
+    fallbackYear: sourceYearFromMs(opts.startMs),
+  });
+  const startIso = parsed.startIso ?? fallbackStartIso;
+  const endIso = parsed.endIso ?? fallbackEndIso;
+
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return { startIso: fallbackStartIso, endIso: fallbackEndIso };
+  }
+
+  return { startIso, endIso };
 }
 
 type WwVersionNotice = {
@@ -210,12 +358,13 @@ export async function fetchWwEvents(
     const idText = String(item.id ?? "").trim();
     const fallbackId = stableEventIdFromTitleAndStartTime(title, String(startMs));
     const id = idText || fallbackId;
+    const { startIso, endIso } = resolveWwEventTimeRange(item, { startMs, endMs });
 
     const event: CalendarEvent = {
       id,
       title,
-      start_time: msToIsoWithSourceOffset(startMs),
-      end_time: msToIsoWithSourceOffset(endMs),
+      start_time: startIso,
+      end_time: endIso,
       is_gacha: isGachaEventTitle("ww", title),
       banner: pickBanner(item),
       content: item.content,
