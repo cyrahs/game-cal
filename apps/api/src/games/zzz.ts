@@ -2,7 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gacha.js";
 
 type MihoyoNapActivity = {
   activity_id?: string;
@@ -296,6 +296,7 @@ function parseGachaEventsFromAnnContent(
       start_time: resolvedStart,
       end_time: endIso,
       is_gacha: true,
+      gacha_kind: classifyGachaEvent("zzz", title, it.content),
       banner: (it.banner?.trim() || it.img?.trim() || undefined) ?? undefined,
       content: it.content,
     };
@@ -305,6 +306,7 @@ function parseGachaEventsFromAnnContent(
     }
     out.set(id, {
       ...prev,
+      gacha_kind: combineGachaKinds(prev.gacha_kind, next.gacha_kind),
       banner: prev.banner ?? next.banner,
       content: prev.content ?? next.content,
       start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
@@ -545,13 +547,16 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       const id = a.activity_id ?? `${a.name}:${a.start_time}`;
       const title = a.name!;
       const matched = candidates.length > 0 ? pickBestCandidate(a.name!, candidates) : null;
+      const gachaKind = classifyGachaEvent("zzz", title, matched?.content);
+      const isGacha = isGachaEventTitle("zzz", title) || gachaKind !== "other";
       return [
         {
           id,
           title,
           start_time: unixSecondsToIsoWithSourceOffset(a.start_time!, ZZZ_SOURCE_TZ_OFFSET),
           end_time: unixSecondsToIsoWithSourceOffset(a.end_time!, ZZZ_SOURCE_TZ_OFFSET),
-          is_gacha: isGachaEventTitle("zzz", title),
+          is_gacha: isGacha,
+          gacha_kind: isGacha ? gachaKind : undefined,
           banner: matched?.banner,
           content: matched?.content,
         },

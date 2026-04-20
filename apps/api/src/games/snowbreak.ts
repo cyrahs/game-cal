@@ -5,7 +5,7 @@ import {
 } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gacha.js";
 
 type SnowbreakAnnItem = {
   id?: number | string;
@@ -421,6 +421,7 @@ function extractSnowbreakGachaEventsFromAnnouncements(list: SnowbreakAnnItem[]):
       start_time: startIso,
       end_time: endIso,
       is_gacha: true,
+      gacha_kind: classifyGachaEvent("snowbreak", title, contentHtml),
       banner: extractFirstImgSrc(contentHtml),
       content: contentHtml || undefined,
     };
@@ -431,6 +432,7 @@ function extractSnowbreakGachaEventsFromAnnouncements(list: SnowbreakAnnItem[]):
 
     out.set(id, {
       ...prev,
+      gacha_kind: combineGachaKinds(prev.gacha_kind, next.gacha_kind),
       banner: prev.banner ?? next.banner,
       content: prev.content ?? next.content,
       start_time: Date.parse(prev.start_time) <= Date.parse(next.start_time) ? prev.start_time : next.start_time,
@@ -483,12 +485,15 @@ function extractEventsFromBlocks(
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
 
+      const gachaKind = classifyGachaEvent("snowbreak", title, blockContent);
+      const isGacha = isGachaEventTitle("snowbreak", title) || gachaKind !== "other";
       out.push({
         id: stableEventId(title, startIso, endIso),
         title,
         start_time: startIso,
         end_time: endIso,
-        is_gacha: isGachaEventTitle("snowbreak", title),
+        is_gacha: isGacha,
+        gacha_kind: isGacha ? gachaKind : undefined,
         banner: block.banner,
         content: blockContent,
       });
@@ -549,12 +554,14 @@ export async function fetchSnowbreakEvents(
     const end = target.endSeconds;
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
       const contentHtml = parseLocalizedText(target.item.content);
+      const gachaKind = classifyGachaEvent("snowbreak", target.title, contentHtml);
       versionEvents.push({
         id: `snowbreak-ann:${target.item.id ?? `${start}:${end}`}`,
         title: target.title || SNOWBREAK_VERSION_NOTICE_SUFFIX,
         start_time: unixSecondsToIsoWithSourceOffset(start, SNOWBREAK_SOURCE_TZ_OFFSET),
         end_time: unixSecondsToIsoWithSourceOffset(end, SNOWBREAK_SOURCE_TZ_OFFSET),
-        is_gacha: isGachaEventTitle("snowbreak", target.title),
+        is_gacha: isGachaEventTitle("snowbreak", target.title) || gachaKind !== "other",
+        gacha_kind: gachaKind,
         banner: extractFirstImgSrc(contentHtml),
         content: contentHtml || undefined,
       });
@@ -572,6 +579,7 @@ export async function fetchSnowbreakEvents(
     merged.set(key, {
       ...prev,
       is_gacha: prev.is_gacha || event.is_gacha,
+      gacha_kind: combineGachaKinds(prev.gacha_kind, event.gacha_kind),
       banner: prev.banner ?? event.banner,
       content: prev.content ?? event.content,
     });

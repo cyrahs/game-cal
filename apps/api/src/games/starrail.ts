@@ -2,7 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, isGachaEventTitle } from "./gacha.js";
 
 type MihoyoAnnItem = {
   ann_id: number;
@@ -438,14 +438,18 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
   return filtered.map((item) => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
+    const content = contentItem?.content ?? item.content;
+    const gachaKind = classifyGachaEvent("starrail", title, content);
+    const isGacha = isGachaEventTitle("starrail", title) || gachaKind !== "other";
     return {
       id: `starrail:${makeAnnItemKey(item)}`,
       title,
       start_time: toIsoWithSourceOffset(item.start_time!, STARRAIL_SOURCE_TZ_OFFSET),
       end_time: toIsoWithSourceOffset(item.end_time!, STARRAIL_SOURCE_TZ_OFFSET),
-      is_gacha: isGachaEventTitle("starrail", title),
+      is_gacha: isGacha,
+      gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,
-      content: contentItem?.content ?? item.content,
+      content,
     };
   });
 }

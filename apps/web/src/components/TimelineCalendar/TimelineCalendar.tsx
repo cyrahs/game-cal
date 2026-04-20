@@ -5,7 +5,7 @@ import customParseFormat from "dayjs/plugin/customParseFormat";
 import isoWeek from "dayjs/plugin/isoWeek";
 import utc from "dayjs/plugin/utc";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CalendarEvent, GameId, GameVersionInfo } from "../../api/types";
+import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import {
@@ -93,7 +93,7 @@ type ParsedEvent = CalendarEvent & {
   sourceGameId: GameId;
   eventKey: string;
 };
-type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream"; is_gacha: boolean };
+type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream"; is_gacha: boolean; gacha_kind: GachaKind };
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
   recurringActivityId: string;
@@ -691,9 +691,9 @@ function makeEventKey(kind: "upstream" | "recurring" | "version" | "monthlyCard"
   return [kind, gameId, String(id), suffix].filter(Boolean).join(":");
 }
 
-function getEventAccessibleTitle(event: ParsedEvent, showGameMeta: boolean): string {
-  if (!showGameMeta) return event.title;
-  return `${GAME_META[event.sourceGameId].name} · ${event.title}`;
+function getEventAccessibleTitle(event: ParsedEvent, showGameMeta: boolean, displayTitle = event.title): string {
+  if (!showGameMeta) return displayTitle;
+  return `${GAME_META[event.sourceGameId].name} · ${displayTitle}`;
 }
 
 export function parseDateTime(input: string | null | undefined): Dayjs {
@@ -738,6 +738,130 @@ export function isGachaEventTitle(gameId: GameId, title: string): boolean {
       return _exhaustive;
     }
   }
+}
+
+function normalizeForGachaKind(...inputs: Array<string | undefined>): string {
+  return inputs
+    .filter((input): input is string => typeof input === "string")
+    .join(" ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;|&#160;/g, " ")
+    .replace(/&lt;[^&]*?&gt;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasAny(input: string, words: string[]): boolean {
+  return words.some((word) => input.includes(word));
+}
+
+function mergeGachaKind(hasCharacter: boolean, hasWeapon: boolean): GachaKind {
+  if (hasCharacter && hasWeapon) return "mixed";
+  if (hasCharacter) return "character";
+  if (hasWeapon) return "weapon";
+  return "other";
+}
+
+function isValidGachaKind(input: unknown): input is GachaKind {
+  return input === "character" || input === "weapon" || input === "mixed" || input === "other";
+}
+
+export function classifyGachaEvent(gameId: GameId, title: string, content?: string): GachaKind {
+  const normalizedTitle = normalizeForGachaKind(title);
+  const normalizedText = normalizeForGachaKind(title, content);
+  if (!normalizedTitle && !normalizedText) return "other";
+
+  switch (gameId) {
+    case "endfield":
+      return mergeGachaKind(
+        normalizedTitle.includes("特许寻访") ||
+          normalizedTitle.includes("特殊寻访") ||
+          hasAny(normalizedText, ["特许寻访", "特殊寻访"]) ||
+          (normalizedText.includes("作战演练") && normalizedText.includes("寻访")),
+        normalizedTitle.includes("申领") ||
+          (normalizedText.includes("申领") && hasAny(normalizedText, ["武器", "获取概率提升"])) ||
+          /武器[^。；;]*概率提升/.test(normalizedText)
+      );
+    case "starrail":
+      {
+        const hasWarpContext = normalizedText.includes("跃迁") || normalizedText.includes("概率提升");
+        const hasCharacter =
+          hasAny(normalizedText, ["角色活动跃迁", "角色联动跃迁"]) ||
+          (hasWarpContext &&
+            (hasAny(normalizedText, ["限定5星角色", "5星角色", "4星角色"]) ||
+              /(?:^|[^光])5星角色/.test(normalizedText)));
+        const hasWeapon =
+          hasAny(normalizedText, ["光锥活动跃迁", "光锥联动跃迁"]) ||
+          (hasWarpContext && hasAny(normalizedText, ["限定5星光锥", "5星光锥", "4星光锥"]));
+        const explicit = mergeGachaKind(hasCharacter, hasWeapon);
+        if (explicit !== "other") return explicit;
+        if (normalizedTitle.includes("跃迁") && normalizedTitle.includes("光锥")) return "weapon";
+        if (normalizedTitle.includes("跃迁") && normalizedTitle.includes("角色")) return "character";
+        if (normalizedTitle.includes("活动跃迁") || normalizedTitle.includes("联动跃迁")) return "mixed";
+        return "other";
+      }
+    case "genshin":
+      {
+        const hasWishContext = normalizedText.includes("祈愿");
+        if (
+          normalizedTitle.includes("神铸赋形") ||
+          (hasWishContext && hasAny(normalizedText, ["概率提升武器", "武器活动祈愿", "武器祈愿"]))
+        ) {
+          return "weapon";
+        }
+        return hasWishContext &&
+          (normalizedTitle.includes("概率UP") ||
+            hasAny(normalizedText, ["概率提升角色", "活动祈愿中获得更多角色"]))
+          ? "character"
+          : "other";
+      }
+    case "ww":
+      return mergeGachaKind(/角色.*唤取/.test(normalizedTitle), /武器.*唤取/.test(normalizedTitle));
+    case "snowbreak":
+      return mergeGachaKind(/角色(?:定向)?共鸣/.test(normalizedText), /武器(?:定向)?共鸣/.test(normalizedText));
+    case "zzz":
+      {
+        const hasFrequencyContext = hasAny(normalizedText, ["频段", "调频", "概率提升"]);
+        const hasCharacter =
+          normalizedTitle.includes("独家频段") ||
+          (hasFrequencyContext && hasAny(normalizedText, ["限定S级代理人", "S级代理人", "代理人"]));
+        const hasWeapon =
+          hasFrequencyContext && hasAny(normalizedText, ["音擎频段", "音擎调频", "限定S级音擎", "S级音擎"]);
+        const explicit = mergeGachaKind(hasCharacter, hasWeapon);
+        if (explicit !== "other") return explicit;
+        if (normalizedTitle.includes("限时频段")) return "mixed";
+        return "other";
+      }
+    default: {
+      const _exhaustive: never = gameId;
+      return _exhaustive;
+    }
+  }
+}
+
+export function resolveGachaKind(
+  gameId: GameId,
+  title: string,
+  content?: string,
+  upstreamKind?: GachaKind
+): GachaKind {
+  const fallbackKind = classifyGachaEvent(gameId, title, content);
+  if (!isValidGachaKind(upstreamKind)) return fallbackKind;
+  if (upstreamKind === "other" && fallbackKind !== "other") return fallbackKind;
+  return upstreamKind;
+}
+
+function isCharacterTrialGachaKind(kind: GachaKind): boolean {
+  return kind === "character" || kind === "mixed";
+}
+
+export function isCharacterTrialGachaEvent(
+  gameId: GameId,
+  title: string,
+  content?: string,
+  upstreamKind?: GachaKind
+): boolean {
+  return isCharacterTrialGachaKind(resolveGachaKind(gameId, title, content, upstreamKind));
 }
 
 function hasRelativeEnd(event: CalendarEvent): boolean {
@@ -1734,6 +1858,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
+  const showGachaTrialsOnly = prefs.timeline.showGachaTrialsOnly;
   const monthlyCardState = prefs.timeline.monthlyCardByGame[primaryGameId] ?? null;
   const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(primaryGameId);
   const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(primaryGameId);
@@ -1904,11 +2029,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         const relativeEnd = hasRelativeEnd(e);
         const ed = relativeEnd ? now.add(RELATIVE_END_LAYOUT_YEARS, "year") : parseDateTime(e.end_time);
         const title = normalizeEventTitle(e.title);
+        const gachaKind = resolveGachaKind(sourceGameId, title, e.content, e.gacha_kind);
+        const isGacha = Boolean(e.is_gacha) || isGachaEventTitle(sourceGameId, title) || gachaKind !== "other";
         return {
           ...e,
           kind: "upstream" as const,
           title,
-          is_gacha: Boolean(e.is_gacha) || isGachaEventTitle(sourceGameId, title),
+          is_gacha: isGacha,
+          gacha_kind: gachaKind,
           _s: s,
           _e: ed,
           _hasRelativeEnd: relativeEnd,
@@ -1927,13 +2055,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const homeEndMs = homeRangeEnd.valueOf();
     return sortedUpstream.filter((e) => {
       if (!showGacha && e.is_gacha) return false;
+      if (showGachaTrialsOnly && e.is_gacha && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
       if (isHome && e._hasRelativeEnd) return e._s.valueOf() <= homeEndMs;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
-  }, [homeRangeEnd, isHome, sortedUpstream, showGacha, showNotStarted, now]);
+  }, [homeRangeEnd, isHome, sortedUpstream, showGacha, showGachaTrialsOnly, showNotStarted, now]);
 
   const parsedRecurring = useMemo(() => {
     const items: ParsedRecurringEvent[] = [];
@@ -2509,8 +2638,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
                 {timelineEvents.map((e, idx) => {
                   const eventKey = e.eventKey;
-                  const displayTitle = e.title;
-                  const accessibleTitle = getEventAccessibleTitle(e, showGameMeta);
+                  const displayTitle =
+                    showGachaTrialsOnly &&
+                    e.kind === "upstream" &&
+                    e.is_gacha &&
+                    isCharacterTrialGachaKind(e.gacha_kind)
+                      ? `[试用] ${e.title}`
+                      : e.title;
+                  const accessibleTitle = getEventAccessibleTitle(e, showGameMeta, displayTitle);
                   const sourceGameIcon = GAME_META[e.sourceGameId].icon;
                   const isSelected = selectedKey === eventKey;
                   const isHovered = hoveredTimelineEventKey === eventKey;

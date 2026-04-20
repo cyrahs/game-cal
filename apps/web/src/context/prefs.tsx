@@ -262,6 +262,7 @@ export type PrefsState = {
     showNotStarted: boolean;
     showWeekSeparators: boolean;
     showGacha: boolean;
+    showGachaTrialsOnly: boolean;
     monthlyCardByGame: Partial<Record<GameId, MonthlyCardState>>;
     completedIdsByGame: Partial<Record<GameId, Array<string | number>>>;
     completedRecurringByGame: Partial<Record<GameId, Record<string, string>>>;
@@ -287,6 +288,7 @@ export type PrefsContextValue = {
   setShowNotStarted: (v: boolean) => void;
   setShowWeekSeparators: (v: boolean) => void;
   setShowGacha: (v: boolean) => void;
+  setShowGachaTrialsOnly: (v: boolean) => void;
   setMonthlyCardRemainingDays: (gameId: GameId, days: number | null) => void;
   toggleCompleted: (gameId: GameId, eventId: string | number) => void;
   toggleRecurringCompleted: (gameId: GameId, activityId: string, cycleKey: string) => void;
@@ -418,6 +420,7 @@ function makeDefaultPrefs(): PrefsState {
       showNotStarted: false,
       showWeekSeparators: false,
       showGacha: false,
+      showGachaTrialsOnly: false,
       monthlyCardByGame: {},
       completedIdsByGame: {},
       completedRecurringByGame: {},
@@ -525,6 +528,10 @@ function coercePrefs(input: unknown): PrefsState {
       : base.timeline.showWeekSeparators;
   const showGacha =
     typeof obj.timeline?.showGacha === "boolean" ? (obj.timeline.showGacha as boolean) : base.timeline.showGacha;
+  const showGachaTrialsOnly =
+    typeof obj.timeline?.showGachaTrialsOnly === "boolean"
+      ? (obj.timeline.showGachaTrialsOnly as boolean)
+      : base.timeline.showGachaTrialsOnly;
   const monthlyCardByGame = coerceMonthlyCardByGame(obj.timeline?.monthlyCardByGame);
 
   const completedIdsByGame: PrefsState["timeline"]["completedIdsByGame"] = {};
@@ -570,6 +577,7 @@ function coercePrefs(input: unknown): PrefsState {
       showNotStarted,
       showWeekSeparators,
       showGacha,
+      showGachaTrialsOnly,
       monthlyCardByGame,
       completedIdsByGame,
       completedRecurringByGame,
@@ -1035,6 +1043,10 @@ export function PrefsProvider(props: { children: ReactNode }) {
     setPrefs((prev) => ({ ...prev, timeline: { ...prev.timeline, showGacha: v }, updatedAt: Date.now() }));
   }, []);
 
+  const setShowGachaTrialsOnly = useCallback((v: boolean) => {
+    setPrefs((prev) => ({ ...prev, timeline: { ...prev.timeline, showGachaTrialsOnly: v }, updatedAt: Date.now() }));
+  }, []);
+
   const setMonthlyCardRemainingDays = useCallback((gameId: GameId, days: number | null) => {
     setPrefs((prev) => {
       const nextByGame: PrefsState["timeline"]["monthlyCardByGame"] = { ...prev.timeline.monthlyCardByGame };
@@ -1254,6 +1266,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setShowNotStarted,
       setShowWeekSeparators,
       setShowGacha,
+      setShowGachaTrialsOnly,
       setMonthlyCardRemainingDays,
       toggleCompleted,
       toggleRecurringCompleted,
@@ -1297,6 +1310,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
       setShowNotStarted,
       setShowWeekSeparators,
       setShowGacha,
+      setShowGachaTrialsOnly,
       setMonthlyCardRemainingDays,
       syncState,
       toggleCompleted,

@@ -2,7 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, isGachaEventTitle } from "./gacha.js";
 
 type MihoyoAnnItem = {
   ann_id: number;
@@ -202,14 +202,18 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
   return filtered.map((item) => {
     const contentItem = contentById.get(item.ann_id);
     const title = item.title ?? "";
+    const content = contentItem?.content ?? item.content;
+    const gachaKind = classifyGachaEvent("genshin", title, content);
+    const isGacha = isGachaEventTitle("genshin", title) || gachaKind !== "other";
     return {
       id: item.ann_id,
       title,
       start_time: toIsoWithSourceOffset(item.start_time!, GENSHIN_SOURCE_TZ_OFFSET),
       end_time: toIsoWithSourceOffset(item.end_time!, GENSHIN_SOURCE_TZ_OFFSET),
-      is_gacha: isGachaEventTitle("genshin", title),
+      is_gacha: isGacha,
+      gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner,
-      content: contentItem?.content ?? item.content,
+      content,
     };
   });
 }

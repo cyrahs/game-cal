@@ -2,7 +2,7 @@ import { fetchJson, fetchText } from "../lib/fetch.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gacha.js";
 
 type HypergryphAggregateItem = {
   cid?: string;
@@ -484,6 +484,8 @@ function buildEndfieldEvent(
 
   const relativeEndText = opts.endTimeText?.trim();
   if (relativeEndText && !opts.endNaive) {
+    const gachaKind = classifyGachaEvent("endfield", opts.title, opts.content);
+    const isGacha = isGachaEventTitle("endfield", opts.title) || gachaKind !== "other";
     return {
       id: opts.id,
       title: opts.title,
@@ -491,7 +493,8 @@ function buildEndfieldEvent(
       end_time: null,
       end_time_kind: "relative",
       end_time_text: relativeEndText,
-      is_gacha: isGachaEventTitle("endfield", opts.title),
+      is_gacha: isGacha,
+      gacha_kind: isGacha ? gachaKind : undefined,
       banner: opts.banner,
       content: opts.content,
     };
@@ -503,12 +506,15 @@ function buildEndfieldEvent(
   const eMs = Date.parse(endIso);
   if (!Number.isFinite(eMs) || eMs <= sMs) return null;
 
+  const gachaKind = classifyGachaEvent("endfield", opts.title, opts.content);
+  const isGacha = isGachaEventTitle("endfield", opts.title) || gachaKind !== "other";
   return {
     id: opts.id,
     title: opts.title,
     start_time: startIso,
     end_time: endIso,
-    is_gacha: isGachaEventTitle("endfield", opts.title),
+    is_gacha: isGacha,
+    gacha_kind: isGacha ? gachaKind : undefined,
     banner: opts.banner,
     content: opts.content,
   };
@@ -668,6 +674,7 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
     merged.set(primaryKey, {
       ...prev,
       is_gacha: prev.is_gacha || event.is_gacha,
+      gacha_kind: combineGachaKinds(prev.gacha_kind, event.gacha_kind),
       banner: prev.banner ?? event.banner,
       content: prev.content ?? event.content,
     });

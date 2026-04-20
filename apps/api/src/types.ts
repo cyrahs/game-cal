@@ -6,6 +6,8 @@ export type GameId =
   | "snowbreak"
   | "endfield";
 
+export type GachaKind = "character" | "weapon" | "mixed" | "other";
+
 export interface CalendarEvent {
   id: string | number;
   title: string;
@@ -18,6 +20,7 @@ export interface CalendarEvent {
   end_time_kind?: "explicit" | "relative";
   end_time_text?: string;
   is_gacha?: boolean;
+  gacha_kind?: GachaKind;
   banner?: string;
   content?: string;
   linkUrl?: string;

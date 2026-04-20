@@ -15,10 +15,12 @@ import type { ThemePreference } from "../context/theme";
 import { useEvents } from "../hooks/useEvents";
 import {
   computeRecurringWindow,
+  isCharacterTrialGachaEvent,
   isGachaEventTitle,
   isUrgentByRemainingMs,
   normalizeEventTitle,
   parseDateTime,
+  resolveGachaKind,
 } from "./TimelineCalendar/TimelineCalendar";
 
 type GameLink = { id: GameId; to: string; name: string; icon: string };
@@ -129,6 +131,7 @@ export default function Shell() {
     setShowNotStarted,
     setShowWeekSeparators,
     setShowGacha,
+    setShowGachaTrialsOnly,
     sync,
     exportRecurringSettings,
     importRecurringSettings,
@@ -149,6 +152,7 @@ export default function Shell() {
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
+  const showGachaTrialsOnly = prefs.timeline.showGachaTrialsOnly;
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("games");
@@ -319,8 +323,10 @@ export default function Shell() {
         const end = parseDateTime(event.end_time);
         if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
         const title = normalizeEventTitle(event.title);
-        const isGacha = Boolean(event.is_gacha) || isGachaEventTitle(gameId, title);
+        const gachaKind = resolveGachaKind(gameId, title, event.content, event.gacha_kind);
+        const isGacha = Boolean(event.is_gacha) || isGachaEventTitle(gameId, title) || gachaKind !== "other";
         if (!showGacha && isGacha) continue;
+        if (showGachaTrialsOnly && isGacha && !isCharacterTrialGachaEvent(gameId, title, event.content, event.gacha_kind)) continue;
         if (!showNotStarted && nowMs < start.valueOf()) continue;
         if (isUrgentByRemainingMs("upstream", Math.max(0, end.valueOf() - nowMs))) {
           urgent = true;
@@ -353,6 +359,7 @@ export default function Shell() {
     prefs.timeline.completedRecurringByGame,
     prefs.timeline.recurringActivitiesByGame,
     showGacha,
+    showGachaTrialsOnly,
     showNotStarted,
     upstreamEventsByGame,
   ]);
@@ -941,6 +948,17 @@ export default function Shell() {
                                 className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
                               />
                             </label>
+                            {showGacha ? (
+                              <label className="ml-4 flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
+                                <span className="text-xs text-[color:var(--ink)]">仅显示试用</span>
+                                <input
+                                  type="checkbox"
+                                  checked={showGachaTrialsOnly}
+                                  onChange={(e) => setShowGachaTrialsOnly(e.target.checked)}
+                                  className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
+                                />
+                              </label>
+                            ) : null}
                             <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
                               <span className="text-xs text-[color:var(--ink)]">显示未开始活动</span>
                               <input

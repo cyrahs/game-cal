@@ -2,7 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, isGachaEventTitle } from "./gacha.js";
 
 type WwOfficialNoticeItem = {
   id?: string | number;
@@ -477,13 +477,16 @@ export async function fetchWwEvents(
       endMs,
       versionStartIsoByNumericLabel,
     });
+    const gachaKind = classifyGachaEvent("ww", title, item.content);
+    const isGacha = isGachaEventTitle("ww", title) || gachaKind !== "other";
 
     const event: CalendarEvent = {
       id,
       title,
       start_time: startIso,
       end_time: endIso,
-      is_gacha: isGachaEventTitle("ww", title),
+      is_gacha: isGacha,
+      gacha_kind: isGacha ? gachaKind : undefined,
       banner: pickBanner(item),
       content: item.content,
     };
