@@ -1414,7 +1414,11 @@ function canCompleteTimelineEvent(event: AnyParsedEvent): event is ParsedUpstrea
   return event.kind === "upstream" || event.kind === "recurring";
 }
 
-function sortByPhase<T extends { _s: Dayjs; _e: Dayjs; id: string | number }>(items: T[], now: Dayjs): T[] {
+function sortByPhase<T extends { _s: Dayjs; _e: Dayjs; id: string | number; sourceGameId: GameId }>(
+  items: T[],
+  now: Dayjs,
+  gameRankById?: ReadonlyMap<GameId, number>
+): T[] {
   const nowMs = now.valueOf();
 
   const phase = (e: { _s: Dayjs; _e: Dayjs }) => {
@@ -1426,17 +1430,31 @@ function sortByPhase<T extends { _s: Dayjs; _e: Dayjs; id: string | number }>(it
     return 2;
   };
 
+  const compareGame = (a: T, b: T) => {
+    if (!gameRankById) return 0;
+    return (
+      (gameRankById.get(a.sourceGameId) ?? Number.MAX_SAFE_INTEGER) -
+      (gameRankById.get(b.sourceGameId) ?? Number.MAX_SAFE_INTEGER)
+    );
+  };
+  const compareId = (a: T, b: T) => String(a.id).localeCompare(String(b.id));
+
   const sorted = [...items];
   sorted.sort((a, b) => {
     const pa = phase(a);
     const pb = phase(b);
     if (pa !== pb) return pa - pb;
 
+    if (gameRankById && a._e.valueOf() === b._e.valueOf()) {
+      const startCompare = pa === 2 ? b._s.valueOf() - a._s.valueOf() : a._s.valueOf() - b._s.valueOf();
+      return compareGame(a, b) || compareId(a, b) || startCompare;
+    }
+
     if (pa === 0) {
       return (
         a._e.valueOf() - b._e.valueOf() ||
         a._s.valueOf() - b._s.valueOf() ||
-        String(a.id).localeCompare(String(b.id))
+        compareId(a, b)
       );
     }
 
@@ -1444,14 +1462,14 @@ function sortByPhase<T extends { _s: Dayjs; _e: Dayjs; id: string | number }>(it
       return (
         a._s.valueOf() - b._s.valueOf() ||
         a._e.valueOf() - b._e.valueOf() ||
-        String(a.id).localeCompare(String(b.id))
+        compareId(a, b)
       );
     }
 
     return (
       b._e.valueOf() - a._e.valueOf() ||
       b._s.valueOf() - a._s.valueOf() ||
-      String(a.id).localeCompare(String(b.id))
+      compareId(a, b)
     );
   });
   return sorted;
@@ -1724,6 +1742,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return prefs.visibleGameIds.length > 0 ? prefs.visibleGameIds : ALL_GAME_IDS;
   }, [isHome, prefs.visibleGameIds, primaryGameId]);
   const sourceGameIdSet = useMemo(() => new Set<GameId>(sourceGameIds), [sourceGameIds]);
+  const homeGameRankById = useMemo(() => {
+    if (!isHome) return undefined;
+    return new Map<GameId, number>(sourceGameIds.map((gameId, index) => [gameId, index]));
+  }, [isHome, sourceGameIds]);
   const completedIdsByGame = useMemo(() => {
     const next: Partial<Record<GameId, Set<string | number>>> = {};
     for (const gameId of ALL_GAME_IDS) {
@@ -1898,7 +1920,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return items;
   }, [isHome, now, props.events, props.gameId, sourceGameIdSet]);
 
-  const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now), [parsedUpstream, now]);
+  const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now, homeGameRankById), [homeGameRankById, parsedUpstream, now]);
 
   const visibleUpstreamSorted = useMemo(() => {
     const nowMs = now.valueOf();
@@ -1946,8 +1968,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       }
     }
 
-    return sortByPhase(items, now);
-  }, [now, prefs.timeline.recurringActivitiesByGame, sourceGameIds]);
+    return sortByPhase(items, now, homeGameRankById);
+  }, [homeGameRankById, now, prefs.timeline.recurringActivitiesByGame, sourceGameIds]);
 
   const visibleRecurring = useMemo(() => {
     if (!isHome) return parsedRecurring;
@@ -2049,15 +2071,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       });
     }
 
-    return sortByPhase(items, now);
-  }, [homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions, sourceGameIds, sourceGameIdSet]);
+    return sortByPhase(items, now, homeGameRankById);
+  }, [homeGameRankById, homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions, sourceGameIds, sourceGameIdSet]);
 
   const activeTimelineEvents = useMemo(() => {
     return sortByPhase(
       [...timelineOnlyEvents, ...activeRecurringEvents, ...activeUpstreamEvents] satisfies ParsedEvent[],
-      now
+      now,
+      homeGameRankById
     );
-  }, [activeRecurringEvents, activeUpstreamEvents, now, timelineOnlyEvents]);
+  }, [activeRecurringEvents, activeUpstreamEvents, homeGameRankById, now, timelineOnlyEvents]);
 
   const selectedEvent = useMemo(() => {
     if (selectedKey == null) return null;
