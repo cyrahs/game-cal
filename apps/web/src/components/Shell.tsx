@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import dayjs from "dayjs";
 import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import genshinIcon from "../assets/genshin.png";
 import starrailIcon from "../assets/starrail.png";
@@ -110,7 +110,6 @@ function formatUtcOffsetLabelByDate(date: Date): string {
 
 export default function Shell() {
   const location = useLocation();
-  const navigate = useNavigate();
   const {
     prefs,
     setTheme,
@@ -452,17 +451,10 @@ export default function Shell() {
       <div className="max-w-[1200px] mx-auto px-4 py-6">
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div className="flex items-end gap-2">
-            <Link
-              to="/"
-              aria-label="首页"
-              className={clsx(
-                "flex items-end gap-2 rounded-md transition hover:opacity-85",
-                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
-              )}
-            >
+            <div className="flex items-end gap-2">
               <img src="/favicon/apple-icon.png" alt="" className="w-7 h-7 object-contain rounded-sm" />
               <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
-            </Link>
+            </div>
             <div className="text-xs text-[color:var(--muted)] leading-none">{headerMetaLabel}</div>
           </div>
 
@@ -471,13 +463,8 @@ export default function Shell() {
               <NavLink
                 key={g.to}
                 to={g.to}
-                aria-label={currentGameId === g.id ? `取消选择${g.name}并返回首页` : g.name}
-                title={currentGameId === g.id ? "返回首页" : g.name}
-                onClick={(e) => {
-                  if (currentGameId !== g.id) return;
-                  e.preventDefault();
-                  navigate("/");
-                }}
+                aria-label={g.name}
+                title={g.name}
                 className={({ isActive }) =>
                   clsx(
                     "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
@@ -510,67 +497,42 @@ export default function Shell() {
               </NavLink>
             ))}
 
-            {orderedVisibleGames.length > 0 ? (
-              <span aria-hidden="true" className="mx-1 h-5 w-px shrink-0 bg-[color:var(--line)]" />
-            ) : null}
-
-            <a
-              href="https://github.com/cyrahs/game-cal"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="GitHub"
-              title="GitHub"
-              className={clsx(
-                "glass min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
-                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                "hover:border-[color:var(--ink)]"
-              )}
+            <NavLink
+              to="/"
+              aria-label="首页"
+              title="首页"
+              className={({ isActive }) =>
+                clsx(
+                  "glass-borderless min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                  isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
+                )
+              }
+              end
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <path
+                  d="M3 10.75 12 3l9 7.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                />
+                <path
+                  d="M5.5 9.5V20h4.75v-5.75h3.5V20h4.75V9.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                />
               </svg>
-            </a>
-
-            <button
-              type="button"
-              className={clsx(
-                "glass min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
-                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                "hover:border-[color:var(--ink)]"
-              )}
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              aria-label={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
-              title={theme === "dark" ? "浅色模式" : "深色模式"}
-            >
-              {theme === "dark" ? (
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M12 3v1m0 16v1m-8-9H3m3.314-5.686L5.5 5.5m12.186.814L18.5 5.5M6.314 17.69l-.814.81m12.186-.81l.814.81M21 12h-1m-4 0a4 4 0 1 1-8 0 4 4 0 1 1 8 0z"
-                  />
-                </svg>
-              ) : (
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M3.32 11.684a9 9 0 0 0 9 9c3.787 0 7.028-2.339 8.357-5.651a8.99 8.99 0 0 1-3.357.651 9 9 0 0 1-9-9 9.05 9.05 0 0 1 .644-3.353C5.656 4.66 3.32 7.899 3.32 11.684z"
-                  />
-                </svg>
-              )}
-            </button>
+            </NavLink>
 
             <div className="relative min-w-0 w-9" ref={settingsRef}>
               <button
                 type="button"
                 className={clsx(
-                  "glass w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                  "glass-borderless w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
                   "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  "hover:border-[color:var(--ink)]",
-                  isSettingsOpen && "border-[color:var(--ink)]"
+                  isSettingsOpen && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
                 )}
                 onClick={() => setIsSettingsOpen((v) => !v)}
                 aria-label="设置"
@@ -898,6 +860,21 @@ export default function Shell() {
                     {activeSettingsTab === "config" ? (
                       <>
                         <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
+                          <div className="text-sm font-semibold">外观</div>
+                          <div className="mt-3 grid gap-2">
+                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
+                              <span className="text-xs text-[color:var(--ink)]">深色模式</span>
+                              <input
+                                type="checkbox"
+                                checked={theme === "dark"}
+                                onChange={(e) => setTheme(e.target.checked ? "dark" : "light")}
+                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
+                              />
+                            </label>
+                          </div>
+                        </section>
+
+                        <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
                           <div className="text-sm font-semibold">时间线显示</div>
                           <div className="mt-2 text-[11px] text-[color:var(--muted)]">
                             控制时间线是否按周分隔，以及是否展示卡池和未开始活动。
@@ -990,6 +967,22 @@ export default function Shell() {
 
         <footer className="mt-10 pb-6 text-xs text-[color:var(--muted)]">
           <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1">
+            <a
+              href="https://github.com/cyrahs/game-cal"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="GitHub"
+              title="GitHub"
+              className={clsx(
+                "inline-flex h-5 w-5 items-center justify-center rounded-md transition",
+                "text-[color:var(--muted)] hover:text-[color:var(--ink)]",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+              )}
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+              </svg>
+            </a>
             <span className="min-w-0">数据来源: {currentDataSource}</span>
             {currentUpstreamUpdatedAtLabel ? (
               <span className="min-w-0 font-mono text-[11px]">

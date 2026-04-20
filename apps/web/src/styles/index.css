@@ -123,6 +123,12 @@ html.dark body::after {
   border: 1px solid var(--line);
 }
 
+.glass-borderless {
+  background: var(--card);
+  backdrop-filter: blur(12px);
+  border: 0;
+}
+
 .fade-in {
   animation: fadeIn 260ms ease-out both;
 }
