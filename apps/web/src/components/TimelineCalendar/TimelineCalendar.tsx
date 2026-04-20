@@ -38,6 +38,8 @@ const MONTH_LABEL_MIN_WIDTH = 36;
 const TIMELINE_BAR_TOP_OFFSET_PX = 8;
 const TIMELINE_ROW_HEIGHT_PX = 56;
 const TIMELINE_BAR_ICON_WIDTH_PX = TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX * 2;
+const TIMELINE_COMPLETE_TOGGLE_SIZE_PX = 24;
+const SHORT_BAR_TRAILING_COMPLETE_GAP_PX = 6;
 const SHORT_BAR_TITLE_POPOVER_OFFSET_PX = 6;
 const SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX = 240;
 const SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX = 12;
@@ -2707,7 +2709,33 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   const countdownFontSize = showCountdownOnly
                     ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
                     : 13;
-                  const completeChipSize = showCountdownOnly ? clamp(width - 4, 8, 24) : 24;
+                  const preferTrailingCompleteToggle = canComplete && showCountdownOnly;
+                  const canPlaceTrailingCompleteAfter =
+                    left + width + SHORT_BAR_TRAILING_COMPLETE_GAP_PX + TIMELINE_COMPLETE_TOGGLE_SIZE_PX <= totalWidth;
+                  const canPlaceTrailingCompleteBefore =
+                    left >= SHORT_BAR_TRAILING_COMPLETE_GAP_PX + TIMELINE_COMPLETE_TOGGLE_SIZE_PX;
+                  const placeCompleteToggleOutside =
+                    preferTrailingCompleteToggle && (canPlaceTrailingCompleteAfter || canPlaceTrailingCompleteBefore);
+                  const placeCompleteToggleBefore =
+                    placeCompleteToggleOutside && !canPlaceTrailingCompleteAfter && canPlaceTrailingCompleteBefore;
+                  const completeChipSize = placeCompleteToggleOutside
+                    ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX
+                    : showCountdownOnly
+                      ? clamp(width - 4, 8, TIMELINE_COMPLETE_TOGGLE_SIZE_PX)
+                      : TIMELINE_COMPLETE_TOGGLE_SIZE_PX;
+                  const interactionLeft = placeCompleteToggleBefore
+                    ? left - TIMELINE_COMPLETE_TOGGLE_SIZE_PX - SHORT_BAR_TRAILING_COMPLETE_GAP_PX
+                    : left;
+                  const interactionWidth = placeCompleteToggleOutside
+                    ? width + TIMELINE_COMPLETE_TOGGLE_SIZE_PX + SHORT_BAR_TRAILING_COMPLETE_GAP_PX
+                    : width;
+                  const barOffsetX = placeCompleteToggleBefore
+                    ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX + SHORT_BAR_TRAILING_COMPLETE_GAP_PX
+                    : 0;
+                  const outsideCompleteToggleLeft = placeCompleteToggleBefore
+                    ? 0
+                    : width + SHORT_BAR_TRAILING_COMPLETE_GAP_PX;
+                  const hideCountdownForCompleteToggle = showCompleteToggle && !placeCompleteToggleOutside;
                   const completeIconSize = clamp(completeChipSize * 0.58, 6, 14);
                   const shortBarTitleCenterX = left + width / 2;
                   const shortBarTitleAlignLeft = shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
@@ -2801,159 +2829,215 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                         </div>
                       ) : null}
                       <div
-                        data-event-bar
-                        className={clsx(
-                          "absolute top-2 bottom-2 py-2 overflow-hidden",
-                          "flex items-center",
-                          showCountdownOnly ? "justify-center" : showBarIcon ? "pr-3" : "px-3",
-                          "z-10 text-[13px] leading-5 shadow-sm",
-                          canComplete ? "cursor-pointer" : "cursor-default",
-                          "transition-[box-shadow,filter] duration-150 ease-out",
-                          "hover:shadow-md hover:brightness-105",
-                          isSelected
-                            ? "ring-2 ring-[color:var(--ring)]"
-                            : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
-                        )}
-                        style={{
-                          left,
-                          width,
-                          backgroundColor: barColor,
-                          opacity: isEnd ? 0.55 : 0.95,
-                          borderRadius,
-                          ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
-                        }}
-                        onClick={() => {
-                          if (!canComplete) return;
-                          // Clicking the same timeline event again should hide the detail panel.
-                          if (selectedKey === eventKey && selectedFrom === "timeline") {
-                            setSelectedKey(null);
-                            setSelectedFrom(null);
-                            setIsTimelineCheckboxVisible(false);
-                            return;
-                          }
-                          setSelectedKey(eventKey);
-                          setSelectedFrom("timeline");
-                          setIsTimelineCheckboxVisible(true);
-                        }}
+                        className="absolute top-2 bottom-2 z-10 overflow-visible"
+                        style={{ left: interactionLeft, width: interactionWidth }}
                         onMouseEnter={() => setHoveredTimelineEventKey(eventKey)}
                         onMouseLeave={() => setHoveredTimelineEventKey(null)}
                       >
-                        {showBarIcon ? (
-                          <img
-                            src={sourceGameIcon}
-                            alt=""
-                            aria-hidden="true"
-                            className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover"
-                            style={{ width: barIconWidth }}
-                            referrerPolicy="no-referrer"
-                          />
-                        ) : null}
-                        {!showCountdownOnly ? (
-                          <div
-                            className="relative z-10 min-w-0 flex-1"
-                            style={showBarIcon ? { marginLeft: barIconWidth + 8 } : undefined}
-                          >
-                            <div
-                              ref={(node) => {
-                                if (node) {
-                                  timelineTitleRefs.current.set(eventKey, node);
-                                } else {
-                                  timelineTitleRefs.current.delete(eventKey);
-                                }
-                              }}
-                              className={clsx(
-                                "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
-                                isEnd && "line-through"
-                              )}
-                            >
-                              {displayTitle}
-                            </div>
-                          </div>
-                        ) : null}
-                        {hasRelativeDeadline ? null : (
-                          <div
-                            className={clsx(
-                              "relative z-10",
-                              showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
-                            )}
-                            style={
-                              showCountdownOnly && showBarIcon
-                                ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
-                                : undefined
+                        <div
+                          data-event-bar
+                          className={clsx(
+                            "absolute inset-y-0 py-2 overflow-hidden",
+                            "flex items-center",
+                            showCountdownOnly ? "justify-center" : showBarIcon ? "pr-3" : "px-3",
+                            "z-10 text-[13px] leading-5 shadow-sm",
+                            canComplete ? "cursor-pointer" : "cursor-default",
+                            "transition-[box-shadow,filter] duration-150 ease-out",
+                            "hover:shadow-md hover:brightness-105",
+                            isSelected
+                              ? "ring-2 ring-[color:var(--ring)]"
+                              : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
+                          )}
+                          style={{
+                            left: barOffsetX,
+                            width,
+                            backgroundColor: barColor,
+                            opacity: isEnd ? 0.55 : 0.95,
+                            borderRadius,
+                            ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
+                          }}
+                          onClick={() => {
+                            if (!canComplete) return;
+                            // Clicking the same timeline event again should hide the detail panel.
+                            if (selectedKey === eventKey && selectedFrom === "timeline") {
+                              setSelectedKey(null);
+                              setSelectedFrom(null);
+                              setIsTimelineCheckboxVisible(false);
+                              return;
                             }
-                          >
-                            <button
-                              type="button"
+                            setSelectedKey(eventKey);
+                            setSelectedFrom("timeline");
+                            setIsTimelineCheckboxVisible(true);
+                          }}
+                        >
+                          {showBarIcon ? (
+                            <img
+                              src={sourceGameIcon}
+                              alt=""
+                              aria-hidden="true"
+                              className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover"
+                              style={{ width: barIconWidth }}
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : null}
+                          {!showCountdownOnly ? (
+                            <div
+                              className="relative z-10 min-w-0 flex-1"
+                              style={showBarIcon ? { marginLeft: barIconWidth + 8 } : undefined}
+                            >
+                              <div
+                                ref={(node) => {
+                                  if (node) {
+                                    timelineTitleRefs.current.set(eventKey, node);
+                                  } else {
+                                    timelineTitleRefs.current.delete(eventKey);
+                                  }
+                                }}
+                                className={clsx(
+                                  "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
+                                  isEnd && "line-through"
+                                )}
+                              >
+                                {displayTitle}
+                              </div>
+                            </div>
+                          ) : null}
+                          {hasRelativeDeadline ? null : (
+                            <div
                               className={clsx(
-                                "absolute inline-flex items-center justify-center",
-                                // When the bar is very short we render countdown-only text centered.
-                                // Avoid turning the whole bar into a huge invisible button by sizing
-                                // the hit-target to the chip only.
-                                showCountdownOnly
-                                  ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-                                  : "inset-0",
-                                "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                                showCompleteToggle
-                                  ? "opacity-100 scale-100 pointer-events-auto"
-                                  : "opacity-0 scale-95 pointer-events-none"
+                                "relative z-10",
+                                showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
                               )}
                               style={
-                                showCountdownOnly ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` } : undefined
+                                showCountdownOnly && showBarIcon
+                                  ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
+                                  : undefined
                               }
-                              onClick={(ev) => {
-                                ev.stopPropagation();
-                                if (!canComplete) return;
-                                toggleTimelineEventCompleted(e);
-                              }}
-                              aria-label={`标记${accessibleTitle}为已完成`}
-                              title="标记为已完成"
-                              aria-hidden={!showCompleteToggle}
-                              tabIndex={showCompleteToggle ? 0 : -1}
-                              disabled={!showCompleteToggle}
                             >
-                              <span
-                                className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                                style={
-                                  showCountdownOnly
-                                    ? { width: "100%", height: "100%" }
-                                    : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
-                                }
-                              >
-                                <svg
-                                  className="flex-none"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="3"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
-                                  aria-hidden="true"
+                              {!placeCompleteToggleOutside ? (
+                                <button
+                                  type="button"
+                                  className={clsx(
+                                    "absolute inline-flex items-center justify-center",
+                                    // When the bar is very short we render countdown-only text centered.
+                                    // Avoid turning the whole bar into a huge invisible button by sizing
+                                    // the hit-target to the chip only.
+                                    showCountdownOnly
+                                      ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+                                      : "inset-0",
+                                    "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                                    showCompleteToggle
+                                      ? "opacity-100 scale-100 pointer-events-auto"
+                                      : "opacity-0 scale-95 pointer-events-none"
+                                  )}
+                                  style={
+                                    showCountdownOnly
+                                      ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
+                                      : undefined
+                                  }
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    if (!canComplete) return;
+                                    toggleTimelineEventCompleted(e);
+                                  }}
+                                  aria-label={`标记${accessibleTitle}为已完成`}
+                                  title="标记为已完成"
+                                  aria-hidden={!showCompleteToggle}
+                                  tabIndex={showCompleteToggle ? 0 : -1}
+                                  disabled={!showCompleteToggle}
                                 >
-                                  <path d="M5 12.5l4.2 4.2L19 7" />
-                                </svg>
-                              </span>
-                            </button>
-                            <div
-                              className={clsx(
-                                "leading-none font-mono tabular-nums font-medium",
-                                "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                                showCountdownOnly
-                                  ? "w-full min-w-0 text-center whitespace-nowrap"
-                                  : "text-[13px]",
-                                isUrgent ? "text-red-700" : "text-slate-800/70",
-                                showCompleteToggle
-                                  ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
-                                  : "opacity-100 scale-100 translate-y-0"
-                              )}
-                              style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
-                              aria-label={remainingAriaLabel}
-                              aria-hidden={showCompleteToggle}
-                            >
-                              {remainingLabel}
+                                  <span
+                                    className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                                    style={
+                                      showCountdownOnly
+                                        ? { width: "100%", height: "100%" }
+                                        : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
+                                    }
+                                  >
+                                    <svg
+                                      className="flex-none"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="3"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
+                                      aria-hidden="true"
+                                    >
+                                      <path d="M5 12.5l4.2 4.2L19 7" />
+                                    </svg>
+                                  </span>
+                                </button>
+                              ) : null}
+                              <div
+                                className={clsx(
+                                  "leading-none font-mono tabular-nums font-medium",
+                                  "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                                  showCountdownOnly
+                                    ? "w-full min-w-0 text-center whitespace-nowrap"
+                                    : "text-[13px]",
+                                  isUrgent ? "text-red-700" : "text-slate-800/70",
+                                  hideCountdownForCompleteToggle
+                                    ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
+                                    : "opacity-100 scale-100 translate-y-0"
+                                )}
+                                style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
+                                aria-label={remainingAriaLabel}
+                                aria-hidden={hideCountdownForCompleteToggle}
+                              >
+                                {remainingLabel}
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </div>
+                        {placeCompleteToggleOutside ? (
+                          <button
+                            data-event-bar
+                            type="button"
+                            className={clsx(
+                              "absolute top-1/2 z-20 inline-flex items-center justify-center -translate-y-1/2",
+                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                              showCompleteToggle
+                                ? "opacity-100 scale-100 pointer-events-auto"
+                                : "opacity-0 scale-95 pointer-events-none"
+                            )}
+                            style={{
+                              left: outsideCompleteToggleLeft,
+                              width: `${completeChipSize}px`,
+                              height: `${completeChipSize}px`,
+                            }}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              if (!canComplete) return;
+                              toggleTimelineEventCompleted(e);
+                            }}
+                            aria-label={`标记${accessibleTitle}为已完成`}
+                            title="标记为已完成"
+                            aria-hidden={!showCompleteToggle}
+                            tabIndex={showCompleteToggle ? 0 : -1}
+                            disabled={!showCompleteToggle}
+                          >
+                            <span
+                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                              style={{ width: "100%", height: "100%" }}
+                            >
+                              <svg
+                                className="flex-none"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
+                                aria-hidden="true"
+                              >
+                                <path d="M5 12.5l4.2 4.2L19 7" />
+                              </svg>
+                            </span>
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   );
