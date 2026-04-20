@@ -1705,6 +1705,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
   const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
+  const showRecurringSettingsPanel = !isHome && isRecurringSettingsOpen;
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
@@ -2880,8 +2881,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               </button>
             ) : null}
           </div>
-          {!isHome && isRecurringSettingsOpen ? (
-            <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]/40">
+          {showRecurringSettingsPanel ? (
+            <div className="px-4 py-3 bg-[color:var(--wash)]/40">
               <form
                 className="grid gap-3"
                 onSubmit={(e) => {
@@ -3177,29 +3178,31 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               </div>
             </div>
           ) : null}
-          <div className="divide-y divide-[color:var(--line)]">
-            {activeRecurringEvents.length > 0 ? (
-              activeRecurringEvents.map((event, idx) => (
-                <EventListRow
-                  key={event.eventKey}
-                  event={event}
-                  checked={false}
-                  isSelected={selectedKey === event.eventKey}
-                  now={now}
-                  showGameMeta={showGameMeta}
-                  showBottomDivider={idx === activeRecurringEvents.length - 1}
-                  onSelect={() => {
-                    toggleSelectedFromList(event.eventKey);
-                  }}
-                  onToggleCompleted={() => toggleRecurringCompleted(event)}
-                />
-              ))
-            ) : (
-              <div className="p-4 text-xs text-[color:var(--muted)]">
-                {isHome ? "未来 7 天内暂无未完成循环活动" : "暂无未完成循环活动"}
-              </div>
-            )}
-          </div>
+          {!showRecurringSettingsPanel ? (
+            <div className="divide-y divide-[color:var(--line)]">
+              {activeRecurringEvents.length > 0 ? (
+                activeRecurringEvents.map((event, idx) => (
+                  <EventListRow
+                    key={event.eventKey}
+                    event={event}
+                    checked={false}
+                    isSelected={selectedKey === event.eventKey}
+                    now={now}
+                    showGameMeta={showGameMeta}
+                    showBottomDivider={idx === activeRecurringEvents.length - 1}
+                    onSelect={() => {
+                      toggleSelectedFromList(event.eventKey);
+                    }}
+                    onToggleCompleted={() => toggleRecurringCompleted(event)}
+                  />
+                ))
+              ) : (
+                <div className="p-4 text-xs text-[color:var(--muted)]">
+                  {isHome ? "未来 7 天内暂无未完成循环活动" : "暂无未完成循环活动"}
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
 
