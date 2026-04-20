@@ -2056,7 +2056,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return sortedUpstream.filter((e) => {
       if (!showGacha && e.is_gacha) return false;
       if (showGachaTrialsOnly && e.is_gacha && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
-      if (isHome && e._hasRelativeEnd) return e._s.valueOf() <= homeEndMs;
+      if (isHome && e._hasRelativeEnd) return false;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
       if (showNotStarted) return true;
