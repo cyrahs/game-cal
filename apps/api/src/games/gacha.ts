@@ -75,14 +75,18 @@ export function classifyGachaEvent(game: GameId, title: string, content?: string
 
   switch (game) {
     case "endfield": {
+      const hasWeaponTitle = normalizedTitle.includes("申领");
+      const hasCharacterTitle =
+        normalizedTitle.includes("特许寻访") || normalizedTitle.includes("特殊寻访");
+      if (hasWeaponTitle && !hasCharacterTitle) return "weapon";
+
       const hasWeapon =
-        normalizedTitle.includes("申领") ||
+        hasWeaponTitle ||
         (normalizedText.includes("申领") && hasAny(normalizedText, ["武器", "获取概率提升"])) ||
         /武器[^。；;]*概率提升/.test(normalizedText);
       const hasCharacter =
-        normalizedTitle.includes("特许寻访") ||
-        normalizedTitle.includes("特殊寻访") ||
-        hasAny(normalizedText, ["特许寻访", "特殊寻访"]) ||
+        hasCharacterTitle ||
+        (!hasWeaponTitle && hasAny(normalizedText, ["特许寻访", "特殊寻访"])) ||
         (normalizedText.includes("作战演练") && normalizedText.includes("寻访"));
       return mergeGachaKind(hasCharacter, hasWeapon);
     }
