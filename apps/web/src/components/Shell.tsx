@@ -485,6 +485,44 @@ export default function Shell() {
           </div>
 
           <nav className="flex max-w-full flex-nowrap items-center gap-1.5 md:gap-2">
+            <NavLink
+              to="/"
+              aria-label="首页"
+              title="首页"
+              className={({ isActive }) =>
+                clsx(
+                  "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                  isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
+                )
+              }
+              end
+            >
+              <span
+                className={clsx(
+                  "relative inline-flex h-full w-full min-w-0 items-center justify-center rounded-xl bg-[#282c34] text-[#abb2bf]",
+                  "ring-1 ring-transparent transition",
+                  "hover:ring-[color:var(--ring)]",
+                  "active:scale-[0.98]"
+                )}
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path
+                    d="M3 10.75 12 3l9 7.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                  <path
+                    d="M5.5 9.5V20h4.75v-5.75h3.5V20h4.75V9.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                </svg>
+              </span>
+            </NavLink>
+
             {orderedVisibleGames.map((g) => (
               <NavLink
                 key={g.to}
@@ -522,44 +560,6 @@ export default function Shell() {
                 </span>
               </NavLink>
             ))}
-
-            <NavLink
-              to="/"
-              aria-label="首页"
-              title="首页"
-              className={({ isActive }) =>
-                clsx(
-                  "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
-                )
-              }
-              end
-            >
-              <span
-                className={clsx(
-                  "relative inline-flex h-full w-full min-w-0 items-center justify-center rounded-xl bg-[color:var(--card)] backdrop-blur-xl",
-                  "ring-1 ring-transparent transition",
-                  "hover:ring-[color:var(--ring)]",
-                  "active:scale-[0.98]"
-                )}
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                  <path
-                    d="M3 10.75 12 3l9 7.75"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                  />
-                  <path
-                    d="M5.5 9.5V20h4.75v-5.75h3.5V20h4.75V9.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                  />
-                </svg>
-              </span>
-            </NavLink>
 
             <div className="relative min-w-0 w-9" ref={settingsRef}>
               <button
