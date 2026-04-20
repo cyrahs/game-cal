@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { createContext, useContext } from "react";
 
 export type Theme = "light" | "dark";
+export type ThemePreference = Theme | "system";
 
 const ThemeContext = createContext<Theme>("light");
 

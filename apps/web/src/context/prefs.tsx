@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { GameId } from "../api/types";
 import defaultRecurringSettingsTemplate from "../data/default-recurring-events.json";
-import { ThemeProvider, type Theme } from "./theme";
+import { ThemeProvider, type Theme, type ThemePreference } from "./theme";
 import { decryptJson, encryptJson } from "../sync/crypto";
 
 const SYNC_UUID_KEY = "gc.sync.uuid";
@@ -254,7 +254,7 @@ type SyncPrefs = Omit<PrefsState, "theme">;
 export type PrefsState = {
   v: 1;
   updatedAt: number;
-  theme: Theme;
+  theme: ThemePreference;
   gameOrderIds: GameId[];
   visibleGameIds: GameId[];
   hiddenGameIds: GameId[];
@@ -281,7 +281,7 @@ type SyncState = {
 
 export type PrefsContextValue = {
   prefs: PrefsState;
-  setTheme: (t: Theme) => void;
+  setTheme: (t: ThemePreference) => void;
   setGameOrderIds: (ids: GameId[]) => void;
   setVisibleGameIds: (ids: GameId[]) => void;
   setShowNotStarted: (v: boolean) => void;
@@ -393,13 +393,17 @@ function getSystemTheme(): Theme {
   return prefersDark ? "dark" : "light";
 }
 
-function getStoredTheme(): Theme | null {
+function getStoredTheme(): ThemePreference | null {
   const stored = safeLsGet(THEME_KEY);
-  return stored === "dark" || stored === "light" ? stored : null;
+  return stored === "dark" || stored === "light" || stored === "system" ? stored : null;
 }
 
-function getInitialTheme(): Theme {
-  return getStoredTheme() ?? getSystemTheme();
+function getInitialTheme(): ThemePreference {
+  return getStoredTheme() ?? "system";
+}
+
+function resolveTheme(theme: ThemePreference, systemTheme: Theme): Theme {
+  return theme === "system" ? systemTheme : theme;
 }
 
 function makeDefaultPrefs(): PrefsState {
@@ -433,7 +437,7 @@ function coercePrefs(input: unknown): PrefsState {
   const obj = input as any;
 
   // Theme is local-only and should never be restored from synced payloads.
-  const theme: Theme = base.theme;
+  const theme: ThemePreference = base.theme;
 
   const hiddenSet = new Set<GameId>();
   if (Array.isArray(obj.hiddenGameIds)) {
@@ -612,6 +616,8 @@ export function PrefsProvider(props: { children: ReactNode }) {
   });
 
   const [prefs, setPrefs] = useState<PrefsState>(() => makeDefaultPrefs());
+  const [systemTheme, setSystemTheme] = useState<Theme>(() => getSystemTheme());
+  const effectiveTheme = resolveTheme(prefs.theme, systemTheme);
 
   const prefsRef = useRef(prefs);
   useEffect(() => {
@@ -632,8 +638,23 @@ export function PrefsProvider(props: { children: ReactNode }) {
   const lastActiveAutoPullAtRef = useRef<number>(0);
 
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", prefs.theme === "dark");
-  }, [prefs.theme]);
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemTheme = () => setSystemTheme(query.matches ? "dark" : "light");
+    updateSystemTheme();
+
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", updateSystemTheme);
+      return () => query.removeEventListener("change", updateSystemTheme);
+    }
+
+    query.addListener(updateSystemTheme);
+    return () => query.removeListener(updateSystemTheme);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", effectiveTheme === "dark");
+  }, [effectiveTheme]);
 
   useEffect(() => {
     safeLsSet(SYNC_UUID_KEY, uuid);
@@ -953,7 +974,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
     };
   }, [prefs.updatedAt, push]);
 
-  const setTheme = useCallback((t: Theme) => {
+  const setTheme = useCallback((t: ThemePreference) => {
     safeLsSet(THEME_KEY, t);
     setPrefs((prev) => (prev.theme === t ? prev : { ...prev, theme: t }));
   }, []);
@@ -1287,7 +1308,7 @@ export function PrefsProvider(props: { children: ReactNode }) {
 
   return (
     <PrefsContext.Provider value={value}>
-      <ThemeProvider theme={prefs.theme}>{props.children}</ThemeProvider>
+      <ThemeProvider theme={effectiveTheme}>{props.children}</ThemeProvider>
     </PrefsContext.Provider>
   );
 }

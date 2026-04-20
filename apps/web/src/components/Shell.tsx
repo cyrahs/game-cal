@@ -11,6 +11,7 @@ import endfieldIcon from "../assets/endfield.png";
 import snowbreakIcon from "../assets/snowbreak.png";
 import type { CalendarEvent, GameId } from "../api/types";
 import { usePrefs } from "../context/prefs";
+import type { ThemePreference } from "../context/theme";
 import { useEvents } from "../hooks/useEvents";
 import {
   computeRecurringWindow,
@@ -78,6 +79,16 @@ const DATA_SOURCE_BY_GAME: Record<GameId, string> = {
   snowbreak: "西山居公告 API",
   endfield: "鹰角公告 API",
 };
+const THEME_OPTIONS: Array<{ id: ThemePreference; label: string }> = [
+  { id: "light", label: "浅色" },
+  { id: "dark", label: "深色" },
+  { id: "system", label: "跟随设备" },
+];
+const SETTINGS_TABS: Array<{ id: SettingsTabId; label: string }> = [
+  { id: "games", label: "游戏" },
+  { id: "sync", label: "同步" },
+  { id: "config", label: "配置" },
+];
 
 function parseGameId(value: string): GameId | null {
   return allGameIds.includes(value as GameId) ? (value as GameId) : null;
@@ -128,7 +139,11 @@ export default function Shell() {
   const wwEvents = useEvents("ww");
   const snowbreakEvents = useEvents("snowbreak");
   const endfieldEvents = useEvents("endfield");
-  const theme = prefs.theme;
+  const themePreference = prefs.theme;
+  const themePreferenceIndex = Math.max(
+    0,
+    THEME_OPTIONS.findIndex((option) => option.id === themePreference)
+  );
   const visibleGameIds = prefs.visibleGameIds;
   const gameOrderIds = prefs.gameOrderIds;
   const showNotStarted = prefs.timeline.showNotStarted;
@@ -137,6 +152,10 @@ export default function Shell() {
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("games");
+  const activeSettingsTabIndex = Math.max(
+    0,
+    SETTINGS_TABS.findIndex((tab) => tab.id === activeSettingsTab)
+  );
   const settingsRef = useRef<HTMLDivElement | null>(null);
   const recurringImportInputRef = useRef<HTMLInputElement | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -503,36 +522,45 @@ export default function Shell() {
               title="首页"
               className={({ isActive }) =>
                 clsx(
-                  "glass-borderless min-w-0 w-9 aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                  "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
                   "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                   isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
                 )
               }
               end
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                <path
-                  d="M3 10.75 12 3l9 7.75"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                />
-                <path
-                  d="M5.5 9.5V20h4.75v-5.75h3.5V20h4.75V9.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                />
-              </svg>
+              <span
+                className={clsx(
+                  "relative inline-flex h-full w-full min-w-0 items-center justify-center rounded-xl bg-[color:var(--card)] backdrop-blur-xl",
+                  "ring-1 ring-transparent transition",
+                  "hover:ring-[color:var(--ring)]",
+                  "active:scale-[0.98]"
+                )}
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path
+                    d="M3 10.75 12 3l9 7.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                  <path
+                    d="M5.5 9.5V20h4.75v-5.75h3.5V20h4.75V9.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                  />
+                </svg>
+              </span>
             </NavLink>
 
             <div className="relative min-w-0 w-9" ref={settingsRef}>
               <button
                 type="button"
                 className={clsx(
-                  "glass-borderless w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
+                  "glass w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
                   "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isSettingsOpen && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
+                  "hover:border-[color:var(--ink)]"
                 )}
                 onClick={() => setIsSettingsOpen((v) => !v)}
                 aria-label="设置"
@@ -564,49 +592,40 @@ export default function Shell() {
                   )}
                 >
                   <div className="p-3">
-                    <div className="grid grid-cols-3 gap-1 rounded-xl bg-[color:var(--wash)] p-1" role="tablist" aria-label="设置标签页">
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeSettingsTab === "games"}
+                    <div
+                      className="relative grid grid-cols-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--tile)] p-1 shadow-inner"
+                      aria-label="设置分组"
+                    >
+                      <span
+                        aria-hidden="true"
                         className={clsx(
-                          "rounded-lg px-2 py-1.5 text-xs transition",
-                          activeSettingsTab === "games"
-                            ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-sm"
-                            : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                          "pointer-events-none absolute bottom-1 left-1 top-1 rounded-lg",
+                          "bg-[color:var(--accent)] shadow-[0_6px_16px_rgba(14,165,233,0.30)]",
+                          "ring-1 ring-white/45 dark:ring-sky-200/25",
+                          "transition-transform duration-200 ease-out"
                         )}
-                        onClick={() => setActiveSettingsTab("games")}
-                      >
-                        游戏
-                      </button>
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeSettingsTab === "sync"}
-                        className={clsx(
-                          "rounded-lg px-2 py-1.5 text-xs transition",
-                          activeSettingsTab === "sync"
-                            ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-sm"
-                            : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-                        )}
-                        onClick={() => setActiveSettingsTab("sync")}
-                      >
-                        同步
-                      </button>
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeSettingsTab === "config"}
-                        className={clsx(
-                          "rounded-lg px-2 py-1.5 text-xs transition",
-                          activeSettingsTab === "config"
-                            ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-sm"
-                            : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-                        )}
-                        onClick={() => setActiveSettingsTab("config")}
-                      >
-                        配置
-                      </button>
+                        style={{
+                          width: "calc((100% - 0.5rem) / 3)",
+                          transform: `translateX(${activeSettingsTabIndex * 100}%)`,
+                        }}
+                      />
+                      {SETTINGS_TABS.map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          aria-pressed={activeSettingsTab === tab.id}
+                          className={clsx(
+                            "relative z-10 h-8 rounded-lg px-2 text-xs font-medium transition",
+                            "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                            activeSettingsTab === tab.id
+                              ? "text-white"
+                              : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                          )}
+                          onClick={() => setActiveSettingsTab(tab.id)}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
                     </div>
 
                     {activeSettingsTab === "games" ? (
@@ -861,16 +880,40 @@ export default function Shell() {
                       <>
                         <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
                           <div className="text-sm font-semibold">外观</div>
-                          <div className="mt-3 grid gap-2">
-                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
-                              <span className="text-xs text-[color:var(--ink)]">深色模式</span>
-                              <input
-                                type="checkbox"
-                                checked={theme === "dark"}
-                                onChange={(e) => setTheme(e.target.checked ? "dark" : "light")}
-                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
-                              />
-                            </label>
+                          <div
+                            className="relative mt-3 grid grid-cols-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--tile)] p-1 shadow-inner"
+                            aria-label="外观模式"
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={clsx(
+                                "pointer-events-none absolute bottom-1 left-1 top-1 rounded-lg",
+                                "bg-[color:var(--accent)] shadow-[0_6px_16px_rgba(14,165,233,0.30)]",
+                                "ring-1 ring-white/45 dark:ring-sky-200/25",
+                                "transition-transform duration-200 ease-out"
+                              )}
+                              style={{
+                                width: "calc((100% - 0.5rem) / 3)",
+                                transform: `translateX(${themePreferenceIndex * 100}%)`,
+                              }}
+                            />
+                            {THEME_OPTIONS.map((option) => (
+                              <button
+                                key={option.id}
+                                type="button"
+                                aria-pressed={themePreference === option.id}
+                                className={clsx(
+                                  "relative z-10 h-8 rounded-lg px-2 text-xs font-medium transition",
+                                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                                  themePreference === option.id
+                                    ? "text-white"
+                                    : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                                )}
+                                onClick={() => setTheme(option.id)}
+                              >
+                                {option.label}
+                              </button>
+                            ))}
                           </div>
                         </section>
 
