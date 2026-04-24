@@ -1292,6 +1292,11 @@ function normalizeAnnouncementHtml(html: string, theme: "light" | "dark"): strin
     img.setAttribute("referrerpolicy", "no-referrer");
   }
 
+  for (const anchor of Array.from(root.querySelectorAll("a[href]"))) {
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noreferrer noopener");
+  }
+
   if (theme !== "dark") return root.innerHTML;
 
   const candidates = root.querySelectorAll<HTMLElement>("[style],[color],[bgcolor]");
