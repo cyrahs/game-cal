@@ -11,7 +11,7 @@ In production the API can serve the built SPA from `apps/web/dist` so UI + API s
 ## Quick Start (Local Dev)
 
 Prereqs:
-- Node.js 20.x recommended (Docker uses `node:20-alpine`)
+- Node.js 25.x recommended (Docker uses `node:25-alpine`)
 - pnpm via Corepack (repo pins `pnpm@9.9.0`)
 
 Commands:
@@ -35,7 +35,7 @@ Default dev URLs:
 
 - Docker image builds web + api, then runs the API which serves the SPA if present.
 - `docker compose up -d --build` builds locally.
-- CI builds/pushes multi-arch images to GHCR via `.github/workflows/docker-build.yml`.
+- No Docker image CI workflow is currently present in this repo.
 
 Container defaults:
 - `PORT=8787`

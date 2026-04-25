@@ -1,5 +1,5 @@
 # Build stage for dependencies
-FROM node:20-alpine AS deps
+FROM node:25-alpine AS deps
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9.9.0 --activate
@@ -16,7 +16,7 @@ RUN pnpm install --frozen-lockfile
 
 
 # Build stage for web
-FROM node:20-alpine AS web-builder
+FROM node:25-alpine AS web-builder
 
 RUN corepack enable && corepack prepare pnpm@9.9.0 --activate
 
@@ -36,7 +36,7 @@ RUN pnpm build
 
 
 # Build stage for api
-FROM node:20-alpine AS api-builder
+FROM node:25-alpine AS api-builder
 
 RUN corepack enable && corepack prepare pnpm@9.9.0 --activate
 
@@ -56,7 +56,7 @@ RUN pnpm build
 
 
 # Production stage
-FROM node:20-alpine AS production
+FROM node:25-alpine AS production
 
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init
