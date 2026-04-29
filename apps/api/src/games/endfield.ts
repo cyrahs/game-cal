@@ -63,6 +63,7 @@ function normalizeTitleKey(input: string | undefined): string {
   return normalizeTitle(input)
     .toLowerCase()
     .replace(/\s+/g, "")
+    .replace(/[·・•‧．.]/g, "")
     .replace(/[「」『』“”"'’‘]/g, "")
     .replace(
       /(?:常驻活动|签到活动|引入活动|供给活动|减耗活动|趣味活动|挑战活动|限时挑战活动|叙事活动|内容更新|开放)$/u,
