@@ -209,6 +209,24 @@ type WwParsedTimeRange = {
 
 const WW_TIME_SECTION_LABELS = ["活动时间", "唤取时间", "开放时间", "领取时间", "开启时间"];
 const WW_MAINTENANCE_TIME_SECTION_LABELS = ["更新维护时间", "维护时间"];
+const WW_TIME_SECTION_BOUNDARY_LABELS = [
+  "参与条件",
+  "活动介绍",
+  "活动奖励",
+  "活动说明",
+  "活动规则",
+  "活动内容",
+  "活动任务",
+  "活动商店",
+  "开放条件",
+  "解锁条件",
+  "注意事项",
+  "玩法说明",
+  "任务说明",
+  "奖励说明",
+  "概率说明",
+  "活动内数据统计",
+];
 const WW_DATE_TIME_PATTERN =
   String.raw`(?:\d{4}\s*[\/.\-年]\s*\d{1,2}\s*[\/.\-月]\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?|\d{1,2}\s*月\s*\d{1,2}\s*日?\s*\d{1,2}\s*[:：]\s*\d{2}(?::\s*\d{2})?)`;
 const WW_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -223,16 +241,34 @@ const WW_SINGLE_START_TIME_RE = new RegExp(
 );
 
 function extractWwTimeSection(text: string): string {
-  const starts = WW_TIME_SECTION_LABELS.map((label) => text.indexOf(label))
-    .filter((idx) => idx >= 0)
-    .sort((a, b) => a - b);
+  const starts = WW_TIME_SECTION_LABELS.flatMap((label) => {
+    const idx = text.indexOf(label);
+    return idx >= 0 ? [{ idx, label }] : [];
+  }).sort((a, b) => a.idx - b.idx);
 
-  const start = starts[0];
-  if (start == null) return "";
+  const first = starts[0];
+  if (!first) return "";
 
   // The time window is normally immediately after the section label. Keeping
   // this narrow avoids picking later challenge-cycle dates from the body text.
-  return text.slice(start, start + 260);
+  const maxEnd = first.idx + 260;
+  let end = maxEnd;
+  let boundarySearchStart = first.idx + first.label.length;
+  if (text[boundarySearchStart] === "✦") boundarySearchStart += 1;
+
+  const decoratedBoundary = /\s✦[^✦]{1,32}✦/u.exec(
+    text.slice(boundarySearchStart, maxEnd)
+  );
+  if (decoratedBoundary?.index != null) {
+    end = Math.min(end, boundarySearchStart + decoratedBoundary.index);
+  }
+
+  for (const label of WW_TIME_SECTION_BOUNDARY_LABELS) {
+    const idx = text.indexOf(label, boundarySearchStart);
+    if (idx >= 0) end = Math.min(end, idx);
+  }
+
+  return text.slice(first.idx, end);
 }
 
 function normalizeWwDateTimeCandidate(
