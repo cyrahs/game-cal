@@ -8,6 +8,9 @@ const GENSHIN_LIST_API =
 const STARRAIL_LIST_API =
   "https://hkrpg-api-static.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnList?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn&platform=pc&region=prod_gf_cn&level=30&uid=11111111";
 
+const STARRAIL_CONTENT_API =
+  "https://hkrpg-api-static.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnContent?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn&platform=pc&region=prod_gf_cn&level=30&uid=11111111";
+
 const WW_NOTICE_API =
   "https://aki-gm-resources-back.aki-game.com/gamenotice/G152/76402e5b20be2c39f095a152090afddc/zh-Hans.json";
 
@@ -400,21 +403,70 @@ function getStarRailSelectedItems(categories) {
   return [...byKey.values()];
 }
 
+function collectStarRailContentItems(node, out) {
+  if (!isRecord(node)) return;
+
+  if (typeof node.ann_id === "number") {
+    const item = {
+      ann_id: node.ann_id,
+      title: typeof node.title === "string" ? node.title : "",
+      subtitle: typeof node.subtitle === "string" ? node.subtitle : "",
+      content: typeof node.content === "string" ? node.content : "",
+    };
+    if (item.title || item.subtitle || item.content) {
+      const list = out.get(item.ann_id) ?? [];
+      list.push(item);
+      out.set(item.ann_id, list);
+    }
+  }
+
+  for (const item of ensureArray(node.list)) collectStarRailContentItems(item, out);
+  for (const item of ensureArray(node.type_list)) collectStarRailContentItems(item, out);
+  for (const item of ensureArray(node.pic_list)) collectStarRailContentItems(item, out);
+}
+
+function pickStarRailContentItem(contentById, item) {
+  const items = contentById.get(item.ann_id) ?? [];
+  if (items.length === 0) return null;
+  const title = normalizeWhitespace(item.title || item.subtitle || "");
+  const subtitle = normalizeWhitespace(item.subtitle || "");
+  return (
+    items.find((contentItem) => {
+      const contentTitle = normalizeWhitespace(contentItem.title || contentItem.subtitle || "");
+      const contentSubtitle = normalizeWhitespace(contentItem.subtitle || "");
+      return contentTitle === title || (subtitle && contentSubtitle === subtitle);
+    }) ??
+    items[0] ??
+    null
+  );
+}
+
 async function fetchStarRailRawNotices() {
-  const json = await requestJson(STARRAIL_LIST_API);
+  const contentUrl = process.env.STARRAIL_CONTENT_API_URL?.trim() || STARRAIL_CONTENT_API;
+  const [json, contentJson] = await Promise.all([
+    requestJson(STARRAIL_LIST_API),
+    requestJson(contentUrl).catch(() => null),
+  ]);
   const categories = [];
   collectStarRailCategories(json?.data ?? null, categories);
   const items = getStarRailSelectedItems(categories);
+  const contentById = new Map();
+  collectStarRailContentItems(contentJson?.data ?? null, contentById);
 
-  return items.map((item) => ({
-    ann_id: item.ann_id,
-    title: normalizeWhitespace(item.title || item.subtitle || ""),
-    subtitle: normalizeWhitespace(item.subtitle || ""),
-    start_time: String(item.start_time ?? ""),
-    end_time: String(item.end_time ?? ""),
-    type: item.type,
-    type_label: item.type_label,
-  }));
+  return items.map((item) => {
+    const content = pickStarRailContentItem(contentById, item)?.content ?? "";
+    return {
+      ann_id: item.ann_id,
+      title: normalizeWhitespace(item.title || item.subtitle || ""),
+      subtitle: normalizeWhitespace(item.subtitle || ""),
+      start_time: String(item.start_time ?? ""),
+      end_time: String(item.end_time ?? ""),
+      type: item.type,
+      type_label: item.type_label,
+      content_time_candidates: extractTimeCandidates(content),
+      snippet: stripHtml(content).slice(0, 220),
+    };
+  });
 }
 
 async function fetchWwRawNotices() {
@@ -645,6 +697,8 @@ async function fetchRawNotices(game) {
 
 function getDatasetNotes(game) {
   switch (game) {
+    case "starrail":
+      return "Star Rail list metadata can disagree with the full announcement body. When content_time_candidates/snippet are present and clearly match the event window, prefer the full announcement body over list start_time/end_time for wrong_time_window judgments.";
     case "endfield":
       return "Endfield API events may include events parsed from version update notices and not only standalone event bulletins. Do not flag Endfield items merely because they lack a standalone raw bulletin match.";
     case "ww":

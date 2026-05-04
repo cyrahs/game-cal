@@ -40,6 +40,12 @@ type EndfieldVersionScheduleEntry = {
   endNaive: string | null;
 };
 
+type EndfieldParsedWindow = {
+  start: string | null;
+  end: string | null;
+  endText?: string | null;
+};
+
 const ENDFIELD_WEBVIEW_DEFAULT =
   "https://ef-webview.hypergryph.com/page/game_bulletin?target=IOS";
 
@@ -47,6 +53,9 @@ const ENDFIELD_AGGREGATE_API_DEFAULT =
   "https://game-hub.hypergryph.com/bulletin/v2/aggregate";
 const ENDFIELD_SOURCE_TZ_OFFSET = "+08:00";
 const ENDFIELD_MAINTENANCE_AFTER_RESET_MS = 2 * 60 * 60 * 1000;
+const ENDFIELD_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
+const ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN = `${ENDFIELD_DATE_TIME_PATTERN}(?:\\s*[（(][^）)]{0,32}[）)])?`;
+const ENDFIELD_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
 
 // Fallback: known working code observed from the webview bundle.
 // This value may change upstream, so we try to auto-discover it first.
@@ -103,7 +112,7 @@ function extractFirstImgSrc(html: string | undefined): string | undefined {
 }
 
 function normalizeDateTimeCandidate(input: string | undefined): string | null {
-  const s = (input ?? "").trim();
+  const s = (input ?? "").replace(/\s*[（(][^）)]{0,32}[）)]\s*$/, "").trim();
   if (!s) return null;
 
   const m =
@@ -124,16 +133,25 @@ function normalizeDateTimeCandidate(input: string | undefined): string | null {
     : `${yyyy}-${mo}-${dd} ${hh}:${mi}`;
 }
 
-function extractTimeRangeFromHtml(
-  html: string
-): { start: string | null; end: string | null } {
-  const text = stripHtml(html);
+function extractRelativeEndText(input: string): string | null {
+  const text = normalizeTitle(input);
+  if (!text) return null;
+
+  const maintenanceMatch = /(?:下次)?版本更新维护前/.exec(text);
+  if (maintenanceMatch?.[0]) return maintenanceMatch[0];
+
+  const match = /(?:，|,)?\s*(于[^，,。]*?后结束(?:（[^）]*）)?)/.exec(text);
+  return match?.[1]?.trim() || null;
+}
+
+function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
+  const text = normalizeTitle(input);
+  if (!text) return { start: null, end: null };
 
   // Prefer a clear "start - end" (or "~", "至") range.
-  const range =
-    /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
-      text
-    );
+  const range = new RegExp(
+    `(${ENDFIELD_DATE_TIME_PATTERN})\\s*(?:[（(][^）)]{0,32}[）)])?\\s*${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*(${ENDFIELD_DATE_TIME_PATTERN})`
+  ).exec(text);
   if (range) {
     return {
       start: normalizeDateTimeCandidate(range[1]),
@@ -141,27 +159,40 @@ function extractTimeRangeFromHtml(
     };
   }
 
+  const relativeRange = new RegExp(
+    `(${ENDFIELD_DATE_TIME_PATTERN})\\s*(?:[（(][^）)]{0,32}[）)])?\\s*${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*([^。；;]+)`
+  ).exec(text);
+  const relativeEndText = extractRelativeEndText(relativeRange?.[2] ?? "");
+  if (relativeRange && relativeEndText) {
+    return {
+      start: normalizeDateTimeCandidate(relativeRange[1]),
+      end: null,
+      endText: relativeEndText,
+    };
+  }
+
   // Sometimes the start is fuzzy (e.g. "公测开启") but the end is explicit.
   // In that case we still keep the end and let the caller fall back to startAt.
-  const endFromRangeWithFuzzyStart =
-    /(?:开放时间|活动时间|开启时间|开始时间)[^0-9]{0,80}(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
-      text
-    );
+  const endFromRangeWithFuzzyStart = new RegExp(
+    `(?:开放时间|活动时间|开启时间|开始时间)[^0-9]{0,80}${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*(${ENDFIELD_DATE_TIME_PATTERN})`
+  ).exec(text);
 
   // Fallback: try to find explicit start/end markers.
-  const startKw =
-    /(?:开放时间|活动时间|开启时间|开始时间)\s*(?:[:：])?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
-      text
-    );
-  const endKw =
-    /(?:结束时间|截止时间|截至|截止)\s*(?:[:：])?\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/.exec(
-      text
-    );
+  const startKw = new RegExp(
+    `(?:开放时间|活动时间|开启时间|开始时间)\\s*(?:[:：])?\\s*(${ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN})`
+  ).exec(text);
+  const endKw = new RegExp(
+    `(?:结束时间|截止时间|截至|截止)\\s*(?:[:：])?\\s*(${ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN})`
+  ).exec(text);
 
   return {
     start: normalizeDateTimeCandidate(startKw?.[1]),
     end: normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]),
   };
+}
+
+function extractTimeRangeFromHtml(html: string): EndfieldParsedWindow {
+  return parseEndfieldWindowText(stripHtml(html));
 }
 
 function tokenizeHtmlLines(input: string | undefined): string[] {
@@ -179,8 +210,10 @@ function tokenizeHtmlLines(input: string | undefined): string[] {
 
 function parseExplicitDateRanges(input: string): Array<{ start: string; end: string }> {
   const out: Array<{ start: string; end: string }> = [];
-  const re =
-    /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g;
+  const re = new RegExp(
+    `(${ENDFIELD_DATE_TIME_PATTERN})\\s*(?:[（(][^）)]{0,32}[）)])?\\s*${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*(${ENDFIELD_DATE_TIME_PATTERN})`,
+    "g"
+  );
 
   for (const match of input.matchAll(re)) {
     const start = normalizeDateTimeCandidate(match[1]);
@@ -404,18 +437,6 @@ function getEndfieldVersionScheduleFamily(title: string): string | null {
   return null;
 }
 
-function hasUnresolvedRelativeEnd(input: string): boolean {
-  return /后结束/.test(normalizeTitle(input));
-}
-
-function extractRelativeEndText(input: string): string | null {
-  const text = normalizeTitle(input);
-  if (!hasUnresolvedRelativeEnd(text)) return null;
-
-  const match = /(?:，|,)?\s*(于[^，,。]*?后结束(?:（[^）]*）)?)/.exec(text);
-  return match?.[1]?.trim() || text;
-}
-
 function parseEndfieldVersionScheduleEntries(
   item: HypergryphAggregateItem,
   versionStartNaive: string | null
@@ -477,15 +498,17 @@ function buildEndfieldEvent(
     endTimeText?: string;
     banner?: string;
     content?: string;
+    classificationContent?: string;
   }
 ): CalendarEvent | null {
   const startIso = toIsoWithSourceOffset(opts.startNaive, ENDFIELD_SOURCE_TZ_OFFSET);
   const sMs = Date.parse(startIso);
   if (!Number.isFinite(sMs)) return null;
+  const classificationContent = opts.classificationContent ?? opts.content;
 
   const relativeEndText = opts.endTimeText?.trim();
   if (relativeEndText && !opts.endNaive) {
-    const gachaKind = classifyGachaEvent("endfield", opts.title, opts.content);
+    const gachaKind = classifyGachaEvent("endfield", opts.title, classificationContent);
     const isGacha = isGachaEventTitle("endfield", opts.title) || gachaKind !== "other";
     return {
       id: opts.id,
@@ -507,7 +530,7 @@ function buildEndfieldEvent(
   const eMs = Date.parse(endIso);
   if (!Number.isFinite(eMs) || eMs <= sMs) return null;
 
-  const gachaKind = classifyGachaEvent("endfield", opts.title, opts.content);
+  const gachaKind = classifyGachaEvent("endfield", opts.title, classificationContent);
   const isGacha = isGachaEventTitle("endfield", opts.title) || gachaKind !== "other";
   return {
     id: opts.id,
@@ -652,6 +675,55 @@ function inferEndfieldMissingWindow(
     : null;
 }
 
+function extractEndfieldStandaloneSectionTitle(line: string): string | null {
+  const section = /^▼\/\/(.+)$/.exec(line)?.[1];
+  if (!section) return null;
+
+  const quoted = /^「([^」]+)」/.exec(normalizeTitle(section));
+  return quoted?.[1] ? normalizeTitle(quoted[1]) : null;
+}
+
+function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEvent[] {
+  const html = item.data?.html;
+  if (!html) return [];
+
+  const lines = tokenizeHtmlLines(html);
+  const out: CalendarEvent[] = [];
+  const banner = extractFirstImgSrc(html);
+  let currentTitle: string | null = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    const sectionTitle = extractEndfieldStandaloneSectionTitle(line);
+    if (sectionTitle) {
+      currentTitle = sectionTitle;
+      continue;
+    }
+
+    if (!currentTitle) continue;
+    if (!/^■\s*活动时间(?:\s*[:：]\s*.*)?$/.test(line)) continue;
+
+    const inlineTimeText = line.replace(/^■\s*活动时间\s*[:：]?\s*/, "").trim();
+    const timeText = inlineTimeText || lines[i + 1] || "";
+    const window = parseEndfieldWindowText(timeText);
+    if (!window.start) continue;
+
+    const event = buildEndfieldEvent({
+      id: `${item.cid ?? "event"}:${normalizeTitleKey(currentTitle)}:${window.start}:${window.end ?? window.endText ?? ""}`,
+      title: currentTitle,
+      startNaive: window.start,
+      endNaive: window.end,
+      endTimeText: window.endText ?? undefined,
+      banner,
+      content: html,
+      classificationContent: "",
+    });
+    if (event) out.push(event);
+  }
+
+  return out;
+}
+
 function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
   const merged = new Map<string, CalendarEvent>();
   const aliases = new Map<string, string>();
@@ -770,13 +842,16 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
       const html = it.data?.html;
       if (!html) return [];
 
-      const { start, end } = extractTimeRangeFromHtml(html);
+      const sectionEvents = parseStandaloneSectionEvents(it);
+      if (sectionEvents.length > 0) return sectionEvents;
+
+      const { start, end, endText } = extractTimeRangeFromHtml(html);
       const startNaive = resolveEndfieldStartNaive(it, start, html, versionStartNaive);
       if (!startNaive) return [];
 
       const title = normalizeTitle(it.title) || it.cid || "活动";
       const inferredWindow =
-        end == null
+        end == null && !endText
           ? inferEndfieldMissingWindow(it, {
               title,
               versionScheduleEntries,
@@ -784,7 +859,8 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
           : null;
       const eventStartNaive = inferredWindow?.startNaive ?? startNaive;
       const endNaive = end ?? inferredWindow?.endNaive ?? null;
-      if (!endNaive && !inferredWindow?.endTimeText) {
+      const eventEndTimeText = endText ?? inferredWindow?.endTimeText;
+      if (!endNaive && !eventEndTimeText) {
         // End time is missing with no usable relative wording -> treat as long-term and hide.
         return [];
       }
@@ -794,7 +870,7 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
         title,
         startNaive: eventStartNaive,
         endNaive,
-        endTimeText: inferredWindow?.endTimeText,
+        endTimeText: eventEndTimeText,
         banner: extractFirstImgSrc(html),
         content: html,
       });

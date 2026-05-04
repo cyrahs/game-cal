@@ -45,6 +45,7 @@ const WW_IGNORE_TITLE_WORDS = [
 ];
 
 const WW_PROMOTION_TITLE_WORDS = [
+  "首充双倍",
   "限时上架",
   "折扣上架",
   "商城礼包",
@@ -165,7 +166,11 @@ function shouldIgnoreWwItem(
   opts: { title: string }
 ): boolean {
   const category = parseIntLike(item.category);
-  if (category == null || !WW_INCLUDED_CATEGORIES.has(category)) return true;
+  const tag = parseIntLike(item.tag);
+  const isIncludedCategory =
+    category != null &&
+    (WW_INCLUDED_CATEGORIES.has(category) || (category === 4 && tag === 10));
+  if (!isIncludedCategory) return true;
 
   const permanent = parseIntLike(item.permanent);
   if (permanent === 1) return true;
@@ -240,13 +245,45 @@ const WW_SINGLE_START_TIME_RE = new RegExp(
   `(?:活动时间|唤取时间|开放时间|领取时间|开启时间)\\s*[：:]?\\s*(${WW_DATE_TIME_PATTERN})`
 );
 
-function extractWwTimeSection(text: string): string {
-  const starts = WW_TIME_SECTION_LABELS.flatMap((label) => {
-    const idx = text.indexOf(label);
-    return idx >= 0 ? [{ idx, label }] : [];
-  }).sort((a, b) => a.idx - b.idx);
+function extractWwTitleTokens(title: string | undefined): string[] {
+  const normalized = normalizeTitle(title ?? "");
+  if (!normalized) return [];
 
-  const first = starts[0];
+  const out = new Set<string>();
+  for (const match of normalized.matchAll(/[\[【「]([^\]】」]+)[\]】」]/g)) {
+    const token = normalizeTitle(match[1] ?? "");
+    if (token.length >= 2) out.add(token);
+  }
+
+  return [...out];
+}
+
+function collectWwTimeSectionStarts(text: string): Array<{ idx: number; label: string }> {
+  const starts: Array<{ idx: number; label: string }> = [];
+  for (const label of WW_TIME_SECTION_LABELS) {
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+      const idx = text.indexOf(label, searchFrom);
+      if (idx < 0) break;
+      starts.push({ idx, label });
+      searchFrom = idx + label.length;
+    }
+  }
+
+  return starts.sort((a, b) => a.idx - b.idx);
+}
+
+function extractWwTimeSection(text: string, opts: { title?: string } = {}): string {
+  const starts = collectWwTimeSectionStarts(text);
+
+  const titleTokens = extractWwTitleTokens(opts.title);
+  const first =
+    titleTokens.length > 0
+      ? starts.find(({ idx }) => {
+          const prefix = text.slice(Math.max(0, idx - 36), idx);
+          return titleTokens.some((token) => prefix.includes(token));
+        }) ?? starts[0]
+      : starts[0];
   if (!first) return "";
 
   // The time window is normally immediately after the section label. Keeping
@@ -328,12 +365,12 @@ function parseExplicitWwTimeRange(
 
 function parseTimeRangeFromContent(
   content: string | undefined,
-  opts: { fallbackYear: number }
+  opts: { fallbackYear: number; title?: string }
 ): WwParsedTimeRange {
   const text = stripHtml(content);
   if (!text) return { startIso: null, endIso: null };
 
-  const section = extractWwTimeSection(text);
+  const section = extractWwTimeSection(text, { title: opts.title });
   if (!section) return { startIso: null, endIso: null };
 
   const explicit = parseExplicitWwTimeRange(section, opts);
@@ -435,6 +472,7 @@ function resolveWwEventTimeRange(
   const fallbackEndIso = msToIsoWithSourceOffset(opts.endMs);
   const parsed = parseTimeRangeFromContent(item.content, {
     fallbackYear: sourceYearFromMs(opts.startMs),
+    title: item.tabTitle,
   });
   const versionRelativeStartIso = resolveWwVersionRelativeStartIso(
     item.content,
