@@ -858,6 +858,22 @@ export function resolveGachaKind(
   return upstreamKind;
 }
 
+export function resolveGachaClassification(
+  gameId: GameId,
+  title: string,
+  content?: string,
+  upstreamIsGacha?: boolean,
+  upstreamKind?: GachaKind
+): { isGacha: boolean; gachaKind: GachaKind } {
+  if (upstreamIsGacha === false) {
+    return { isGacha: false, gachaKind: "other" };
+  }
+
+  const gachaKind = resolveGachaKind(gameId, title, content, upstreamKind);
+  const isGacha = upstreamIsGacha === true || isGachaEventTitle(gameId, title) || gachaKind !== "other";
+  return { isGacha, gachaKind };
+}
+
 function isCharacterTrialGachaKind(kind: GachaKind): boolean {
   return kind === "character" || kind === "mixed";
 }
@@ -2041,8 +2057,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         const relativeEnd = hasRelativeEnd(e);
         const ed = relativeEnd ? now.add(RELATIVE_END_LAYOUT_YEARS, "year") : parseDateTime(e.end_time);
         const title = normalizeEventTitle(e.title);
-        const gachaKind = resolveGachaKind(sourceGameId, title, e.content, e.gacha_kind);
-        const isGacha = Boolean(e.is_gacha) || isGachaEventTitle(sourceGameId, title) || gachaKind !== "other";
+        const { isGacha, gachaKind } = resolveGachaClassification(
+          sourceGameId,
+          title,
+          e.content,
+          e.is_gacha,
+          e.gacha_kind
+        );
         return {
           ...e,
           kind: "upstream" as const,

@@ -16,11 +16,10 @@ import { useEvents } from "../hooks/useEvents";
 import {
   computeRecurringWindow,
   isCharacterTrialGachaEvent,
-  isGachaEventTitle,
   isUrgentByRemainingMs,
   normalizeEventTitle,
   parseDateTime,
-  resolveGachaKind,
+  resolveGachaClassification,
 } from "./TimelineCalendar/TimelineCalendar";
 
 type GameLink = { id: GameId; to: string; name: string; icon: string };
@@ -323,8 +322,13 @@ export default function Shell() {
         const end = parseDateTime(event.end_time);
         if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
         const title = normalizeEventTitle(event.title);
-        const gachaKind = resolveGachaKind(gameId, title, event.content, event.gacha_kind);
-        const isGacha = Boolean(event.is_gacha) || isGachaEventTitle(gameId, title) || gachaKind !== "other";
+        const { isGacha } = resolveGachaClassification(
+          gameId,
+          title,
+          event.content,
+          event.is_gacha,
+          event.gacha_kind
+        );
         if (!showGacha && isGacha) continue;
         if (showGachaTrialsOnly && isGacha && !isCharacterTrialGachaEvent(gameId, title, event.content, event.gacha_kind)) continue;
         if (!showNotStarted && nowMs < start.valueOf()) continue;
