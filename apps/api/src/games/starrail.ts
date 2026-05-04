@@ -296,7 +296,9 @@ function escapeRegExp(input: string): string {
 
 function isStarRailTimeLabelLine(line: string, label: string): boolean {
   const normalized = normalizeSectionBoundary(line);
-  return new RegExp(`^(?:本期)?${escapeRegExp(label)}(?:$|\\s*[：:为])`).test(normalized);
+  return new RegExp(
+    `^(?:本期)?${escapeRegExp(label)}(?:$|\\s*[：:为]|\\s+(?=${STARRAIL_DATE_TIME_PATTERN}))`
+  ).test(normalized);
 }
 
 function isAnyStarRailTimeLabelLine(line: string, labels: string[]): boolean {
@@ -308,6 +310,7 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
   const lines = text.split("\n");
   const labels = [
     "活动跃迁时间",
+    "限时活动期",
     "活动时间",
     "开放时间",
     "开启时间",

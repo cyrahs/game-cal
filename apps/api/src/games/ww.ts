@@ -46,6 +46,8 @@ const WW_IGNORE_TITLE_WORDS = [
 
 const WW_PROMOTION_TITLE_WORDS = [
   "首充双倍",
+  "限时特惠",
+  "特别上架",
   "限时上架",
   "折扣上架",
   "商城礼包",

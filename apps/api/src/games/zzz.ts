@@ -114,12 +114,6 @@ function isSupplementalActivityNotice(item: MihoyoNapAnnItem): boolean {
   return true;
 }
 
-function canUseVersionStartForSupplementalActivity(content: string | undefined): boolean {
-  const text = stripHtml(content);
-  if (!text.includes("版本更新后")) return false;
-  return /版本更新后\s*(?:-|~|～|至|到|—|–|\u2013|\u2014)\s*\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}/.test(text);
-}
-
 type ContentCandidate = {
   titleText: string;
   key: string;
@@ -215,12 +209,12 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   if (rangeEndIso) return rangeEndIso;
 
   const startRe = new RegExp(
-    `(?:更新开始时间|维护开始时间|停服更新时间|更新维护开始时间)[^\\d]{0,80}(${ZZZ_DATE_TIME_PATTERN})`
+    `(?:版本更新时间|更新开始时间|维护开始时间|停服更新时间|更新维护开始时间)[^\\d]{0,80}(${ZZZ_DATE_TIME_PATTERN})`
   );
   const start = startRe.exec(text);
   if (!start?.[1]) return null;
 
-  const duration = /预计\s*([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
+  const duration = /预计\s*(?:需要\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
     text.slice(start.index)
   );
   const durationHours = Number(duration?.[1]);
@@ -270,9 +264,43 @@ function extractTimeRangeFromContentHtml(html: string): ParsedTimeRange {
   };
 }
 
+function extractRelativeVersionLabel(input: string | undefined): string | null {
+  const text = stripHtml(input);
+  if (!text || !/版本更新后/.test(text)) return null;
+
+  const numeric = /(\d+(?:\.\d+)+)\s*版本更新后/.exec(text);
+  if (numeric?.[1]) return numeric[1];
+
+  const vPrefix = /\bV(\d+(?:\.\d+)+)\s*版本更新后/i.exec(text);
+  if (vPrefix?.[1]) return vPrefix[1];
+
+  return null;
+}
+
+function resolveVersionRelativeStartIso(
+  content: string | undefined,
+  opts: {
+    versionMaintenanceEndByLabel: Map<string, string>;
+    fallbackStartIso: string | null;
+  }
+): string | null {
+  const text = stripHtml(content);
+  if (!text || !/版本更新后/.test(text)) return null;
+
+  const versionLabel = extractRelativeVersionLabel(text);
+  if (versionLabel) {
+    return opts.versionMaintenanceEndByLabel.get(versionLabel) ?? null;
+  }
+
+  return opts.fallbackStartIso;
+}
+
 function parseGachaEventsFromAnnContent(
   items: MihoyoNapAnnContentItem[],
-  opts: { fallbackStartIso: string | null }
+  opts: {
+    fallbackStartIso: string | null;
+    versionMaintenanceEndByLabel: Map<string, string>;
+  }
 ): CalendarEvent[] {
   const out = new Map<string, CalendarEvent>();
 
@@ -281,7 +309,12 @@ function parseGachaEventsFromAnnContent(
     if (!isGachaEventTitle("zzz", title)) continue;
 
     const { startIso, endIso } = extractTimeRangeFromContentHtml(it.content ?? "");
-    const resolvedStart = startIso ?? opts.fallbackStartIso;
+    const resolvedStart =
+      startIso ??
+      resolveVersionRelativeStartIso(it.content, {
+        versionMaintenanceEndByLabel: opts.versionMaintenanceEndByLabel,
+        fallbackStartIso: opts.fallbackStartIso,
+      });
     if (!resolvedStart || !endIso) continue;
 
     const sMs = Date.parse(resolvedStart);
@@ -357,6 +390,7 @@ function parseSupplementalActivityEventsFromAnnContent(
   contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>,
   opts: {
     fallbackStartIso: string | null;
+    versionMaintenanceEndByLabel: Map<string, string>;
     existingTitleKeys: Set<string>;
   }
 ): CalendarEvent[] {
@@ -373,7 +407,10 @@ function parseSupplementalActivityEventsFromAnnContent(
     const { startIso, endIso } = extractTimeRangeFromContentHtml(contentItem?.content ?? "");
     const resolvedStart =
       startIso ??
-      (canUseVersionStartForSupplementalActivity(contentItem?.content) ? opts.fallbackStartIso : null);
+      resolveVersionRelativeStartIso(contentItem?.content, {
+        versionMaintenanceEndByLabel: opts.versionMaintenanceEndByLabel,
+        fallbackStartIso: opts.fallbackStartIso,
+      });
     if (!resolvedStart || !endIso) continue;
 
     const sMs = Date.parse(resolvedStart);
@@ -457,6 +494,24 @@ function extractVersionLabelFromText(input: string): string | null {
   return null;
 }
 
+function extractVersionLabelsFromText(input: string): string[] {
+  const raw = stripHtml(input);
+  if (!raw) return [];
+
+  const out = new Set<string>();
+  for (const match of raw.matchAll(/(\d+(?:\.\d+)+)\s*版本/g)) {
+    if (match[1]) out.add(match[1]);
+  }
+  for (const match of raw.matchAll(/\bV(\d+(?:\.\d+)+)\b/gi)) {
+    if (match[1]) out.add(match[1]);
+  }
+
+  const primary = extractVersionLabelFromText(raw);
+  if (primary) out.add(primary);
+
+  return [...out];
+}
+
 function extractVersionLabel(item: MihoyoNapAnnItem): string | null {
   const fromTitle = extractVersionLabelFromText(item.title ?? "");
   if (fromTitle) return fromTitle;
@@ -465,6 +520,37 @@ function extractVersionLabel(item: MihoyoNapAnnItem): string | null {
   if (fromSubtitle) return fromSubtitle;
 
   return null;
+}
+
+function extractVersionLabels(item: MihoyoNapAnnItem): string[] {
+  const out = new Set<string>();
+  for (const label of extractVersionLabelsFromText(item.title ?? "")) out.add(label);
+  for (const label of extractVersionLabelsFromText(item.subtitle ?? "")) out.add(label);
+
+  const primary = extractVersionLabel(item);
+  if (primary) out.add(primary);
+
+  return [...out];
+}
+
+function buildVersionMaintenanceEndByLabel(
+  items: MihoyoNapAnnItem[],
+  contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>
+): Map<string, string> {
+  const out = new Map<string, string>();
+
+  for (const item of items) {
+    const labels = extractVersionLabels(item);
+    if (labels.length === 0) continue;
+
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    const maintenanceEndIso = extractMaintenanceEndIsoFromVersionContent(contentItem?.content);
+    if (!maintenanceEndIso) continue;
+
+    for (const label of labels) out.set(label, maintenanceEndIso);
+  }
+
+  return out;
 }
 
 async function fetchZzzAnnouncementCategories(env: RuntimeEnv): Promise<MihoyoNapAnnCategory[]> {
@@ -535,6 +621,10 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     extractMaintenanceEndIsoFromVersionContent(versionContentItem?.content) ??
     versionNotice?.startIso ??
     null;
+  const versionMaintenanceEndByLabel = buildVersionMaintenanceEndByLabel(
+    categories.flatMap((category) => category.list ?? []),
+    contentItemsByAnnId
+  );
 
   const list = activityRes.data?.activity_list ?? [];
   const normalEvents = list
@@ -563,12 +653,16 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       ];
     });
 
-  const gachaEvents = parseGachaEventsFromAnnContent(contentItems, { fallbackStartIso });
+  const gachaEvents = parseGachaEventsFromAnnContent(contentItems, {
+    fallbackStartIso,
+    versionMaintenanceEndByLabel,
+  });
   const supplementalEvents = parseSupplementalActivityEventsFromAnnContent(
     noticeCategory?.list ?? [],
     contentItemsByAnnId,
     {
       fallbackStartIso,
+      versionMaintenanceEndByLabel,
       existingTitleKeys: new Set(normalEvents.map((event) => normalizeTitleKey(event.title))),
     }
   );
