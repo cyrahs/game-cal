@@ -168,9 +168,9 @@ pnpm --filter @game-cal/api start
 
 ## 上游巡检
 
-仓库内置了一条 GitHub Actions 定时任务：`.github/workflows/upstream-review.yml`。
+仓库内置了一条可手动触发的 GitHub Actions 巡检：`.github/workflows/upstream-review.yml`。
 
-它会每天执行一次，流程如下：
+它不再自动定时执行；需要时可在 GitHub Actions 页面手动触发。流程如下：
 - 启动本仓库的本地 Node API
 - 抓取上游原始公告（当前覆盖：原神、星铁、鸣潮、绝区零、尘白禁区、终末地）
 - 按游戏并行调用 LLM API，对比“原始公告”与“当前 `/api/events/:game` 输出”
