@@ -63,6 +63,12 @@ type MihoyoNapAnnContentResponse = {
   };
 };
 
+type MihoyoNapSupplementalItem = MihoyoNapAnnItem & {
+  banner?: string;
+  img?: string;
+  content?: string;
+};
+
 const ZZZ_DEFAULT_ACTIVITY_API =
   "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getActivityList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 
@@ -107,7 +113,7 @@ function normalizeAnnouncementEventTitle(input: string | undefined): string {
   return title;
 }
 
-function isSupplementalActivityNotice(item: MihoyoNapAnnItem): boolean {
+function isSupplementalActivityNotice(item: MihoyoNapSupplementalItem): boolean {
   const title = stripHtml(item.title || item.subtitle);
   if (!title.endsWith("活动说明")) return false;
   if (isGachaEventTitle("zzz", title)) return false;
@@ -386,7 +392,7 @@ function pickContentItemForNotice(
 }
 
 function parseSupplementalActivityEventsFromAnnContent(
-  items: MihoyoNapAnnItem[],
+  items: MihoyoNapSupplementalItem[],
   contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>,
   opts: {
     fallbackStartIso: string | null;
@@ -403,7 +409,9 @@ function parseSupplementalActivityEventsFromAnnContent(
     const titleKey = normalizeTitleKey(title);
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
-    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    const contentItem = item.content?.trim()
+      ? item
+      : pickContentItemForNotice(item, contentItemsByAnnId);
     const { startIso, endIso } = extractTimeRangeFromContentHtml(contentItem?.content ?? "");
     const resolvedStart =
       startIso ??
@@ -658,7 +666,7 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     versionMaintenanceEndByLabel,
   });
   const supplementalEvents = parseSupplementalActivityEventsFromAnnContent(
-    noticeCategory?.list ?? [],
+    [...(noticeCategory?.list ?? []), ...contentItems],
     contentItemsByAnnId,
     {
       fallbackStartIso,

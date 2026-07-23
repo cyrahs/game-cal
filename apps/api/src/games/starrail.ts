@@ -80,9 +80,7 @@ const IGNORE_WORDS = [
   "周边限时",
   "周边上新",
   "角色演示",
-  "上新",
   "同行任务",
-  "无名勋礼",
   "工具更新",
   "激励计划",
   "攻略征集",
@@ -110,6 +108,8 @@ const IGNORE_SUFFIXES = [
 const EXPLANATION_VERSION_SUFFIX_PATTERN = /\u8bf4\u660e\s*[vV]\d+(?:\.\d+)+$/;
 const IGNORE_TITLE_PATTERNS = [
   /\bPV\b/i,
+  /联动更新公告$/,
+  /(?:官方小程序|企业微信).*正式上线/,
 ];
 
 function shouldIgnoreStarRailTitle(title: string): boolean {
@@ -352,7 +352,7 @@ function extractStarRailTimeRangeFromContent(
     singleVersionMaintenanceEndIso: string | null;
     listEndIso: string;
   }
-): { startIso: string | null; endIso: string | null } {
+): { startIso: string | null; endIso: string | null; endText?: string | null } {
   const section = extractStarRailTimeSection(content);
   if (!section) return { startIso: null, endIso: null };
 
@@ -384,7 +384,16 @@ function extractStarRailTimeRangeFromContent(
     };
   }
 
-  if (dates.length === 1 && /(?:后开启|后长期开放|长期开放|永久开放|持续开放)/.test(section)) {
+  if (dates.length === 1 && /(?:后长期开放|长期开放|永久开放|持续开放)/.test(section)) {
+    const endText = /(?:长期开放|永久开放|持续开放)/.exec(section)?.[0] ?? "长期开放";
+    return {
+      startIso: toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET),
+      endIso: null,
+      endText,
+    };
+  }
+
+  if (dates.length === 1 && /后开启/.test(section)) {
     return {
       startIso: toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET),
       endIso: opts.listEndIso,
@@ -827,17 +836,29 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       singleVersionMaintenanceEndIso,
       listEndIso,
     });
-    const resolvedStartIso = contentRange.startIso ?? listStartIso;
-    const resolvedEndIso = contentRange.endIso ?? listEndIso;
-    const sMs = Date.parse(resolvedStartIso);
-    const eMs = Date.parse(resolvedEndIso);
-    const hasValidContentRange = Number.isFinite(sMs) && Number.isFinite(eMs) && eMs > sMs;
+    const contentStartMs = Date.parse(contentRange.startIso ?? "");
+    const contentEndMs = Date.parse(contentRange.endIso ?? "");
+    const hasValidContentRange =
+      Number.isFinite(contentStartMs) &&
+      Number.isFinite(contentEndMs) &&
+      contentEndMs > contentStartMs;
+    const hasRelativeContentEnd =
+      Number.isFinite(contentStartMs) && Boolean(contentRange.endText?.trim());
 
     return {
       id: `starrail:${makeAnnItemKey(item)}`,
       title,
-      start_time: hasValidContentRange ? resolvedStartIso : listStartIso,
-      end_time: hasValidContentRange ? resolvedEndIso : listEndIso,
+      start_time:
+        hasValidContentRange || hasRelativeContentEnd
+          ? contentRange.startIso!
+          : listStartIso,
+      end_time: hasRelativeContentEnd
+        ? null
+        : hasValidContentRange
+          ? contentRange.endIso!
+          : listEndIso,
+      end_time_kind: hasRelativeContentEnd ? "relative" : undefined,
+      end_time_text: hasRelativeContentEnd ? contentRange.endText!.trim() : undefined,
       is_gacha: isGacha,
       gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,

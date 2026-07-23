@@ -144,6 +144,15 @@ function extractRelativeEndText(input: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
+function extractVersionPeriodEndText(input: string): string | null {
+  const text = normalizeTitle(input);
+  const quoted = /([「『“"][^」』”"]+[」』”"]\s*版本)期间/.exec(text);
+  if (quoted?.[1]) return `${quoted[1].replace(/\s+/g, "")}结束`;
+
+  const numeric = /(\d+(?:\.\d+)+\s*版本)期间/.exec(text);
+  return numeric?.[1] ? `${numeric[1].replace(/\s+/g, "")}结束` : null;
+}
+
 function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   const text = normalizeTitle(input);
   if (!text) return { start: null, end: null };
@@ -168,6 +177,15 @@ function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
       start: normalizeDateTimeCandidate(relativeRange[1]),
       end: null,
       endText: relativeEndText,
+    };
+  }
+
+  const versionPeriodEndText = extractVersionPeriodEndText(text);
+  if (versionPeriodEndText) {
+    return {
+      start: null,
+      end: null,
+      endText: versionPeriodEndText,
     };
   }
 
