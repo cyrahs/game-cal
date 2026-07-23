@@ -29,6 +29,9 @@ Workspace rules:
 - Make the smallest general parser/filter correction supported by the evidence.
 - Do not hard-code fabricated events, dates, API responses, or snapshot data.
 - Preserve existing API contracts, caching behavior, and unrelated parser behavior.
+- Before reporting a finding as fixed, trace every changed return value against its
+  declared or imported TypeScript type. In particular, do not pass `null` through an
+  optional field unless that field's contract explicitly permits `null`.
 - If a finding cannot be fixed safely within its mapped parser file, leave that file
   unchanged for that finding and report `not_fixed`.
 
