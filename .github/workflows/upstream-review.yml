@@ -9,14 +9,16 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
-  review:
+  collect:
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v6
         with:
@@ -45,25 +47,108 @@ jobs:
           cat "$RUNNER_TEMP/api.log"
           exit 1
 
-      - name: Run upstream review
+      - name: Collect review input
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL != '' && secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL != '' && secrets.OPENAI_MODEL || vars.OPENAI_MODEL }}
-          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT != '' && secrets.OPENAI_REASONING_EFFORT || vars.OPENAI_REASONING_EFFORT }}
           UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
-          UPSTREAM_REVIEW_GAMES: genshin,starrail,ww,zzz,snowbreak,endfield
-          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
-        run: pnpm review:upstream
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: pnpm review:upstream:collect
 
-      - name: Upload review artifact
+      - name: Upload review input
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-review-input
+          path: artifacts/upstream-review-input.json
+          if-no-files-found: error
+
+      - name: Upload API log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-review-api-log
+          path: ${{ runner.temp }}/api.log
+          if-no-files-found: warn
+
+  review:
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download review input
+        uses: actions/download-artifact@v8
+        with:
+          name: upstream-review-input
+          path: artifacts
+
+      - name: Review with Codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review.md
+          output-schema-file: .github/schemas/upstream-review-output.schema.json
+          output-file: artifacts/upstream-review-agent.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - name: Upload Codex review
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-review-agent
+          path: artifacts/upstream-review-agent.json
+          if-no-files-found: error
+
+  publish:
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Download review input
+        uses: actions/download-artifact@v8
+        with:
+          name: upstream-review-input
+          path: artifacts
+
+      - name: Download Codex review
+        uses: actions/download-artifact@v8
+        with:
+          name: upstream-review-agent
+          path: artifacts
+
+      - name: Validate result and sync issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+          UPSTREAM_REVIEW_AGENT_OUTPUT_PATH: artifacts/upstream-review-agent.json
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+          UPSTREAM_REVIEW_ISSUE_NUMBER: "1"
+          UPSTREAM_REVIEW_ISSUE_TITLE: Upstream Review Alerts
+        run: node scripts/review-upstream.mjs --finalize
+
+      - name: Upload final review artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: upstream-review
-          path: |
-            artifacts/upstream-review.json
-            ${{ runner.temp }}/api.log
+          path: artifacts
           if-no-files-found: warn

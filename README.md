@@ -168,39 +168,55 @@ pnpm --filter @game-cal/api start
 
 ## 上游巡检
 
-仓库内置了一条可手动触发的 GitHub Actions 巡检：`.github/workflows/upstream-review.yml`。
+仓库内置了一条可手动触发的 Codex agentic workflow：
+`.github/workflows/upstream-review.yml`。它不再自动定时执行；需要时可在
+GitHub Actions 页面从默认分支手动触发；非默认分支不会运行，以免未合并的
+workflow 代码接触 Secrets。
 
-它不再自动定时执行；需要时可在 GitHub Actions 页面手动触发。流程如下：
-- 启动本仓库的本地 Node API
-- 抓取上游原始公告（当前覆盖：原神、星铁、鸣潮、绝区零、尘白禁区、终末地）
-- 按游戏并行调用 LLM API，对比“原始公告”与“当前 `/api/events/:game` 输出”
-- 单游戏的数据收集和 LLM 分析失败时会各自重试 3 次
-- 传给 LLM 的 API event 会先排除已过期项，以及 suppression 中标记为保留的 `non_event_included` 项
-- 按仓库内的 suppression 配置过滤已知合理项
-- 有疑似问题时创建或更新固定 issue：`Upstream Review Alerts`
-- 无问题时自动关闭该 issue
+Workflow 分成三个相互隔离的 job：
 
-需要的仓库配置：
-- GitHub Secret：`OPENAI_API_KEY`
-- 可选 GitHub Secret：
-  - `OPENAI_BASE_URL`（如需把 base URL 放到 secret，优先级高于 variable）
-  - `OPENAI_MODEL`（优先级高于 variable）
-  - `OPENAI_REASONING_EFFORT`（优先级高于 variable）
-- 可选 GitHub Variables：
-  - `OPENAI_MODEL`（默认 `gpt-5-mini`）
-  - `OPENAI_BASE_URL`（默认 `https://api.openai.com/v1`）
-  - `OPENAI_REASONING_EFFORT`（例如 `low` / `medium`）
+- `collect`：启动本地 Node API，抓取六个游戏的原始公告与当前
+  `/api/events/:game` 输出，过滤已过期项和 reviewer-input suppression。
+- `review`：在新的 runner 中用官方 `openai/codex-action` 发起一次 Responses
+  agent 会话。Codex 只读仓库和采集 JSON，没有 Issue 写权限。
+- `publish`：在第三个 runner 中严格校验结构化结果、再次应用 suppression，再由
+  确定性脚本维护固定的 Issue #1 `Upstream Review Alerts`。这个 job 不接触
+  OpenAI Secrets。
 
-这条巡检默认面向 GitHub Actions 运行。
+采集数据、Codex 输出不完整，六个游戏未全部审查，JSON 不符合约束，或 Issue #1
+的类型/标题不符时，发布步骤会失败且不修改 Issue。有 findings 时更新或 reopen
+Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关闭时不操作。运行
+产物和 API 日志会作为 Actions artifacts 保存。
+
+需要配置四个 GitHub Actions Secrets：
+
+- `OPENAI_API_KEY`：网关使用的 Bearer API key。
+- `OPENAI_BASE_URL`：完整的 Responses POST endpoint。虽然沿用旧变量名，但值必须
+  类似 `https://gateway.example/v1/responses`，不能只填
+  `https://gateway.example/v1`。
+- `OPENAI_MODEL`：网关支持的 Codex 模型名。
+- `OPENAI_REASONING_EFFORT`：模型支持的推理强度，例如 `low`、`medium`、`high`。
+
+网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
+`Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
+`.github/prompts/upstream-review.md` 与
+`.github/schemas/upstream-review-output.schema.json`。
 
 可选环境变量：
+
 - `UPSTREAM_REVIEW_API_BASE_URL`（默认 `http://127.0.0.1:8787`）
-- `UPSTREAM_REVIEW_GAMES`（默认 `genshin,starrail,ww,zzz,snowbreak,endfield`）
 - `UPSTREAM_REVIEW_MAX_ITEMS`（默认 `60`）
-- `UPSTREAM_REVIEW_REPORT_PATH`（写出 JSON 报告）
+- `UPSTREAM_REVIEW_INPUT_PATH`（采集模式写出的 JSON）
+- `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（finalize 模式读取的 Codex JSON）
+- `UPSTREAM_REVIEW_REPORT_PATH`（finalize 模式写出的完整 JSON 报告）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
-- `UPSTREAM_REVIEW_DRY_RUN=1`（只生成报告，不操作 GitHub issue）
-- `OPENAI_REASONING_EFFORT`（未设置时使用模型默认值）
+- `UPSTREAM_REVIEW_ISSUE_NUMBER`（workflow 固定为 `1`）
+- `UPSTREAM_REVIEW_ISSUE_TITLE`（workflow 固定为 `Upstream Review Alerts`）
+- `UPSTREAM_REVIEW_DRY_RUN=1`（finalize 时只生成报告，不操作 GitHub Issue）
+
+`pnpm review:upstream` / `pnpm review:upstream:collect` 只执行确定性采集，不调用模型；
+`pnpm review:upstream:finalize` 校验已有 agent 输出并发布结果。生产 workflow 不再调用
+旧的 Chat Completions 接口。
 
 Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除；对于 `kind: "missing_event"` 的规则，对应 raw notice 会在送审前从 reviewer 输入中排除。
 

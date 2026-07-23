@@ -1,0 +1,118 @@
+{
+  "type": "object",
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "reviewed_games": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "enum": [
+          "genshin",
+          "starrail",
+          "ww",
+          "zzz",
+          "snowbreak",
+          "endfield"
+        ]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "properties": {
+          "game": {
+            "type": "string",
+            "enum": [
+              "genshin",
+              "starrail",
+              "ww",
+              "zzz",
+              "snowbreak",
+              "endfield"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "non_event_included",
+              "missing_event",
+              "duplicate_event",
+              "wrong_time_window",
+              "other"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "raw_title": {
+            "type": "string"
+          },
+          "api_title": {
+            "type": "string"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "game",
+          "severity",
+          "confidence",
+          "kind",
+          "title",
+          "raw_title",
+          "api_title",
+          "start_time",
+          "end_time",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "complete",
+    "errors",
+    "summary",
+    "reviewed_games",
+    "findings"
+  ],
+  "additionalProperties": false
+}

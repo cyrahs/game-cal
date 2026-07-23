@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const GENSHIN_LIST_API =
   "https://hk4e-api.mihoyo.com/common/hk4e_cn/announcement/api/getAnnList?game=hk4e&game_biz=hk4e_cn&lang=zh-cn&bundle_id=hk4e_cn&platform=pc&region=cn_gf01&level=55&uid=100000000";
@@ -34,18 +35,29 @@ const ENDFIELD_AGGREGATE_API =
 
 const ENDFIELD_CODE_FALLBACK = "endfield_5SD9TN";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8787";
-const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
-const DEFAULT_OPENAI_MODEL = "gpt-5-mini";
 const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
 const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
 const DEFAULT_GAMES = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
+const SUPPORTED_FINDING_KINDS = new Set([
+  "non_event_included",
+  "missing_event",
+  "duplicate_event",
+  "wrong_time_window",
+  "other",
+]);
 const GITHUB_API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 30_000;
-const MODEL_TIMEOUT_MS = 300_000;
 const CHINA_TZ_OFFSET = "+08:00";
 const RETRY_COUNT = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
+const MAX_AGENT_FINDINGS = 50;
+const MAX_AGENT_ERROR_LENGTH = 1_000;
+const MAX_AGENT_SUMMARY_LENGTH = 2_000;
+const MAX_AGENT_TITLE_LENGTH = 500;
+const MAX_AGENT_TIME_LENGTH = 100;
+const MAX_AGENT_REASON_LENGTH = 1_000;
+const MAX_ISSUE_BODY_BYTES = 60_000;
 
 const GAME_LABELS = {
   genshin: "原神",
@@ -66,17 +78,6 @@ function parseBoolean(value, fallback = false) {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
-}
-
-function parseGameList(value) {
-  if (!value?.trim()) return [...DEFAULT_GAMES];
-  const out = [];
-  for (const part of value.split(",")) {
-    const game = part.trim();
-    if (!SUPPORTED_GAMES.has(game) || out.includes(game)) continue;
-    out.push(game);
-  }
-  return out.length > 0 ? out : [...DEFAULT_GAMES];
 }
 
 function parseMaxItems(value, fallback) {
@@ -759,30 +760,22 @@ function filterRawNoticesForReviewer(game, rawNotices, suppressions) {
   });
 }
 
-function extractJsonObjectFromText(input) {
-  const text = String(input ?? "").trim();
-  if (!text) {
-    throw new Error("Model returned empty content");
+async function readTextFile(filePath, label) {
+  if (!filePath) {
+    throw new Error(`Missing ${label} path`);
   }
 
   try {
-    return JSON.parse(text);
-  } catch {}
-
-  const fenced = /```(?:json)?\s*([\s\S]+?)```/i.exec(text);
-  if (fenced?.[1]) {
-    try {
-      return JSON.parse(fenced[1]);
-    } catch {}
+    return await fs.readFile(path.resolve(filePath), "utf8");
+  } catch (error) {
+    throw new Error(`Failed to read ${label} at ${filePath}: ${getErrorMessage(error)}`);
   }
+}
 
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return JSON.parse(text.slice(start, end + 1));
-  }
-
-  throw new Error("Failed to parse JSON from model response");
+function truncateText(value, maxLength) {
+  const characters = Array.from(String(value ?? ""));
+  if (characters.length <= maxLength) return characters.join("");
+  return `${characters.slice(0, Math.max(0, maxLength - 1)).join("")}…`;
 }
 
 function normalizeFinding(raw, fallbackGame = "unknown") {
@@ -795,13 +788,294 @@ function normalizeFinding(raw, fallbackGame = "unknown") {
     severity,
     confidence,
     kind,
-    title: normalizeWhitespace(raw?.title || ""),
-    raw_title: normalizeWhitespace(raw?.raw_title || ""),
-    api_title: normalizeWhitespace(raw?.api_title || ""),
-    start_time: String(raw?.start_time ?? ""),
-    end_time: String(raw?.end_time ?? ""),
-    reason: normalizeWhitespace(raw?.reason || ""),
+    title: truncateText(normalizeWhitespace(raw?.title || ""), MAX_AGENT_TITLE_LENGTH),
+    raw_title: truncateText(
+      normalizeWhitespace(raw?.raw_title || ""),
+      MAX_AGENT_TITLE_LENGTH
+    ),
+    api_title: truncateText(
+      normalizeWhitespace(raw?.api_title || ""),
+      MAX_AGENT_TITLE_LENGTH
+    ),
+    start_time: truncateText(raw?.start_time, MAX_AGENT_TIME_LENGTH),
+    end_time: truncateText(raw?.end_time, MAX_AGENT_TIME_LENGTH),
+    reason: truncateText(normalizeWhitespace(raw?.reason || ""), MAX_AGENT_REASON_LENGTH),
   };
+}
+
+function validateAgentFinding(raw, index) {
+  if (!isRecord(raw)) {
+    throw new Error(`Invalid agent finding at index ${index}: expected an object`);
+  }
+
+  const requiredStringFields = [
+    "game",
+    "severity",
+    "confidence",
+    "kind",
+    "title",
+    "raw_title",
+    "api_title",
+    "start_time",
+    "end_time",
+    "reason",
+  ];
+  for (const field of requiredStringFields) {
+    if (typeof raw[field] !== "string") {
+      throw new Error(`Invalid agent finding at index ${index}: ${field} must be a string`);
+    }
+  }
+
+  const game = String(raw.game ?? "").trim();
+  if (!SUPPORTED_GAMES.has(game)) {
+    throw new Error(`Invalid agent finding game at index ${index}: ${game || "(empty)"}`);
+  }
+
+  if (!["high", "medium", "low"].includes(raw.severity)) {
+    throw new Error(`Invalid agent finding severity at index ${index}: ${raw.severity}`);
+  }
+  if (!["high", "medium", "low"].includes(raw.confidence)) {
+    throw new Error(`Invalid agent finding confidence at index ${index}: ${raw.confidence}`);
+  }
+
+  const kind = String(raw.kind ?? "").trim();
+  if (!SUPPORTED_FINDING_KINDS.has(kind)) {
+    throw new Error(`Invalid agent finding kind at index ${index}: ${kind || "(empty)"}`);
+  }
+
+  const finding = normalizeFinding(raw, game);
+  if (!finding.reason) {
+    throw new Error(`Invalid agent finding at index ${index}: reason is required`);
+  }
+  if (!finding.title && !finding.raw_title && !finding.api_title) {
+    throw new Error(`Invalid agent finding at index ${index}: at least one title is required`);
+  }
+
+  return finding;
+}
+
+function parseAgentReview(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text ?? "").trim());
+  } catch (error) {
+    throw new Error(`Invalid Codex review JSON: ${getErrorMessage(error)}`);
+  }
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid agent review: expected an object");
+  }
+
+  if (!Array.isArray(parsed.errors)) {
+    throw new Error("Invalid agent review: errors must be an array");
+  }
+  if (parsed.errors.length > 20 || parsed.errors.some((error) => typeof error !== "string")) {
+    throw new Error("Invalid agent review: errors must contain at most 20 strings");
+  }
+  const errors = parsed.errors
+    .map((error) =>
+      truncateText(normalizeWhitespace(error), MAX_AGENT_ERROR_LENGTH)
+    )
+    .filter(Boolean);
+  if (parsed.complete !== true || errors.length > 0) {
+    const detail = errors.length > 0 ? `: ${errors.join("; ")}` : "";
+    throw new Error(`Codex reported an incomplete review${detail}`);
+  }
+
+  if (typeof parsed.summary !== "string") {
+    throw new Error("Invalid agent review: summary must be a string");
+  }
+  const summary = truncateText(
+    normalizeWhitespace(parsed.summary),
+    MAX_AGENT_SUMMARY_LENGTH
+  );
+
+  if (!Array.isArray(parsed.reviewed_games)) {
+    throw new Error("Invalid agent review: reviewed_games must be an array");
+  }
+  if (parsed.reviewed_games.some((game) => typeof game !== "string")) {
+    throw new Error("Invalid agent review: reviewed_games must contain strings");
+  }
+  const reviewedGames = parsed.reviewed_games.map((game) => String(game).trim());
+  const expectedGames = [...DEFAULT_GAMES].sort();
+  if (
+    reviewedGames.length !== DEFAULT_GAMES.length ||
+    new Set(reviewedGames).size !== DEFAULT_GAMES.length ||
+    reviewedGames.slice().sort().some((game, index) => game !== expectedGames[index])
+  ) {
+    throw new Error("Invalid agent review: reviewed_games must cover all six games exactly once");
+  }
+
+  if (!Array.isArray(parsed.findings)) {
+    throw new Error("Invalid agent review: findings must be an array");
+  }
+  const rawFindings = parsed.findings;
+  if (rawFindings.length > MAX_AGENT_FINDINGS) {
+    throw new Error(
+      `Invalid agent review: ${rawFindings.length} findings exceeds the ${MAX_AGENT_FINDINGS} limit`
+    );
+  }
+
+  return {
+    summary,
+    findings: rawFindings.map((finding, index) => validateAgentFinding(finding, index)),
+  };
+}
+
+function validateCollectedDataset(dataset, index, label, maxItems) {
+  if (!isRecord(dataset)) {
+    throw new Error(`Invalid collected review input: ${label}[${index}] must be an object`);
+  }
+
+  const game = String(dataset.game ?? "").trim();
+  if (!SUPPORTED_GAMES.has(game)) {
+    throw new Error(
+      `Invalid collected review input game at ${label}[${index}]: ${game || "(empty)"}`
+    );
+  }
+  if (dataset.game_label !== (GAME_LABELS[game] ?? game)) {
+    throw new Error(
+      `Invalid collected review input: ${label}[${index}].game_label does not match ${game}`
+    );
+  }
+  if (typeof dataset.notes !== "string" || !dataset.notes.trim()) {
+    throw new Error(
+      `Invalid collected review input: ${label}[${index}].notes is required`
+    );
+  }
+
+  for (const field of ["raw_notice_count", "api_event_count"]) {
+    if (!Number.isInteger(dataset[field]) || dataset[field] < 0) {
+      throw new Error(
+        `Invalid collected review input: ${label}[${index}].${field} must be a non-negative integer`
+      );
+    }
+  }
+
+  for (const [itemsField, countField] of [
+    ["raw_notices", "raw_notice_count"],
+    ["api_events", "api_event_count"],
+  ]) {
+    const items = dataset[itemsField];
+    if (!Array.isArray(items) || items.some((item) => !isRecord(item))) {
+      throw new Error(
+        `Invalid collected review input: ${label}[${index}].${itemsField} must be an array of objects`
+      );
+    }
+    const expectedLength = Math.min(dataset[countField], maxItems);
+    if (items.length !== expectedLength) {
+      throw new Error(
+        `Invalid collected review input: ${label}[${index}].${itemsField} has ${items.length} item(s); expected ${expectedLength}`
+      );
+    }
+  }
+
+  return game;
+}
+
+function validateCollectedReviewInput(input) {
+  if (!isRecord(input) || input.mode !== "collect_only") {
+    throw new Error("Invalid collected review input: expected mode=collect_only");
+  }
+  if (input.schema_version !== 2) {
+    throw new Error("Invalid collected review input: unsupported schema_version");
+  }
+  if (
+    typeof input.generated_at !== "string" ||
+    !Number.isFinite(Date.parse(input.generated_at))
+  ) {
+    throw new Error("Invalid collected review input: generated_at must be an ISO timestamp");
+  }
+  if (typeof input.api_base_url !== "string" || !input.api_base_url) {
+    throw new Error("Invalid collected review input: api_base_url is required");
+  }
+  if (!Number.isInteger(input.max_items) || input.max_items <= 0) {
+    throw new Error("Invalid collected review input: max_items must be a positive integer");
+  }
+  if (!Array.isArray(input.datasets) || !Array.isArray(input.review_datasets)) {
+    throw new Error("Invalid collected review input: missing datasets");
+  }
+
+  const snapshotGames = input.datasets.map((dataset, index) =>
+    validateCollectedDataset(dataset, index, "datasets", input.max_items)
+  );
+  const games = input.review_datasets.map((dataset, index) =>
+    validateCollectedDataset(dataset, index, "review_datasets", input.max_items)
+  );
+
+  if (new Set(games).size !== games.length) {
+    throw new Error("Invalid collected review input: duplicate game datasets");
+  }
+  const expectedGames = [...DEFAULT_GAMES].sort();
+  if (
+    games.length !== DEFAULT_GAMES.length ||
+    games.slice().sort().some((game, index) => game !== expectedGames[index])
+  ) {
+    throw new Error("Invalid collected review input: expected all six game datasets");
+  }
+
+  if (
+    snapshotGames.length !== DEFAULT_GAMES.length ||
+    new Set(snapshotGames).size !== DEFAULT_GAMES.length ||
+    snapshotGames.slice().sort().some((game, index) => game !== expectedGames[index])
+  ) {
+    throw new Error("Invalid collected review input: snapshots must cover all six games");
+  }
+
+  if (
+    !isRecord(input.suppressions) ||
+    typeof input.suppressions.path !== "string" ||
+    !input.suppressions.path.trim() ||
+    !Number.isInteger(input.suppressions.count) ||
+    input.suppressions.count < 0 ||
+    !Array.isArray(input.suppressions.review_input_exclusions)
+  ) {
+    throw new Error("Invalid collected review input: suppressions metadata is incomplete");
+  }
+
+  const snapshotsByGame = new Map(input.datasets.map((dataset) => [dataset.game, dataset]));
+  const reviewDatasetsByGame = new Map(
+    input.review_datasets.map((dataset) => [dataset.game, dataset])
+  );
+  const exclusionGames = input.suppressions.review_input_exclusions.map(
+    (exclusion, index) => {
+      if (
+        !isRecord(exclusion) ||
+        !SUPPORTED_GAMES.has(exclusion.game) ||
+        !Number.isInteger(exclusion.raw_notices) ||
+        exclusion.raw_notices < 0 ||
+        !Number.isInteger(exclusion.api_events) ||
+        exclusion.api_events < 0
+      ) {
+        throw new Error(
+          `Invalid collected review input: suppressions.review_input_exclusions[${index}] is invalid`
+        );
+      }
+
+      const snapshot = snapshotsByGame.get(exclusion.game);
+      const reviewDataset = reviewDatasetsByGame.get(exclusion.game);
+      if (
+        snapshot.raw_notice_count - reviewDataset.raw_notice_count !==
+          exclusion.raw_notices ||
+        snapshot.api_event_count - reviewDataset.api_event_count !== exclusion.api_events
+      ) {
+        throw new Error(
+          `Invalid collected review input: exclusion counts do not match ${exclusion.game} datasets`
+        );
+      }
+      return exclusion.game;
+    }
+  );
+  if (
+    exclusionGames.length !== DEFAULT_GAMES.length ||
+    new Set(exclusionGames).size !== DEFAULT_GAMES.length ||
+    exclusionGames.slice().sort().some((game, index) => game !== expectedGames[index])
+  ) {
+    throw new Error(
+      "Invalid collected review input: exclusion metadata must cover all six games"
+    );
+  }
+
+  return input;
 }
 
 function getTitleValues(input) {
@@ -985,140 +1259,100 @@ function applySuppressions(findings, suppressions) {
 }
 
 function summarizeFilteredReview(summary, unsuppressedCount, suppressedCount) {
-  const base = summary || `${unsuppressedCount} unsuppressed finding(s) detected.`;
-  if (suppressedCount === 0) return base;
-  if (unsuppressedCount === 0) {
-    return `${base} No unsuppressed findings. ${suppressedCount} finding(s) matched suppression rules.`;
-  }
-  return `${base} ${unsuppressedCount} unsuppressed finding(s) detected. ${suppressedCount} finding(s) matched suppression rules.`;
+  const counts =
+    unsuppressedCount === 0
+      ? "No unsuppressed findings detected."
+      : `${unsuppressedCount} unsuppressed finding(s) detected.`;
+  const suppressionSummary =
+    suppressedCount > 0
+      ? ` ${suppressedCount} finding(s) matched suppression rules.`
+      : "";
+  const agentSummary = summary ? ` Codex summary: ${summary}` : "";
+  return `${counts}${suppressionSummary}${agentSummary}`;
 }
 
-function summarizeGameReviews(gameReviews) {
-  if (gameReviews.length === 0) return "No games reviewed.";
-  return gameReviews
-    .map((review) => {
-      const label = GAME_LABELS[review.game] ?? review.game;
-      const summary = review.summary || `${review.findings.length} finding(s) detected.`;
-      return `${label}: ${summary}`;
-    })
-    .join(" ");
+function escapeIssueText(value) {
+  return normalizeWhitespace(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/([`*_[\]<>#|])/g, "\\$1")
+    .replace(/@/g, "@\u200b");
 }
 
-async function reviewGameWithOpenAi(payload) {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("Missing OPENAI_API_KEY");
-  }
-
-  const openAiBaseUrl = trimTrailingSlash(
-    process.env.OPENAI_BASE_URL?.trim() || DEFAULT_OPENAI_BASE_URL
-  );
-  const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL;
-  const reasoningEffort = process.env.OPENAI_REASONING_EFFORT?.trim();
-  const dataset = payload.dataset;
-  const prompt = {
-    current_time: payload.generated_at,
-    game: dataset.game,
-    game_label: dataset.game_label,
-    instructions: [
-      "Review the upstream notice snapshots against the current API event output.",
-      "This request contains exactly one game dataset. Every Finding.game must match the dataset game.",
-      "Only report issues that are likely real. Be conservative.",
-      "Focus on: non-event notices incorrectly included, real events incorrectly filtered out, duplicate events, and clearly wrong time windows.",
-      "Ignore pure style or wording preferences.",
-      "For Endfield, API events may come from version-note extraction, so lack of a standalone raw notice is not enough to flag an issue.",
-      "Some API events may have end_time: null with end_time_kind: 'relative' and end_time_text. Treat those as present events with an intentionally relative ending; do not flag them as missing or as wrong_time_window merely because no exact end timestamp is available.",
-      "Return JSON only with shape { summary: string, findings: Finding[] }.",
-      "Each Finding must include game, severity, confidence, kind, title, raw_title, api_title, start_time, end_time, reason.",
-      "Use findings: [] when there is nothing clearly wrong.",
-    ],
-    dataset,
-  };
-
-  const response = await requestJson(
-    `${openAiBaseUrl}/chat/completions`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-        temperature: 0,
-        max_completion_tokens: 4000,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You review game event calendar filtering. Be cautious, concrete, and return JSON only.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify(prompt),
-          },
-        ],
-      }),
-    },
-    MODEL_TIMEOUT_MS
-  );
-
-  const content = response?.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error("OpenAI response missing message content");
-  }
-
-  const parsed = extractJsonObjectFromText(content);
-  const findings = ensureArray(parsed?.findings).map((finding) =>
-    normalizeFinding(finding, dataset.game)
-  );
-  return {
-    game: dataset.game,
-    model,
-    summary: normalizeWhitespace(parsed?.summary || ""),
-    findings,
-    raw_response: content,
-  };
+function escapeIssueCode(value) {
+  return normalizeWhitespace(value)
+    .replace(/`/g, "ˋ")
+    .replace(/@/g, "@\u200b")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
-async function reviewWithOpenAi(payload) {
-  const gameReviews = await Promise.all(
-    payload.datasets.map((dataset) =>
-      withRetry(`LLM review for ${dataset.game}`, () =>
-        reviewGameWithOpenAi({
-          generated_at: payload.generated_at,
-          dataset,
-        })
-      )
+function renderFindingLines(finding, index) {
+  const lines = [];
+  const label = GAME_LABELS[finding.game] ?? finding.game;
+  const title = finding.api_title || finding.raw_title || finding.title || "(untitled)";
+  lines.push(
+    `${index}. [${finding.severity}] ${escapeIssueText(label)} / ${finding.kind} / \`${escapeIssueCode(title)}\``
+  );
+  if (finding.title && finding.title !== title) {
+    lines.push(`Finding title: \`${escapeIssueCode(finding.title)}\``);
+  }
+  if (finding.api_title && finding.api_title !== title) {
+    lines.push(`API title: \`${escapeIssueCode(finding.api_title)}\``);
+  }
+  if (
+    finding.raw_title &&
+    finding.raw_title !== title &&
+    finding.raw_title !== finding.api_title
+  ) {
+    lines.push(`Raw title: \`${escapeIssueCode(finding.raw_title)}\``);
+  }
+  if (finding.start_time || finding.end_time) {
+    lines.push(
+      `Window: \`${escapeIssueCode(finding.start_time || "?")}\` -> \`${escapeIssueCode(finding.end_time || "?")}\``
+    );
+  }
+  lines.push(`Confidence: ${finding.confidence}`);
+  lines.push(escapeIssueText(finding.reason || "No reason provided."));
+  lines.push("");
+  return lines;
+}
+
+function prioritizeFindings(findings) {
+  const rank = { high: 0, medium: 1, low: 2 };
+  return findings
+    .map((finding, sourceIndex) => ({ finding, sourceIndex }))
+    .sort(
+      (a, b) =>
+        (rank[a.finding.severity] ?? 3) - (rank[b.finding.severity] ?? 3) ||
+        (rank[a.finding.confidence] ?? 3) - (rank[b.finding.confidence] ?? 3) ||
+        a.sourceIndex - b.sourceIndex
     )
-  );
+    .map(({ finding }) => finding);
+}
 
-  return {
-    model: gameReviews[0]?.model ?? process.env.OPENAI_MODEL?.trim() ?? DEFAULT_OPENAI_MODEL,
-    summary: summarizeGameReviews(gameReviews),
-    findings: gameReviews.flatMap((review) => review.findings),
-    game_reviews: gameReviews,
-  };
+function finalizeIssueLines(lines) {
+  return lines.join("\n").trim() + "\n";
 }
 
 function renderIssueBody(report) {
   const lines = [
     "# Upstream Review Alerts",
     "",
-    `Last run: \`${report.generated_at}\``,
-    `API base: \`${report.api_base_url}\``,
-    `Model: \`${report.review.model}\``,
+    `Last run: \`${escapeIssueCode(report.generated_at)}\``,
+    `API base: \`${escapeIssueCode(report.api_base_url)}\``,
+    `Model: \`${escapeIssueCode(report.review.model)}\``,
     "",
     "## Summary",
-    report.review.summary || `${report.review.findings.length} finding(s) detected.`,
+    escapeIssueText(
+      report.review.summary || `${report.review.findings.length} finding(s) detected.`
+    ),
     "",
     "## Snapshot",
   ];
 
   for (const dataset of report.datasets) {
     lines.push(
-      `- ${dataset.game_label}: raw notices ${dataset.raw_notice_count}, API events ${dataset.api_event_count}`
+      `- ${escapeIssueText(dataset.game_label)}: raw notices ${dataset.raw_notice_count}, API events ${dataset.api_event_count}`
     );
   }
 
@@ -1128,34 +1362,50 @@ function renderIssueBody(report) {
   if (report.review.findings.length === 0) {
     lines.push("No findings.");
   } else {
-    let index = 1;
-    for (const finding of report.review.findings) {
-      const label = GAME_LABELS[finding.game] ?? finding.game;
-      const title = finding.api_title || finding.raw_title || finding.title || "(untitled)";
+    const prioritizedFindings = prioritizeFindings(report.review.findings);
+    const includedFindingLines = [];
+    let includedCount = 0;
+    for (const finding of prioritizedFindings) {
+      const proposedLines = [
+        ...includedFindingLines,
+        ...renderFindingLines(finding, includedCount + 1),
+      ];
+      const proposedCount = includedCount + 1;
+      const omittedCount = prioritizedFindings.length - proposedCount;
+      const budgetProbe = finalizeIssueLines([
+        ...lines,
+        ...proposedLines,
+        ...(omittedCount > 0
+          ? [
+              `_${omittedCount} additional finding(s) omitted from this Issue body; see the upstream-review artifact._`,
+              "",
+            ]
+          : []),
+        "This issue is managed automatically by the Codex upstream-review workflow.",
+      ]);
+      if (Buffer.byteLength(budgetProbe, "utf8") > MAX_ISSUE_BODY_BYTES) break;
+      includedFindingLines.splice(0, includedFindingLines.length, ...proposedLines);
+      includedCount = proposedCount;
+    }
+    lines.push(...includedFindingLines);
+    const omittedCount = prioritizedFindings.length - includedCount;
+    if (omittedCount > 0) {
       lines.push(
-        `${index}. [${finding.severity}] ${label} / ${finding.kind} / \`${title}\``
+        `_${omittedCount} additional finding(s) omitted from this Issue body; see the upstream-review artifact._`,
+        ""
       );
-      if (finding.title && finding.title !== title) {
-        lines.push(`Finding title: \`${finding.title}\``);
-      }
-      if (finding.api_title && finding.api_title !== title) {
-        lines.push(`API title: \`${finding.api_title}\``);
-      }
-      if (finding.raw_title && finding.raw_title !== title && finding.raw_title !== finding.api_title) {
-        lines.push(`Raw title: \`${finding.raw_title}\``);
-      }
-      if (finding.start_time || finding.end_time) {
-        lines.push(`Window: \`${finding.start_time || "?"}\` -> \`${finding.end_time || "?"}\``);
-      }
-      lines.push(`Confidence: ${finding.confidence}`);
-      lines.push(finding.reason || "No reason provided.");
-      lines.push("");
-      index += 1;
     }
   }
 
-  lines.push("This issue is managed automatically by `scripts/review-upstream.mjs`.");
-  return lines.join("\n").trim() + "\n";
+  lines.push("This issue is managed automatically by the Codex upstream-review workflow.");
+  const body = finalizeIssueLines(lines);
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  if (bodyBytes > MAX_ISSUE_BODY_BYTES) {
+    throw new Error(
+      `Rendered issue body is ${bodyBytes} bytes; limit is ${MAX_ISSUE_BODY_BYTES}`
+    );
+  }
+  return body;
 }
 
 async function githubRequest(pathname, init = {}) {
@@ -1209,27 +1459,53 @@ async function syncIssue(report) {
 
   const { owner, repo } = parseRepoSlug();
   const title = process.env.UPSTREAM_REVIEW_ISSUE_TITLE?.trim() || DEFAULT_ISSUE_TITLE;
-  const issues = await listAllRepositoryIssues(owner, repo);
-  const existing = ensureArray(issues).find(
-    (issue) => !issue?.pull_request && issue?.title === title
-  );
+  const configuredIssueNumberValue = process.env.UPSTREAM_REVIEW_ISSUE_NUMBER?.trim() || "";
+  const configuredIssueNumber = Number(configuredIssueNumberValue);
+  let existing;
+
+  if (configuredIssueNumberValue) {
+    if (!Number.isInteger(configuredIssueNumber) || configuredIssueNumber <= 0) {
+      throw new Error(
+        `Invalid UPSTREAM_REVIEW_ISSUE_NUMBER: ${configuredIssueNumberValue}`
+      );
+    }
+    existing = await githubRequest(
+      `/repos/${owner}/${repo}/issues/${configuredIssueNumber}`
+    );
+    if (existing?.pull_request) {
+      throw new Error(`Configured issue #${configuredIssueNumber} is a pull request`);
+    }
+    if (existing?.title !== title) {
+      throw new Error(
+        `Configured issue #${configuredIssueNumber} has unexpected title: ${existing?.title || "(empty)"}`
+      );
+    }
+  } else {
+    const issues = await listAllRepositoryIssues(owner, repo);
+    existing = ensureArray(issues).find(
+      (issue) => !issue?.pull_request && issue?.title === title
+    );
+  }
+
   const openExisting = existing?.state === "open" ? existing : null;
 
   if (report.review.findings.length === 0) {
     if (!openExisting) return { action: "noop" };
 
-    await githubRequest(`/repos/${owner}/${repo}/issues/${openExisting.number}/comments`, {
-      method: "POST",
+    const updated = await githubRequest(`/repos/${owner}/${repo}/issues/${openExisting.number}`, {
+      method: "PATCH",
       body: JSON.stringify({
-        body: `No findings detected in scheduled run \`${report.generated_at}\`. Closing this issue.`,
+        title,
+        body: renderIssueBody(report),
+        state: "closed",
+        state_reason: "completed",
       }),
     });
-
-    await githubRequest(`/repos/${owner}/${repo}/issues/${openExisting.number}`, {
-      method: "PATCH",
-      body: JSON.stringify({ state: "closed" }),
-    });
-    return { action: "closed", issue_number: openExisting.number };
+    return {
+      action: "closed",
+      issue_number: updated.number,
+      issue_url: updated.html_url,
+    };
   }
 
   const body = renderIssueBody(report);
@@ -1267,13 +1543,110 @@ async function writeReport(report, outputPath) {
   await fs.writeFile(resolved, JSON.stringify(report, null, 2) + "\n", "utf8");
 }
 
+async function finalizeAgenticReview() {
+  const inputPath = process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim();
+  const agentOutputPath = process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH?.trim();
+  const reportPath = process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() || "";
+
+  const [inputText, agentOutputText] = await Promise.all([
+    readTextFile(inputPath, "collected review input"),
+    readTextFile(agentOutputPath, "Codex review output"),
+  ]);
+
+  let collectedInput;
+  try {
+    collectedInput = JSON.parse(inputText);
+  } catch (error) {
+    throw new Error(`Failed to parse collected review input: ${getErrorMessage(error)}`);
+  }
+
+  const input = validateCollectedReviewInput(collectedInput);
+  const agentReview = parseAgentReview(agentOutputText);
+  const suppressionsPath =
+    process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() ||
+    input.suppressions?.path ||
+    DEFAULT_SUPPRESSIONS_PATH;
+  const suppressions = await loadSuppressions(suppressionsPath);
+  const { filteredFindings, suppressedFindings } = applySuppressions(
+    agentReview.findings,
+    suppressions
+  );
+  const modelLabel = "Codex via Responses API";
+  const gameReviews = input.review_datasets.map((dataset) => {
+    const gameFindings = agentReview.findings.filter((finding) => finding.game === dataset.game);
+    return {
+      game: dataset.game,
+      model: modelLabel,
+      raw_summary: `${gameFindings.length} candidate finding(s) returned by Codex.`,
+      raw_finding_count: gameFindings.length,
+    };
+  });
+
+  const report = {
+    schema_version: 2,
+    mode: "agentic_review",
+    generated_at: input.generated_at,
+    finalized_at: new Date().toISOString(),
+    api_base_url: input.api_base_url,
+    datasets: input.datasets,
+    review_datasets: input.review_datasets,
+    suppressions: {
+      ...input.suppressions,
+      path: suppressionsPath,
+      count: suppressions.length,
+    },
+    review: {
+      engine: "codex",
+      transport: "responses",
+      model: modelLabel,
+      raw_summary: agentReview.summary,
+      game_reviews: gameReviews,
+      summary: summarizeFilteredReview(
+        agentReview.summary,
+        filteredFindings.length,
+        suppressedFindings.length
+      ),
+      findings: filteredFindings,
+      suppressed_findings: suppressedFindings,
+    },
+  };
+
+  const issue = await syncIssue(report).catch((error) => ({
+    action: "failed",
+    error: getErrorMessage(error),
+  }));
+  report.issue = issue;
+
+  await writeReport(report, reportPath);
+  console.log(JSON.stringify(report, null, 2));
+
+  if (issue.action === "failed") {
+    throw new Error(issue.error);
+  }
+}
+
 async function main() {
+  const collectOnly =
+    process.argv.includes("--collect-only") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_COLLECT_ONLY, false);
+  const finalize =
+    process.argv.includes("--finalize") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_FINALIZE, false);
+
+  if (collectOnly && finalize) {
+    throw new Error("Collect-only and finalize modes are mutually exclusive");
+  }
+  if (finalize) {
+    await finalizeAgenticReview();
+    return;
+  }
+
   const apiBaseUrl = trimTrailingSlash(
     process.env.UPSTREAM_REVIEW_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL
   );
   const suppressionsPath =
     process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() || DEFAULT_SUPPRESSIONS_PATH;
-  const games = parseGameList(process.env.UPSTREAM_REVIEW_GAMES);
+  const games = [...DEFAULT_GAMES];
   const maxItems = parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
   const generatedAt = new Date().toISOString();
   const suppressions = await loadSuppressions(suppressionsPath);
@@ -1308,12 +1681,14 @@ async function main() {
     buildGameDataset(game, rawNotices, apiEvents, maxItems)
   );
 
-  const review = await reviewWithOpenAi({ generated_at: generatedAt, datasets: reviewDatasets });
-  const { filteredFindings, suppressedFindings } = applySuppressions(review.findings, suppressions);
-  const report = {
+  const collectedReport = {
+    schema_version: 2,
+    mode: "collect_only",
     generated_at: generatedAt,
     api_base_url: apiBaseUrl,
+    max_items: maxItems,
     datasets,
+    review_datasets: reviewDatasets,
     suppressions: {
       path: suppressionsPath,
       count: suppressions.length,
@@ -1323,43 +1698,29 @@ async function main() {
         api_events: input.excluded_api_event_count,
       })),
     },
-    review: {
-      model: review.model,
-      raw_summary: review.summary,
-      game_reviews: review.game_reviews.map((gameReview) => ({
-        game: gameReview.game,
-        model: gameReview.model,
-        raw_summary: gameReview.summary,
-        raw_finding_count: gameReview.findings.length,
-      })),
-      summary: summarizeFilteredReview(
-        review.summary,
-        filteredFindings.length,
-        suppressedFindings.length
-      ),
-      findings: filteredFindings,
-      suppressed_findings: suppressedFindings,
-    },
   };
-
-  const issue = await syncIssue(report).catch((error) => ({
-    action: "failed",
-    error: error instanceof Error ? error.message : String(error),
-  }));
-  report.issue = issue;
-
-  const reportPath = process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() || "";
-  await writeReport(report, reportPath);
-
-  console.log(JSON.stringify(report, null, 2));
-
-  if (issue.action === "failed") {
-    throw new Error(issue.error);
-  }
+  const inputPath =
+    process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim() ||
+    process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() ||
+    "";
+  await writeReport(collectedReport, inputPath);
+  console.log(JSON.stringify(collectedReport, null, 2));
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(message);
-  process.exitCode = 1;
-});
+const isMainModule =
+  process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (isMainModule) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    console.error(message);
+    process.exitCode = 1;
+  });
+}
+
+export {
+  finalizeAgenticReview,
+  parseAgentReview,
+  renderIssueBody,
+  validateCollectedReviewInput,
+};
