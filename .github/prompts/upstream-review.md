@@ -17,11 +17,11 @@ shell output can be truncated. First inspect its identity, notes, and item count
 node -e 'const x=require("./artifacts/upstream-review-input.json"); const d=x.review_dataset; console.log(JSON.stringify({mode:x.mode,target_game:x.target_game,dataset_game:d?.game,notes:d?.notes,raw_notice_count:d?.raw_notice_count,raw_items:d?.raw_notices?.length,api_event_count:d?.api_event_count,api_items:d?.api_events?.length}))'
 ```
 
-Then read both arrays completely in batches of at most 5 items. Use this command with
-`raw_notices` and `api_events`, advancing `start` by 5 until it reaches `total`:
+Then read both arrays completely in batches of at most 10 items. Use this command with
+`raw_notices` and `api_events`, advancing `start` by 10 until it reaches `total`:
 
 ```bash
-node -e 'const x=require("./artifacts/upstream-review-input.json"); const [field,startText,sizeText]=process.argv.slice(1); const start=Number(startText); const size=Number(sizeText); const items=x.review_dataset?.[field]; if(!Array.isArray(items)||!Number.isInteger(start)||!Number.isInteger(size)||start<0||size<1||size>5) throw new Error("invalid chunk request"); console.log(JSON.stringify({field,start,size,total:items.length,items:items.slice(start,start+size)}))' raw_notices 0 5
+node -e 'const x=require("./artifacts/upstream-review-input.json"); const [field,startText,sizeText]=process.argv.slice(1); const start=Number(startText); const size=Number(sizeText); const items=x.review_dataset?.[field]; if(!Array.isArray(items)||!Number.isInteger(start)||!Number.isInteger(size)||start<0||size<1||size>10) throw new Error("invalid chunk request"); console.log(JSON.stringify({field,start,size,total:items.length,items:items.slice(start,start+size)}))' raw_notices 0 10
 ```
 
 Do not finish until the chunks cover every reported item in both arrays.
