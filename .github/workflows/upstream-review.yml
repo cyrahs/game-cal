@@ -11,7 +11,74 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Verify OpenAI configuration
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+        run: |
+          missing=()
+          for secret_name in \
+            OPENAI_API_KEY \
+            OPENAI_BASE_URL \
+            OPENAI_MODEL \
+            OPENAI_REASONING_EFFORT
+          do
+            if [ -z "${!secret_name:-}" ]; then
+              missing+=("$secret_name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing required workflow secret(s): ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Verify independent reviewer identity
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "Missing required workflow secret: UPSTREAM_REVIEW_APPROVAL_TOKEN" >&2
+            exit 1
+          fi
+          reviewer_login="$(gh api user --jq .login)"
+          if [ "$reviewer_login" = "github-actions[bot]" ]; then
+            echo "The approval token must use an identity different from github-actions[bot]." >&2
+            exit 1
+          fi
+          if ! gh api "repos/$GH_REPO" --jq '.permissions.admin == true' | grep -qx true; then
+            echo "The approval-token identity must have admin access to $GH_REPO." >&2
+            exit 1
+          fi
+          protection_path="$RUNNER_TEMP/upstream-review-branch-protection.json"
+          if ! gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection_path"; then
+            echo "The default branch must require pull request reviews and invalidate stale approvals." >&2
+            exit 1
+          fi
+          if ! jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            )
+          ' "$protection_path" >/dev/null
+          then
+            echo "Enable at least one required approval plus stale-review dismissal or last-push approval." >&2
+            exit 1
+          fi
+          echo "Independent PR reviewer identity: $reviewer_login" >> "$GITHUB_STEP_SUMMARY"
+
   collect:
+    needs: preflight
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -524,6 +591,10 @@ jobs:
       needs.validate_patch.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      pr_number: ${{ steps.create_pr.outputs.pr_number }}
+      pr_url: ${{ steps.create_pr.outputs.pr_url }}
+      head_sha: ${{ steps.commit_fix.outputs.head_sha }}
     permissions:
       contents: write
       pull-requests: write
@@ -600,6 +671,7 @@ jobs:
         run: node scripts/review-upstream.mjs --render-fix-pr
 
       - name: Commit and push automatic fix branch
+        id: commit_fix
         env:
           FIX_BRANCH: ${{ steps.verify_fix.outputs.fix_branch }}
           BASE_SHA: ${{ github.sha }}
@@ -629,7 +701,9 @@ jobs:
             /usr/bin/git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             /usr/bin/git -c core.hooksPath=/dev/null commit -m "fix: address upstream review findings"
             /usr/bin/git push origin "HEAD:refs/heads/$FIX_BRANCH"
+            remote_commit="$(/usr/bin/git rev-parse HEAD)"
           fi
+          echo "head_sha=$remote_commit" >> "$GITHUB_OUTPUT"
 
       - name: Open draft pull request
         id: create_pr
@@ -638,6 +712,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           FIX_BRANCH: ${{ steps.verify_fix.outputs.fix_branch }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ steps.commit_fix.outputs.head_sha }}
         run: |
           pr_url="$(
             gh pr create \
@@ -648,5 +724,485 @@ jobs:
               --title "fix: address upstream review findings" \
               --body-file "$RUNNER_TEMP/upstream-review-pr-body.md"
           )"
+          pr_number="${pr_url##*/}"
+          if ! [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Could not determine the created PR number from: $pr_url" >&2
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/pulls/$pr_number" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              .state == "open" and
+              .draft == true and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The created PR does not match the verified branch snapshot." >&2
+            exit 1
+          fi
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "Draft PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+  review_pr:
+    needs:
+      - publish
+      - validate_patch
+      - open_pr
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.validate_patch.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.open_pr.outputs.pr_number != '' &&
+      needs.open_pr.outputs.head_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      review_json: ${{ steps.review_fix.outputs['final-message'] }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download verified patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-fix-verified
+          path: ${{ runner.temp }}/upstream-review-fix-verified
+
+      - name: Prepare exact PR review workspace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: artifacts/upstream-review-pr-review-input.json
+        run: |
+          node scripts/review-upstream.mjs --verify-fix-artifact
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$UPSTREAM_REVIEW_BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$UPSTREAM_REVIEW_HEAD_SHA" \
+            '
+              .state == "open" and
+              .draft == true and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed before Codex review." >&2
+            exit 1
+          fi
+
+          /usr/bin/git apply --check "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          /usr/bin/git apply --index "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          expected_tree="$(/usr/bin/git write-tree)"
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-pr"
+          remote_commit="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr)"
+          remote_tree="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr^{tree})"
+          remote_line="$(/usr/bin/git rev-list --parents -n 1 refs/remotes/origin/upstream-review-pr)"
+          read -r _ remote_parent extra_parent <<< "$remote_line"
+          if \
+            [ "$remote_commit" != "$UPSTREAM_REVIEW_HEAD_SHA" ] ||
+            [ "$remote_parent" != "$UPSTREAM_REVIEW_BASE_SHA" ] ||
+            [ -n "$extra_parent" ] ||
+            [ "$remote_tree" != "$expected_tree" ]
+          then
+            echo "The PR commit does not exactly match the verified patch." >&2
+            exit 1
+          fi
+
+          /usr/bin/git reset --hard "$UPSTREAM_REVIEW_HEAD_SHA"
+          mkdir -p artifacts
+          cp \
+            "$UPSTREAM_REVIEW_FIX_INPUT_PATH" \
+            artifacts/upstream-review-fix-input.json
+          node scripts/review-upstream.mjs --prepare-pr-review
+
+      - name: Review verified PR with Codex
+        id: review_fix
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-pr-review.md
+          output-schema-file: .github/schemas/upstream-review-pr-review-output.schema.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+  validate_pr_review:
+    needs:
+      - publish
+      - validate_patch
+      - open_pr
+      - review_pr
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.validate_patch.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.review_pr.result == 'success' &&
+      needs.review_pr.outputs.review_json != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      review_event: ${{ steps.finalize_review.outputs.review_event }}
+      review_request_sha256: ${{ steps.finalize_review.outputs.review_request_sha256 }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download verified patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-fix-verified
+          path: ${{ runner.temp }}/upstream-review-fix-verified
+
+      - name: Reconstruct exact reviewed commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+        run: |
+          node scripts/review-upstream.mjs --verify-fix-artifact
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$UPSTREAM_REVIEW_BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$UPSTREAM_REVIEW_HEAD_SHA" \
+            '
+              .state == "open" and
+              .draft == true and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed after Codex review." >&2
+            exit 1
+          fi
+
+          /usr/bin/git apply --check "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          /usr/bin/git apply --index "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          expected_tree="$(/usr/bin/git write-tree)"
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-pr"
+          remote_commit="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr)"
+          remote_tree="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr^{tree})"
+          remote_line="$(/usr/bin/git rev-list --parents -n 1 refs/remotes/origin/upstream-review-pr)"
+          read -r _ remote_parent extra_parent <<< "$remote_line"
+          if \
+            [ "$remote_commit" != "$UPSTREAM_REVIEW_HEAD_SHA" ] ||
+            [ "$remote_parent" != "$UPSTREAM_REVIEW_BASE_SHA" ] ||
+            [ -n "$extra_parent" ] ||
+            [ "$remote_tree" != "$expected_tree" ]
+          then
+            echo "The reviewed PR commit no longer matches the verified patch." >&2
+            exit 1
+          fi
+          /usr/bin/git reset --hard "$UPSTREAM_REVIEW_HEAD_SHA"
+
+      - name: Rebuild trusted review context
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-review/input.json
+        run: node scripts/review-upstream.mjs --prepare-pr-review
+
+      - name: Validate Codex review and render immutable request
+        id: finalize_review
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-review/input.json
+          UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON: ${{ needs.review_pr.outputs.review_json }}
+          UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH: ${{ runner.temp }}/upstream-review-pr-review/body.md
+          UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-pr-review/review-request.json
+        run: node scripts/review-upstream.mjs --finalize-pr-review
+
+      - name: Upload validated review request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-pr-review-request
+          path: ${{ runner.temp }}/upstream-review-pr-review/review-request.json
+          if-no-files-found: error
+
+  submit_pr_review:
+    needs:
+      - publish
+      - open_pr
+      - validate_pr_review
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.validate_pr_review.result == 'success' &&
+      needs.validate_pr_review.outputs.review_request_sha256 != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Download validated review request
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-review-request
+          path: ${{ runner.temp }}/upstream-review-pr-review-request
+
+      - name: Submit review from the independent identity
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          BASE_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          EXPECTED_EVENT: ${{ needs.validate_pr_review.outputs.review_event }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.validate_pr_review.outputs.review_request_sha256 }}
+        run: |
+          request_path="$RUNNER_TEMP/upstream-review-pr-review-request/review-request.json"
+          actual_request_sha256="$(/usr/bin/sha256sum "$request_path" | /usr/bin/cut -d ' ' -f 1)"
+          if [ "$actual_request_sha256" != "$EXPECTED_REQUEST_SHA256" ]; then
+            echo "The validated PR review request digest changed." >&2
+            exit 1
+          fi
+          if ! [[ "$EXPECTED_EVENT" =~ ^(APPROVE|REQUEST_CHANGES)$ ]]; then
+            echo "Invalid trusted PR review event." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg event "$EXPECTED_EVENT" \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              (keys | sort) == ["body", "commit_id", "event"] and
+              .event == $event and
+              .commit_id == $head_sha and
+              (.body | type == "string") and
+              (.body | length > 0)
+            ' \
+            "$request_path" >/dev/null
+          then
+            echo "The validated PR review request is malformed." >&2
+            exit 1
+          fi
+
+          reviewer_login="$(gh api user --jq .login)"
+          if ! gh api "repos/$GH_REPO" --jq '.permissions.admin == true' | grep -qx true; then
+            echo "The approval-token identity no longer has admin access to $GH_REPO." >&2
+            exit 1
+          fi
+          protection_path="$RUNNER_TEMP/upstream-review-branch-protection.json"
+          if ! gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection_path"; then
+            echo "The default branch protection could not be verified before review submission." >&2
+            exit 1
+          fi
+          if ! jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            )
+          ' "$protection_path" >/dev/null
+          then
+            echo "The default branch no longer invalidates stale approvals." >&2
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          author_login="$(jq -r .user.login "$RUNNER_TEMP/upstream-review-pr.json")"
+          if [ "$reviewer_login" = "$author_login" ]; then
+            echo "The PR author cannot approve or request changes on the same PR." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              .state == "open" and
+              .draft == true and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed before review submission." >&2
+            exit 1
+          fi
+
+          expected_state="CHANGES_REQUESTED"
+          if [ "$EXPECTED_EVENT" = "APPROVE" ]; then
+            expected_state="APPROVED"
+          fi
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+            > "$RUNNER_TEMP/upstream-review-existing-reviews.json"
+          if jq -e \
+            --arg login "$reviewer_login" \
+            --arg commit "$HEAD_SHA" \
+            --arg state "$expected_state" \
+            '
+              [
+                .[] |
+                select(
+                  .user.login == $login and
+                  .commit_id == $commit and
+                  (.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                )
+              ] |
+              sort_by(.submitted_at, .id) |
+              last |
+              .state == $state
+            ' \
+            "$RUNNER_TEMP/upstream-review-existing-reviews.json" >/dev/null
+          then
+            current_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+            if [ "$current_head" != "$HEAD_SHA" ]; then
+              echo "The PR head changed while an existing review was checked." >&2
+              exit 1
+            fi
+            echo "The independent reviewer already submitted $expected_state for this exact commit." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh api \
+            --method POST \
+            "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
+            --input "$request_path" \
+            > "$RUNNER_TEMP/upstream-review-created-review.json"
+          if ! jq -e \
+            --arg login "$reviewer_login" \
+            --arg commit "$HEAD_SHA" \
+            --arg state "$expected_state" \
+            '
+              .user.login == $login and
+              .commit_id == $commit and
+              .state == $state
+            ' \
+            "$RUNNER_TEMP/upstream-review-created-review.json" >/dev/null
+          then
+            echo "GitHub returned an unexpected PR review snapshot." >&2
+            exit 1
+          fi
+          review_id="$(jq -r .id "$RUNNER_TEMP/upstream-review-created-review.json")"
+          if ! [[ "$review_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "GitHub returned an invalid PR review id." >&2
+            exit 1
+          fi
+          current_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$current_head" != "$HEAD_SHA" ]; then
+            if ! gh api \
+              --method PUT \
+              "repos/$GH_REPO/pulls/$PR_NUMBER/reviews/$review_id/dismissals" \
+              -f message='Dismissed automatically because the PR head changed during review submission.' \
+              -f event='DISMISS' \
+              > "$RUNNER_TEMP/upstream-review-dismissed-review.json"
+            then
+              echo "The PR head changed and the just-created review could not be dismissed." >&2
+              exit 1
+            fi
+            if ! jq -e \
+              --arg login "$reviewer_login" \
+              --arg commit "$HEAD_SHA" \
+              --argjson id "$review_id" \
+              '
+                .id == $id and
+                .user.login == $login and
+                .commit_id == $commit and
+                .state == "DISMISSED"
+              ' \
+              "$RUNNER_TEMP/upstream-review-dismissed-review.json" >/dev/null
+            then
+              echo "GitHub returned an unexpected dismissed-review snapshot." >&2
+              exit 1
+            fi
+            echo "The PR head changed while the review was submitted." >&2
+            exit 1
+          fi
+          review_url="$(jq -r .html_url "$RUNNER_TEMP/upstream-review-created-review.json")"
+          echo "$expected_state review: $review_url" >> "$GITHUB_STEP_SUMMARY"

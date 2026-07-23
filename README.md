@@ -173,8 +173,11 @@ pnpm --filter @game-cal/api start
 GitHub Actions 页面从默认分支手动触发；非默认分支不会运行，以免未合并的
 workflow 代码接触 Secrets。
 
-Workflow 分成六个相互隔离的阶段：
+Workflow 分成十个相互隔离的阶段：
 
+- `preflight`：在接触仓库或调用模型前检查五个 Secrets，确认最终 reviewer token
+  属于不同于 `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支会让
+  新提交后的旧批准失效。
 - `collect`：启动本地 Node API，抓取六个游戏的原始公告与当前
   `/api/events/:game` 输出，过滤已过期项和 reviewer-input suppression。
 - `review`：用六游戏 matrix 在相互隔离的 runner 中分别发起 Responses agent
@@ -193,6 +196,16 @@ Workflow 分成六个相互隔离的阶段：
 - `open_pr`：只接收上一步验证过的补丁，再次核对 base SHA、digest、路径和默认分支
   tip，然后用固定 commit/PR 文案非强制推送 fingerprint 分支并创建 Draft PR。这个
   job 不安装依赖，也不执行被修改的 parser 代码。
+- `review_pr`：在新的只读 runner 中把 PR 的 base、head、单一 parent 和 tree 与已验证
+  patch 精确比对，再发起**一个**独立 Codex review 会话；这个 job 没有 GitHub 写
+  权限，也拿不到最终 reviewer token。
+- `validate_pr_review`：在另一台无 OpenAI Secrets、无 GitHub 写权限的 runner 中重建
+  同一 PR snapshot，严格校验 review JSON；只有无 P1/P2 时才能生成 `APPROVE`，
+  存在 P1/P2 时只能生成 `REQUEST_CHANGES`。
+- `submit_pr_review`：不 checkout 或执行 PR 代码，仅下载经过校验且带 SHA-256 的
+  review request，复验分支保护和 PR head 后，用独立身份把 review 绑定到精确
+  `commit_id` 提交；若提交期间 head 发生变化，会立即撤销刚创建的 review 并失败。
+  PR 仍保持 Draft，不会自动 ready 或 merge。
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
@@ -202,9 +215,13 @@ reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；
 自动修复若越过文件白名单、创建/删除/重命名文件、改变文件模式、只改空白、生成
 二进制或超过 512 KB 的 patch、测试失败，均不会进入提 PR 阶段。相同 findings 的
 open、closed 或 merged PR 都会被 fingerprint 去重，workflow 不会 force-push 覆盖
-人工修改。运行产物和 API 日志会作为 Actions artifacts 保存。
+人工修改。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与
+PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未
+配置“新提交使旧批准失效”时，也会在调用模型前失败。一次有 findings 的完整运行
+最多调用 8 个 agent：六个游戏 reviewer、一个 fix agent 和一个 PR review agent。
+运行产物和 API 日志会作为 Actions artifacts 保存。
 
-需要配置四个 GitHub Actions Secrets：
+需要配置五个 GitHub Actions Secrets：
 
 - `OPENAI_API_KEY`：网关使用的 Bearer API key。
 - `OPENAI_BASE_URL`：完整的 Responses POST endpoint。虽然沿用旧变量名，但值必须
@@ -212,19 +229,33 @@ open、closed 或 merged PR 都会被 fingerprint 去重，workflow 不会 force
   `https://gateway.example/v1`。
 - `OPENAI_MODEL`：网关支持的 Codex 模型名。
 - `OPENAI_REASONING_EFFORT`：模型支持的推理强度，例如 `low`、`medium`、`high`。
+- `UPSTREAM_REVIEW_APPROVAL_TOKEN`：独立 GitHub 身份的 fine-grained PAT，只选择
+  本仓库并授予 `Pull requests: Read and write` 与 `Administration: Read`。后者仅
+  用于读取分支保护设置。该身份必须不同于 `github-actions[bot]`，并对仓库拥有
+  admin 权限；token 只会注入最终 `submit_pr_review` job 和不 checkout 仓库的
+  `preflight` 身份检查，绝不会提供给 Codex、补丁验证或执行 PR 代码的 job。
 
 网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
 `Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
 `.github/prompts/upstream-review.md` 与
 `.github/schemas/upstream-review-output.schema.json`；修复 agent 使用
 `.github/prompts/upstream-review-fix.md` 与
-`.github/schemas/upstream-review-fix-output.schema.json`。
+`.github/schemas/upstream-review-fix-output.schema.json`；独立 PR reviewer 使用
+`.github/prompts/upstream-review-pr-review.md` 与
+`.github/schemas/upstream-review-pr-review-output.schema.json`。
 
 自动创建 PR 还需要在仓库 `Settings → Actions → General → Workflow permissions`
 中启用 **Allow GitHub Actions to create and approve pull requests**。GitHub 将“创建”
-和“批准”合并在同一个仓库级开关里；本 workflow 只在 `open_pr` job 申请
-`contents: write` / `pull-requests: write`，不会批准 PR。未启用时，前面的审查、
-Issue 和补丁验证仍可运行，但最终创建 PR 会被 GitHub 拒绝。
+和“批准”合并在同一个仓库级开关里。`open_pr` 使用最小权限的 `GITHUB_TOKEN`
+创建 PR；因为 GitHub 禁止 PR 作者自审，最终 review 必须使用上面的独立 token。
+
+自动批准还要求默认分支启用保护规则：打开
+`Settings → Branches → Branch protection rules`，为 `main` 开启
+**Require a pull request before merging**、至少 1 个 required approval，并开启
+**Dismiss stale pull request approvals when new commits are pushed**；也可以用
+**Require approval of the most recent reviewable push** 提供同等的 fail-closed
+保证。workflow 会在开始和最终提交 review 前各复验一次，不满足时不会调用 agent
+或提交 review。
 
 可选环境变量：
 
@@ -241,14 +272,21 @@ Issue 和补丁验证仍可运行，但最终创建 PR 会被 GitHub 拒绝。
 - `UPSTREAM_REVIEW_FIX_METADATA_PATH`（可信校验后的修复元数据）
 - `UPSTREAM_REVIEW_FIX_MANIFEST_PATH`（包含 base SHA、路径、patch digest 的 manifest）
 - `UPSTREAM_REVIEW_FIX_PATCH_PATH`（候选或已验证 patch）
+- `UPSTREAM_REVIEW_HEAD_SHA`（可信 PR head commit）
+- `UPSTREAM_REVIEW_PR_NUMBER` / `UPSTREAM_REVIEW_PR_URL`（可信 PR snapshot）
+- `UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH`（PR review 的结构化上下文）
+- `UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON`（Codex review 的 inline JSON）
+- `UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH`（确定性 review Markdown）
+- `UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH`（绑定 commit 的 GitHub review request）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_ISSUE_NUMBER`（workflow 固定为 `1`）
 - `UPSTREAM_REVIEW_ISSUE_TITLE`（workflow 固定为 `Upstream Review Alerts`）
 - `UPSTREAM_REVIEW_DRY_RUN=1`（finalize 时只生成报告，不操作 GitHub Issue）
 
 `pnpm review:upstream` / `pnpm review:upstream:collect` 只执行确定性采集，不调用模型；
-`pnpm review:upstream:finalize` 校验已有 agent 输出并发布结果。生产 workflow 不再调用
-旧的 Chat Completions 接口。
+`pnpm review:upstream:finalize` 校验已有 agent 输出并发布结果；
+`prepare-pr-review` / `finalize-pr-review` 对应 PR review 上下文和可信 request
+生成。生产 workflow 不再调用旧的 Chat Completions 接口。
 
 Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除；对于 `kind: "missing_event"` 的规则，对应 raw notice 会在送审前从 reviewer 输入中排除。
 

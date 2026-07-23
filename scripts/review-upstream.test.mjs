@@ -9,13 +9,20 @@ import { promisify } from "node:util";
 
 import {
   buildAgenticFixInput,
+  buildAgenticPrReviewInput,
   extractGameReviewInput,
   finalizeAgenticFix,
+  finalizeAgenticPrReview,
   finalizeAgenticReview,
   parseAgentReview,
   parseAgentFixOutput,
+  parseAgentPrReviewOutput,
   renderFixPrBody,
   renderIssueBody,
+  prepareAgenticPrReview,
+  renderPrReviewBody,
+  renderPrReviewRequest,
+  validateAgenticPrReviewInput,
   validateCollectedReviewInput,
   validateFixManifest,
   verifyAgenticFixArtifact,
@@ -136,6 +143,33 @@ function agentFixOutput(fixInput, changedFiles, overrides = {}) {
         ? "Updated the matching parser."
         : "No safe automatic change was available.",
     })),
+    ...overrides,
+  };
+}
+
+function prReviewContext(overrides = {}) {
+  return {
+    base_sha: "a".repeat(40),
+    head_sha: "b".repeat(40),
+    patch_sha256: "c".repeat(64),
+    finding_fingerprint: "d".repeat(64),
+    pull_request: {
+      number: 42,
+      url: "https://github.com/example/game-cal/pull/42",
+    },
+    changed_files: ["apps/api/src/games/starrail.ts"],
+    ...overrides,
+  };
+}
+
+function agentPrReviewOutput(input, overrides = {}) {
+  return {
+    complete: true,
+    errors: [],
+    context_sha256: input.context_sha256,
+    verdict: "approve",
+    summary: "The parser change is focused and passes the required checks.",
+    findings: [],
     ...overrides,
   };
 }
@@ -499,6 +533,317 @@ test("validates patch bytes and renders escaped deterministic PR copy", () => {
   assert.match(body, /pnpm typecheck/);
 });
 
+test("builds a digest-bound PR review input and validates exact trusted context", () => {
+  const context = prReviewContext();
+  const input = buildAgenticPrReviewInput(context);
+
+  assert.equal(input.mode, "agentic_pr_review");
+  assert.match(input.context_sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(input.pull_request, context.pull_request);
+  assert.deepEqual(
+    validateAgenticPrReviewInput(input, context),
+    input
+  );
+  assert.equal(
+    buildAgenticPrReviewInput(context).context_sha256,
+    input.context_sha256
+  );
+
+  const tamperedInput = {
+    ...input,
+    head_sha: "e".repeat(40),
+  };
+  assert.throws(
+    () => validateAgenticPrReviewInput(tamperedInput, context),
+    /context SHA-256 mismatch/
+  );
+  for (const changedContext of [
+    { ...context, base_sha: "e".repeat(40) },
+    { ...context, head_sha: "e".repeat(40) },
+    { ...context, patch_sha256: "e".repeat(64) },
+    { ...context, finding_fingerprint: "e".repeat(64) },
+    {
+      ...context,
+      pull_request: {
+        number: 43,
+        url: "https://github.com/example/game-cal/pull/43",
+      },
+    },
+    {
+      ...context,
+      changed_files: ["apps/api/src/games/zzz.ts"],
+    },
+  ]) {
+    const replayedInput = buildAgenticPrReviewInput(changedContext);
+    assert.throws(
+      () => validateAgenticPrReviewInput(replayedInput, context),
+      /does not match the trusted PR context/
+    );
+  }
+});
+
+test("accepts P3-only approval and renders a deterministic escaped review request", () => {
+  const input = buildAgenticPrReviewInput(prReviewContext());
+  const rawOutput = agentPrReviewOutput(input, {
+    summary: "@team <script>alert(1)</script>",
+    findings: [
+      {
+        severity: "P3",
+        path: "apps/api/src/games/starrail.ts",
+        line: 19,
+        title: "Prefer `const` @maintainers",
+        body: "This is non-blocking. <img src=x onerror=alert(1)>",
+      },
+      {
+        severity: "P3",
+        path: "apps/api/src/games/starrail.ts",
+        line: 3,
+        title: "Earlier line",
+        body: "Keep the helper local.",
+      },
+    ],
+  });
+  const review = parseAgentPrReviewOutput(
+    JSON.stringify(rawOutput),
+    input
+  );
+  assert.equal(review.verdict, "approve");
+  assert.deepEqual(
+    review.findings.map((finding) => finding.line),
+    [3, 19]
+  );
+
+  const request = renderPrReviewRequest(review, input);
+  const body = renderPrReviewBody(review, input);
+  assert.deepEqual(Object.keys(request), ["body", "event", "commit_id"]);
+  assert.equal(request.event, "APPROVE");
+  assert.equal(request.commit_id, input.head_sha);
+  assert.equal(request.body, body);
+  assert.match(body, /@​team/);
+  assert.match(body, /@​maintainers/);
+  assert.doesNotMatch(body, /<script>/);
+  assert.doesNotMatch(body, /<img /);
+
+  const reordered = parseAgentPrReviewOutput(
+    JSON.stringify({
+      ...rawOutput,
+      findings: [...rawOutput.findings].reverse(),
+    }),
+    input
+  );
+  assert.equal(
+    renderPrReviewBody(reordered, input),
+    body
+  );
+});
+
+test("requires blocking findings exactly when requesting PR changes", () => {
+  const input = buildAgenticPrReviewInput(prReviewContext());
+  const blockingFinding = {
+    severity: "P2",
+    path: "apps/api/src/games/starrail.ts",
+    line: 12,
+    title: "Incorrect filter",
+    body: "This still includes expired events.",
+  };
+
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            verdict: "approve",
+            findings: [blockingFinding],
+          })
+        ),
+        input
+      ),
+    /cannot approve with P1 or P2/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            verdict: "request_changes",
+            findings: [
+              {
+                ...blockingFinding,
+                severity: "P3",
+              },
+            ],
+          })
+        ),
+        input
+      ),
+    /must include a P1 or P2/
+  );
+
+  const review = parseAgentPrReviewOutput(
+    JSON.stringify(
+      agentPrReviewOutput(input, {
+        verdict: "request_changes",
+        findings: [blockingFinding],
+      })
+    ),
+    input
+  );
+  const request = renderPrReviewRequest(review, input);
+  assert.equal(request.event, "REQUEST_CHANGES");
+  assert.equal(request.commit_id, input.head_sha);
+});
+
+test("rejects PR review output with a replayed context or invalid finding location", () => {
+  const input = buildAgenticPrReviewInput(prReviewContext());
+  const baseFinding = {
+    severity: "P3",
+    path: "apps/api/src/games/starrail.ts",
+    line: 1,
+    title: "Small cleanup",
+    body: "This is optional.",
+  };
+
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            context_sha256: "f".repeat(64),
+          })
+        ),
+        input
+      ),
+    /context does not match/
+  );
+  for (const [findingPatch, expectedError] of [
+    [
+      { path: "README.md" },
+      /outside changed_files/,
+    ],
+    [
+      { line: 0 },
+      /finding line/,
+    ],
+    [
+      { line: 1.5 },
+      /finding line/,
+    ],
+    [
+      { severity: "P0" },
+      /finding severity/,
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        parseAgentPrReviewOutput(
+          JSON.stringify(
+            agentPrReviewOutput(input, {
+              findings: [{ ...baseFinding, ...findingPatch }],
+            })
+          ),
+          input
+        ),
+      expectedError
+    );
+  }
+});
+
+test("enforces PR review field and finding count limits", () => {
+  const input = buildAgenticPrReviewInput(prReviewContext());
+  const validFinding = {
+    severity: "P3",
+    path: "apps/api/src/games/starrail.ts",
+    line: 1,
+    title: "Small cleanup",
+    body: "This is optional.",
+  };
+
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            summary: "s".repeat(2_001),
+          })
+        ),
+        input
+      ),
+    /summary/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            findings: [
+              {
+                ...validFinding,
+                title: "t".repeat(201),
+              },
+            ],
+          })
+        ),
+        input
+      ),
+    /finding title/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            findings: [
+              {
+                ...validFinding,
+                body: "b".repeat(2_001),
+              },
+            ],
+          })
+        ),
+        input
+      ),
+    /finding body/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            findings: Array.from({ length: 21 }, (_, index) => ({
+              ...validFinding,
+              line: index + 1,
+            })),
+          })
+        ),
+        input
+      ),
+    /at most 20/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify({
+          ...agentPrReviewOutput(input),
+          unexpected: true,
+        }),
+        input
+      ),
+    /unexpected or missing fields/
+  );
+  assert.throws(
+    () =>
+      parseAgentPrReviewOutput(
+        JSON.stringify(
+          agentPrReviewOutput(input, {
+            errors: [" "],
+          })
+        ),
+        input
+      ),
+    /incomplete PR review/
+  );
+});
+
 test("finalizes an allowed tracked parser modification into a bounded patch", async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-fix-repo-"));
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-fix-output-"));
@@ -512,6 +857,10 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
   const metadataPath = path.join(outputDir, "metadata.json");
   const manifestPath = path.join(outputDir, "manifest.json");
   const patchPath = path.join(outputDir, "fix.patch");
+  const reviewInputPath = path.join(outputDir, "review-input.json");
+  const reviewBodyPath = path.join(outputDir, "review-body.md");
+  const reviewRequestPath = path.join(outputDir, "review-request.json");
+  const githubOutputPath = path.join(outputDir, "github-output.txt");
 
   try {
     await fs.mkdir(path.dirname(sourcePath), { recursive: true });
@@ -576,6 +925,76 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
       ["apps/api/src/games/starrail.ts"]
     );
 
+    await execFileAsync("git", ["apply", patchPath], { cwd: repoDir });
+    await execFileAsync(
+      "git",
+      ["add", "apps/api/src/games/starrail.ts"],
+      { cwd: repoDir }
+    );
+    await execFileAsync("git", ["commit", "-qm", "candidate fix"], {
+      cwd: repoDir,
+    });
+    const { stdout: headStdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "HEAD"],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    const headSha = headStdout.trim();
+    const reviewInput = await prepareAgenticPrReview({
+      cwd: repoDir,
+      outputPath: reviewInputPath,
+      inputPath,
+      manifestPath,
+      patchPath,
+      expectedBaseSha: baseSha,
+      headSha,
+      pullRequestNumber: 42,
+      pullRequestUrl: "https://github.com/example/game-cal/pull/42",
+      githubOutputPath: "",
+    });
+    const agentOutputJson = JSON.stringify(
+      agentPrReviewOutput(reviewInput)
+    );
+    const finalizedReview = await finalizeAgenticPrReview({
+      cwd: repoDir,
+      prReviewInputPath: reviewInputPath,
+      agentOutputJson,
+      bodyPath: reviewBodyPath,
+      requestPath: reviewRequestPath,
+      githubOutputPath,
+      inputPath,
+      manifestPath,
+      patchPath,
+      expectedBaseSha: baseSha,
+      headSha,
+      pullRequestNumber: 42,
+      pullRequestUrl: "https://github.com/example/game-cal/pull/42",
+    });
+    assert.equal(finalizedReview.request.event, "APPROVE");
+    assert.equal(finalizedReview.request.commit_id, headSha);
+    const reviewRequestText = await fs.readFile(reviewRequestPath, "utf8");
+    assert.deepEqual(
+      JSON.parse(reviewRequestText),
+      finalizedReview.request
+    );
+    assert.equal(
+      finalizedReview.request_sha256,
+      createHash("sha256").update(reviewRequestText).digest("hex")
+    );
+    assert.match(
+      await fs.readFile(githubOutputPath, "utf8"),
+      /review_event=APPROVE/
+    );
+    assert.match(
+      await fs.readFile(githubOutputPath, "utf8"),
+      new RegExp(
+        `review_request_sha256=${finalizedReview.request_sha256}`
+      )
+    );
+
+    await execFileAsync("git", ["checkout", "-q", baseSha], {
+      cwd: repoDir,
+    });
     await fs.writeFile(readmePath, "# Tampered artifact\n", "utf8");
     const { stdout: tamperedPatch } = await execFileAsync(
       "git",

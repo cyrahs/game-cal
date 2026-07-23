@@ -66,6 +66,15 @@ const MAX_AGENT_REASON_LENGTH = 1_000;
 const MAX_ISSUE_BODY_BYTES = 60_000;
 const MAX_FIX_EVIDENCE_ITEMS = 4;
 const MAX_FIX_PATCH_BYTES = 512_000;
+const MAX_PR_REVIEW_CHANGED_FILES = 20;
+const MAX_PR_REVIEW_FINDINGS = 20;
+const MAX_PR_REVIEW_SUMMARY_LENGTH = 2_000;
+const MAX_PR_REVIEW_TITLE_LENGTH = 200;
+const MAX_PR_REVIEW_BODY_LENGTH = 2_000;
+const MAX_PR_REVIEW_PATH_LENGTH = 500;
+const MAX_PR_REVIEW_URL_LENGTH = 1_000;
+const MAX_PR_REVIEW_LINE = 10_000_000;
+const MAX_PR_REVIEW_BODY_BYTES = 60_000;
 const FIX_WORKSPACE_ARTIFACTS = new Set([
   "artifacts/upstream-review-fix-input.json",
   "artifacts/upstream-review-fix-agent.json",
@@ -2713,6 +2722,570 @@ async function renderAgenticFixPr(options = {}) {
   return body;
 }
 
+function assertExactObjectFields(value, expectedFields, label) {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const actualFields = Object.keys(value).sort();
+  const sortedExpectedFields = [...expectedFields].sort();
+  if (
+    actualFields.length !== sortedExpectedFields.length ||
+    actualFields.some(
+      (field, index) => field !== sortedExpectedFields[index]
+    )
+  ) {
+    throw new Error(`${label} contains unexpected or missing fields`);
+  }
+}
+
+function validatePrReviewUrl(value, pullRequestNumber) {
+  if (
+    typeof value !== "string" ||
+    Array.from(value).length === 0 ||
+    Array.from(value).length > MAX_PR_REVIEW_URL_LENGTH
+  ) {
+    throw new Error("Invalid agentic PR review pull request URL");
+  }
+  const match =
+    /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/([1-9]\d*)$/.exec(
+      value
+    );
+  if (!match || Number(match[1]) !== pullRequestNumber) {
+    throw new Error("Agentic PR review URL does not match the pull request number");
+  }
+  return value;
+}
+
+function normalizePrReviewContext(rawContext) {
+  if (!isRecord(rawContext)) {
+    throw new Error("Invalid agentic PR review context");
+  }
+  const baseSha = rawContext.base_sha;
+  const headSha = rawContext.head_sha;
+  const patchSha256 = rawContext.patch_sha256;
+  const findingFingerprint = rawContext.finding_fingerprint;
+  if (
+    typeof baseSha !== "string" ||
+    typeof headSha !== "string" ||
+    !/^[a-f0-9]{40}$/.test(baseSha) ||
+    !/^[a-f0-9]{40}$/.test(headSha) ||
+    baseSha === headSha
+  ) {
+    throw new Error("Invalid agentic PR review base or head SHA");
+  }
+  if (
+    typeof patchSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(patchSha256) ||
+    typeof findingFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(findingFingerprint)
+  ) {
+    throw new Error("Invalid agentic PR review patch or finding digest");
+  }
+
+  const pullRequest = rawContext.pull_request;
+  assertExactObjectFields(
+    pullRequest,
+    ["number", "url"],
+    "Agentic PR review pull_request"
+  );
+  if (
+    !Number.isSafeInteger(pullRequest.number) ||
+    pullRequest.number <= 0 ||
+    pullRequest.number > 2_147_483_647
+  ) {
+    throw new Error("Invalid agentic PR review pull request number");
+  }
+  const pullRequestUrl = validatePrReviewUrl(
+    pullRequest.url,
+    pullRequest.number
+  );
+
+  const changedFiles = normalizeChangedFiles(rawContext.changed_files);
+  if (
+    changedFiles.length === 0 ||
+    changedFiles.length > MAX_PR_REVIEW_CHANGED_FILES ||
+    changedFiles.some(
+      (file) => Array.from(file).length > MAX_PR_REVIEW_PATH_LENGTH
+    )
+  ) {
+    throw new Error("Invalid agentic PR review changed_files");
+  }
+  if (
+    rawContext.changed_files.length !== changedFiles.length ||
+    rawContext.changed_files.some(
+      (file, index) => file !== changedFiles[index]
+    )
+  ) {
+    throw new Error(
+      "Agentic PR review changed_files must use canonical order"
+    );
+  }
+
+  return {
+    base_sha: baseSha,
+    head_sha: headSha,
+    patch_sha256: patchSha256,
+    finding_fingerprint: findingFingerprint,
+    pull_request: {
+      number: pullRequest.number,
+      url: pullRequestUrl,
+    },
+    changed_files: changedFiles,
+  };
+}
+
+function buildAgenticPrReviewInput(rawContext) {
+  const context = normalizePrReviewContext(rawContext);
+  return {
+    schema_version: 1,
+    mode: "agentic_pr_review",
+    ...context,
+    context_sha256: sha256(JSON.stringify(context)),
+  };
+}
+
+function validateAgenticPrReviewInput(input, expectedContext = null) {
+  assertExactObjectFields(
+    input,
+    [
+      "schema_version",
+      "mode",
+      "base_sha",
+      "head_sha",
+      "patch_sha256",
+      "finding_fingerprint",
+      "pull_request",
+      "changed_files",
+      "context_sha256",
+    ],
+    "Agentic PR review input"
+  );
+  if (
+    input.schema_version !== 1 ||
+    input.mode !== "agentic_pr_review"
+  ) {
+    throw new Error("Invalid agentic PR review input");
+  }
+  const context = normalizePrReviewContext(input);
+  const contextSha256 = sha256(JSON.stringify(context));
+  if (
+    typeof input.context_sha256 !== "string" ||
+    input.context_sha256 !== contextSha256
+  ) {
+    throw new Error("Agentic PR review context SHA-256 mismatch");
+  }
+
+  if (expectedContext != null) {
+    const expected = normalizePrReviewContext(expectedContext);
+    if (JSON.stringify(context) !== JSON.stringify(expected)) {
+      throw new Error(
+        "Agentic PR review input does not match the trusted PR context"
+      );
+    }
+  }
+
+  return {
+    ...input,
+    ...context,
+    context_sha256: contextSha256,
+  };
+}
+
+function validateBoundedPrReviewString(
+  value,
+  label,
+  maxLength,
+  options = {}
+) {
+  if (
+    typeof value !== "string" ||
+    Array.from(value).length > maxLength
+  ) {
+    throw new Error(
+      `Invalid Codex PR review ${label}: expected a string up to ${maxLength} characters`
+    );
+  }
+  const normalized = normalizeWhitespace(value);
+  if (options.required !== false && !normalized) {
+    throw new Error(`Invalid Codex PR review ${label}: value is required`);
+  }
+  return normalized;
+}
+
+function comparePrReviewFindings(a, b) {
+  const severityOrder = { P1: 1, P2: 2, P3: 3 };
+  return (
+    severityOrder[a.severity] - severityOrder[b.severity] ||
+    compareCodePoints(a.path, b.path) ||
+    a.line - b.line ||
+    compareCodePoints(a.title, b.title) ||
+    compareCodePoints(a.body, b.body)
+  );
+}
+
+function parseAgentPrReviewOutput(text, rawInput) {
+  const input = validateAgenticPrReviewInput(rawInput);
+  const parsed = parseJsonDocument(text, "Codex PR review output");
+  assertExactObjectFields(
+    parsed,
+    [
+      "complete",
+      "errors",
+      "context_sha256",
+      "verdict",
+      "summary",
+      "findings",
+    ],
+    "Codex PR review output"
+  );
+  if (
+    !Array.isArray(parsed.errors) ||
+    parsed.errors.length > 20 ||
+    parsed.errors.some(
+      (error) =>
+        typeof error !== "string" ||
+        Array.from(error).length > MAX_AGENT_ERROR_LENGTH
+    )
+  ) {
+    throw new Error(
+      "Invalid Codex PR review errors: expected at most 20 bounded strings"
+    );
+  }
+  const errors = parsed.errors
+    .map((error) => normalizeWhitespace(error))
+    .filter(Boolean);
+  if (
+    parsed.complete !== true ||
+    parsed.errors.length > 0
+  ) {
+    const detail = errors.length > 0 ? `: ${errors.join("; ")}` : "";
+    throw new Error(`Codex reported an incomplete PR review${detail}`);
+  }
+  if (parsed.context_sha256 !== input.context_sha256) {
+    throw new Error("Codex PR review output context does not match the PR");
+  }
+  if (!["approve", "request_changes"].includes(parsed.verdict)) {
+    throw new Error("Invalid Codex PR review verdict");
+  }
+  const summary = validateBoundedPrReviewString(
+    parsed.summary,
+    "summary",
+    MAX_PR_REVIEW_SUMMARY_LENGTH
+  );
+  if (
+    !Array.isArray(parsed.findings) ||
+    parsed.findings.length > MAX_PR_REVIEW_FINDINGS
+  ) {
+    throw new Error(
+      `Invalid Codex PR review findings: expected at most ${MAX_PR_REVIEW_FINDINGS}`
+    );
+  }
+
+  const changedFileSet = new Set(input.changed_files);
+  const seenFindings = new Set();
+  const findings = parsed.findings.map((finding, index) => {
+    assertExactObjectFields(
+      finding,
+      ["severity", "path", "line", "title", "body"],
+      `Codex PR review finding at index ${index}`
+    );
+    if (!["P1", "P2", "P3"].includes(finding.severity)) {
+      throw new Error(
+        `Invalid Codex PR review finding severity at index ${index}`
+      );
+    }
+    if (
+      typeof finding.path !== "string" ||
+      Array.from(finding.path).length === 0 ||
+      Array.from(finding.path).length > MAX_PR_REVIEW_PATH_LENGTH
+    ) {
+      throw new Error(
+        `Invalid Codex PR review finding path at index ${index}`
+      );
+    }
+    const normalizedPath = normalizeChangedFiles([finding.path])[0];
+    if (
+      normalizedPath !== finding.path ||
+      !changedFileSet.has(normalizedPath)
+    ) {
+      throw new Error(
+        `Codex PR review finding path is outside changed_files at index ${index}`
+      );
+    }
+    if (
+      !Number.isSafeInteger(finding.line) ||
+      finding.line <= 0 ||
+      finding.line > MAX_PR_REVIEW_LINE
+    ) {
+      throw new Error(
+        `Invalid Codex PR review finding line at index ${index}`
+      );
+    }
+    const normalizedFinding = {
+      severity: finding.severity,
+      path: normalizedPath,
+      line: finding.line,
+      title: validateBoundedPrReviewString(
+        finding.title,
+        `finding title at index ${index}`,
+        MAX_PR_REVIEW_TITLE_LENGTH
+      ),
+      body: validateBoundedPrReviewString(
+        finding.body,
+        `finding body at index ${index}`,
+        MAX_PR_REVIEW_BODY_LENGTH
+      ),
+    };
+    const findingKey = JSON.stringify(normalizedFinding);
+    if (seenFindings.has(findingKey)) {
+      throw new Error(`Duplicate Codex PR review finding at index ${index}`);
+    }
+    seenFindings.add(findingKey);
+    return normalizedFinding;
+  });
+  findings.sort(comparePrReviewFindings);
+
+  const hasBlockingFinding = findings.some(
+    (finding) => finding.severity === "P1" || finding.severity === "P2"
+  );
+  if (parsed.verdict === "approve" && hasBlockingFinding) {
+    throw new Error(
+      "Codex PR review cannot approve with P1 or P2 findings"
+    );
+  }
+  if (parsed.verdict === "request_changes" && !hasBlockingFinding) {
+    throw new Error(
+      "Codex PR review must include a P1 or P2 finding when requesting changes"
+    );
+  }
+
+  return {
+    schema_version: 1,
+    mode: "agentic_pr_review_result",
+    context_sha256: input.context_sha256,
+    verdict: parsed.verdict,
+    summary,
+    findings,
+  };
+}
+
+function escapePrReviewText(value) {
+  return normalizeWhitespace(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\\/g, "\\\\")
+    .replace(/([`*_[\]#|])/g, "\\$1")
+    .replace(/@/g, "@\u200b");
+}
+
+function renderPrReviewBody(review, rawInput) {
+  const input = validateAgenticPrReviewInput(rawInput);
+  if (
+    !isRecord(review) ||
+    review.mode !== "agentic_pr_review_result" ||
+    review.schema_version !== 1 ||
+    review.context_sha256 !== input.context_sha256 ||
+    !["approve", "request_changes"].includes(review.verdict) ||
+    typeof review.summary !== "string" ||
+    !Array.isArray(review.findings)
+  ) {
+    throw new Error("Invalid trusted Codex PR review result");
+  }
+
+  const lines = [
+    "## Automated Codex review",
+    "",
+    `**Verdict:** ${
+      review.verdict === "approve" ? "Approve" : "Request changes"
+    }`,
+    "",
+    escapePrReviewText(review.summary),
+    "",
+    "## Findings",
+    "",
+  ];
+  if (review.findings.length === 0) {
+    lines.push("No findings.");
+  } else {
+    for (const [index, finding] of review.findings.entries()) {
+      lines.push(
+        `${index + 1}. **${finding.severity}** · \`${escapeIssueCode(
+          `${finding.path}:${finding.line}`
+        )}\` · ${escapePrReviewText(finding.title)}`,
+        `   ${escapePrReviewText(finding.body)}`
+      );
+    }
+  }
+  lines.push(
+    "",
+    "## Verified context",
+    "",
+    `- Commit: \`${input.head_sha}\``,
+    `- Patch SHA-256: \`${input.patch_sha256}\``,
+    `- Finding fingerprint: \`${input.finding_fingerprint}\``,
+    `- Context SHA-256: \`${input.context_sha256}\``,
+    "",
+    "_This review was generated automatically from the exact commit and patch context above._",
+    ""
+  );
+  const body = lines.join("\n");
+  if (Buffer.byteLength(body, "utf8") > MAX_PR_REVIEW_BODY_BYTES) {
+    throw new Error("Rendered automatic PR review body exceeds the safety limit");
+  }
+  return body;
+}
+
+function renderPrReviewRequest(review, rawInput) {
+  const input = validateAgenticPrReviewInput(rawInput);
+  const body = renderPrReviewBody(review, input);
+  return {
+    body,
+    event:
+      review.verdict === "approve" ? "APPROVE" : "REQUEST_CHANGES",
+    commit_id: input.head_sha,
+  };
+}
+
+function getPrReviewContextFromManifest(manifest, options = {}) {
+  return {
+    base_sha: manifest.base_sha,
+    head_sha:
+      options.headSha ??
+      process.env.UPSTREAM_REVIEW_HEAD_SHA?.trim() ??
+      "",
+    patch_sha256: manifest.patch_sha256,
+    finding_fingerprint: manifest.finding_fingerprint,
+    pull_request: {
+      number: Number(
+        options.pullRequestNumber ??
+          process.env.UPSTREAM_REVIEW_PR_NUMBER?.trim() ??
+          ""
+      ),
+      url:
+        options.pullRequestUrl ??
+        process.env.UPSTREAM_REVIEW_PR_URL?.trim() ??
+        "",
+    },
+    changed_files: manifest.changed_files,
+  };
+}
+
+async function prepareAgenticPrReview(options = {}) {
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const outputPath =
+    options.outputPath ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH?.trim();
+  const { manifest } = await readAndValidateFixArtifact(options);
+  const input = buildAgenticPrReviewInput(
+    getPrReviewContextFromManifest(manifest, options)
+  );
+  const headResult = await runGit(["rev-parse", "HEAD"], { cwd });
+  const checkoutHead = String(headResult.stdout).trim();
+  if (checkoutHead !== input.head_sha) {
+    throw new Error(
+      `PR review checkout mismatch: expected ${input.head_sha}, got ${checkoutHead}`
+    );
+  }
+  await writeReport(input, outputPath, false);
+  await appendGitHubOutputs(
+    {
+      review_context_sha256: input.context_sha256,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: input.mode,
+      pull_request_number: input.pull_request.number,
+      head_sha: input.head_sha,
+      context_sha256: input.context_sha256,
+    })
+  );
+  return input;
+}
+
+async function finalizeAgenticPrReview(options = {}) {
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const prReviewInputPath =
+    options.prReviewInputPath ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH?.trim();
+  const agentOutputJson =
+    options.agentOutputJson ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON;
+  const agentOutputPath =
+    options.agentOutputPath ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_PATH?.trim();
+  const bodyPath =
+    options.bodyPath ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH?.trim();
+  const requestPath =
+    options.requestPath ??
+    process.env.UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH?.trim();
+  const [inputText, artifact, headResult] = await Promise.all([
+    readTextFile(prReviewInputPath, "agentic PR review input"),
+    readAndValidateFixArtifact(options),
+    runGit(["rev-parse", "HEAD"], { cwd }),
+  ]);
+  const expectedContext = getPrReviewContextFromManifest(
+    artifact.manifest,
+    options
+  );
+  const input = validateAgenticPrReviewInput(
+    parseJsonDocument(inputText, "agentic PR review input"),
+    expectedContext
+  );
+  const checkoutHead = String(headResult.stdout).trim();
+  if (checkoutHead !== input.head_sha) {
+    throw new Error(
+      `PR review checkout mismatch: expected ${input.head_sha}, got ${checkoutHead}`
+    );
+  }
+
+  const outputText =
+    typeof agentOutputJson === "string" && agentOutputJson.trim()
+      ? agentOutputJson
+      : await readTextFile(agentOutputPath, "Codex PR review output");
+  const review = parseAgentPrReviewOutput(outputText, input);
+  const request = renderPrReviewRequest(review, input);
+  const requestText = `${JSON.stringify(request)}\n`;
+  const requestSha256 = sha256(Buffer.from(requestText, "utf8"));
+  if (bodyPath) {
+    await writeTextFile(bodyPath, request.body);
+  }
+  await writeTextFile(requestPath, requestText);
+  await appendGitHubOutputs(
+    {
+      review_event: request.event,
+      review_request_sha256: requestSha256,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: review.mode,
+      verdict: review.verdict,
+      finding_count: review.findings.length,
+      review_event: request.event,
+      review_request_sha256: requestSha256,
+    })
+  );
+  return {
+    input,
+    review,
+    request,
+    request_sha256: requestSha256,
+  };
+}
+
 async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
   if (agentOutputDir) {
     return await Promise.all(
@@ -2865,6 +3438,12 @@ async function main() {
   const renderFixPr =
     process.argv.includes("--render-fix-pr") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_RENDER_FIX_PR, false);
+  const preparePrReview =
+    process.argv.includes("--prepare-pr-review") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_PREPARE_PR_REVIEW, false);
+  const finalizePrReview =
+    process.argv.includes("--finalize-pr-review") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_FINALIZE_PR_REVIEW, false);
 
   if (
     [
@@ -2875,6 +3454,8 @@ async function main() {
       finalizeFix,
       verifyFixArtifact,
       renderFixPr,
+      preparePrReview,
+      finalizePrReview,
     ].filter(Boolean).length > 1
   ) {
     throw new Error("Upstream review command modes are mutually exclusive");
@@ -2901,6 +3482,14 @@ async function main() {
   }
   if (renderFixPr) {
     await renderAgenticFixPr();
+    return;
+  }
+  if (preparePrReview) {
+    await prepareAgenticPrReview();
+    return;
+  }
+  if (finalizePrReview) {
+    await finalizeAgenticPrReview();
     return;
   }
 
@@ -2983,14 +3572,21 @@ if (isMainModule) {
 
 export {
   buildAgenticFixInput,
+  buildAgenticPrReviewInput,
   extractGameReviewInput,
   finalizeAgenticFix,
+  finalizeAgenticPrReview,
   finalizeAgenticReview,
   parseAgentReview,
   parseAgentFixOutput,
+  parseAgentPrReviewOutput,
   prepareAgenticFix,
+  prepareAgenticPrReview,
   renderFixPrBody,
   renderIssueBody,
+  renderPrReviewBody,
+  renderPrReviewRequest,
+  validateAgenticPrReviewInput,
   validateCollectedReviewInput,
   validateFixManifest,
   verifyAgenticFixArtifact,

@@ -1,0 +1,84 @@
+{
+  "type": "object",
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "request_changes"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "enum": [
+              "apps/api/src/games/genshin.ts",
+              "apps/api/src/games/starrail.ts",
+              "apps/api/src/games/ww.ts",
+              "apps/api/src/games/zzz.ts",
+              "apps/api/src/games/snowbreak.ts",
+              "apps/api/src/games/endfield.ts"
+            ]
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "path",
+          "line",
+          "title",
+          "body"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "complete",
+    "errors",
+    "context_sha256",
+    "verdict",
+    "summary",
+    "findings"
+  ],
+  "additionalProperties": false
+}
