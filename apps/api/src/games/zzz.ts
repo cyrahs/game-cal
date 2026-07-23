@@ -657,8 +657,16 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     fallbackStartIso,
     versionMaintenanceEndByLabel,
   });
+  const supplementalNoticeItems: MihoyoNapAnnItem[] = [
+    ...(noticeCategory?.list ?? []),
+    ...contentItems.map((item) => ({
+      ann_id: item.ann_id,
+      title: item.title,
+      subtitle: item.subtitle,
+    })),
+  ];
   const supplementalEvents = parseSupplementalActivityEventsFromAnnContent(
-    noticeCategory?.list ?? [],
+    supplementalNoticeItems,
     contentItemsByAnnId,
     {
       fallbackStartIso,

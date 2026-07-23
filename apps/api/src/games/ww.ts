@@ -42,6 +42,7 @@ const WW_IGNORE_TITLE_WORDS = [
   "防沉迷",
   "公平运营",
   "社区资讯",
+  "官方录播",
 ];
 
 const WW_PROMOTION_TITLE_WORDS = [
