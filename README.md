@@ -177,16 +177,19 @@ Workflow 分成三个相互隔离的 job：
 
 - `collect`：启动本地 Node API，抓取六个游戏的原始公告与当前
   `/api/events/:game` 输出，过滤已过期项和 reviewer-input suppression。
-- `review`：在新的 runner 中用官方 `openai/codex-action` 发起一次 Responses
-  agent 会话。Codex 只读仓库和采集 JSON，没有 Issue 写权限。
+- `review`：用六游戏 matrix 在相互隔离的 runner 中分别发起 Responses agent
+  会话。每个 Codex 只读仓库和对应游戏的紧凑 JSON shard，没有 Issue 写权限；
+  单个 shard 最多返回 8 条 findings，六份合计不超过 48 条。
 - `publish`：在第三个 runner 中严格校验结构化结果、再次应用 suppression，再由
   确定性脚本维护固定的 Issue #1 `Upstream Review Alerts`。这个 job 不接触
   OpenAI Secrets。
 
-采集数据、Codex 输出不完整，六个游戏未全部审查，JSON 不符合约束，或 Issue #1
-的类型/标题不符时，发布步骤会失败且不修改 Issue。有 findings 时更新或 reopen
-Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关闭时不操作。运行
-产物和 API 日志会作为 Actions artifacts 保存。
+每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
+`review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
+采集数据、任一 Codex 输出不完整、六个游戏未全部审查、JSON 不符合约束，或
+Issue #1 的类型/标题不符时，发布步骤会失败且不修改 Issue。有 findings 时更新或
+reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关闭时不操作。
+运行产物和 API 日志会作为 Actions artifacts 保存。
 
 需要配置四个 GitHub Actions Secrets：
 
@@ -207,7 +210,10 @@ Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关�
 - `UPSTREAM_REVIEW_API_BASE_URL`（默认 `http://127.0.0.1:8787`）
 - `UPSTREAM_REVIEW_MAX_ITEMS`（默认 `60`）
 - `UPSTREAM_REVIEW_INPUT_PATH`（采集模式写出的 JSON）
-- `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（finalize 模式读取的 Codex JSON）
+- `UPSTREAM_REVIEW_GAME`（extract-game 模式提取的游戏 ID）
+- `UPSTREAM_REVIEW_GAME_INPUT_PATH`（可选的单游戏 shard 输出路径；默认原位替换输入）
+- `UPSTREAM_REVIEW_AGENT_OUTPUT_DIR`（finalize 模式读取六份 Codex JSON 的目录）
+- `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（兼容旧版单文件 Codex JSON）
 - `UPSTREAM_REVIEW_REPORT_PATH`（finalize 模式写出的完整 JSON 报告）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_ISSUE_NUMBER`（workflow 固定为 `1`）

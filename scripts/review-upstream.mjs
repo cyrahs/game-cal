@@ -52,6 +52,7 @@ const CHINA_TZ_OFFSET = "+08:00";
 const RETRY_COUNT = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
 const MAX_AGENT_FINDINGS = 50;
+const MAX_AGENT_FINDINGS_PER_GAME = 8;
 const MAX_AGENT_ERROR_LENGTH = 1_000;
 const MAX_AGENT_SUMMARY_LENGTH = 2_000;
 const MAX_AGENT_TITLE_LENGTH = 500;
@@ -854,7 +855,23 @@ function validateAgentFinding(raw, index) {
   return finding;
 }
 
-function parseAgentReview(text) {
+function parseAgentReview(
+  text,
+  expectedGames = DEFAULT_GAMES,
+  maxFindings = MAX_AGENT_FINDINGS
+) {
+  if (
+    !Array.isArray(expectedGames) ||
+    expectedGames.length === 0 ||
+    new Set(expectedGames).size !== expectedGames.length ||
+    expectedGames.some((game) => !SUPPORTED_GAMES.has(game))
+  ) {
+    throw new Error("Invalid expected games for Codex review");
+  }
+  if (!Number.isInteger(maxFindings) || maxFindings <= 0) {
+    throw new Error("Invalid maximum finding count for Codex review");
+  }
+
   let parsed;
   try {
     parsed = JSON.parse(String(text ?? "").trim());
@@ -896,28 +913,48 @@ function parseAgentReview(text) {
     throw new Error("Invalid agent review: reviewed_games must contain strings");
   }
   const reviewedGames = parsed.reviewed_games.map((game) => String(game).trim());
-  const expectedGames = [...DEFAULT_GAMES].sort();
+  const sortedExpectedGames = [...expectedGames].sort();
   if (
-    reviewedGames.length !== DEFAULT_GAMES.length ||
-    new Set(reviewedGames).size !== DEFAULT_GAMES.length ||
-    reviewedGames.slice().sort().some((game, index) => game !== expectedGames[index])
+    reviewedGames.length !== expectedGames.length ||
+    new Set(reviewedGames).size !== expectedGames.length ||
+    reviewedGames
+      .slice()
+      .sort()
+      .some((game, index) => game !== sortedExpectedGames[index])
   ) {
-    throw new Error("Invalid agent review: reviewed_games must cover all six games exactly once");
+    const expectedDescription =
+      expectedGames.length === DEFAULT_GAMES.length
+        ? "all six games exactly once"
+        : `${expectedGames.join(", ")} exactly once`;
+    throw new Error(
+      `Invalid agent review: reviewed_games must cover ${expectedDescription}`
+    );
   }
 
   if (!Array.isArray(parsed.findings)) {
     throw new Error("Invalid agent review: findings must be an array");
   }
   const rawFindings = parsed.findings;
-  if (rawFindings.length > MAX_AGENT_FINDINGS) {
+  if (rawFindings.length > maxFindings) {
     throw new Error(
-      `Invalid agent review: ${rawFindings.length} findings exceeds the ${MAX_AGENT_FINDINGS} limit`
+      `Invalid agent review: ${rawFindings.length} findings exceeds the ${maxFindings} limit`
+    );
+  }
+
+  const allowedGames = new Set(expectedGames);
+  const findings = rawFindings.map((finding, index) =>
+    validateAgentFinding(finding, index)
+  );
+  const crossGameFinding = findings.find((finding) => !allowedGames.has(finding.game));
+  if (crossGameFinding) {
+    throw new Error(
+      `Invalid agent review: finding for ${crossGameFinding.game} is outside the expected game set`
     );
   }
 
   return {
     summary,
-    findings: rawFindings.map((finding, index) => validateAgentFinding(finding, index)),
+    findings,
   };
 }
 
@@ -1076,6 +1113,56 @@ function validateCollectedReviewInput(input) {
   }
 
   return input;
+}
+
+async function extractGameReviewInput(game, options = {}) {
+  const targetGame = String(game ?? "").trim();
+  if (!SUPPORTED_GAMES.has(targetGame)) {
+    throw new Error(`Invalid upstream review game: ${targetGame || "(empty)"}`);
+  }
+
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim();
+  const outputPath =
+    options.outputPath ??
+    (process.env.UPSTREAM_REVIEW_GAME_INPUT_PATH?.trim() || inputPath);
+  const inputText = await readTextFile(inputPath, "collected review input");
+
+  let collectedInput;
+  try {
+    collectedInput = JSON.parse(inputText);
+  } catch (error) {
+    throw new Error(`Failed to parse collected review input: ${getErrorMessage(error)}`);
+  }
+
+  const input = validateCollectedReviewInput(collectedInput);
+  const reviewDataset = input.review_datasets.find(
+    (dataset) => dataset.game === targetGame
+  );
+  if (!reviewDataset) {
+    throw new Error(`Collected review input is missing ${targetGame}`);
+  }
+
+  const gameInput = {
+    schema_version: 2,
+    mode: "review_game",
+    generated_at: input.generated_at,
+    target_game: targetGame,
+    max_items: input.max_items,
+    review_dataset: reviewDataset,
+  };
+  await writeReport(gameInput, outputPath, false);
+  console.log(
+    JSON.stringify({
+      mode: gameInput.mode,
+      target_game: targetGame,
+      output_path: path.resolve(outputPath),
+      raw_notice_count: reviewDataset.raw_notice_count,
+      api_event_count: reviewDataset.api_event_count,
+    })
+  );
+  return gameInput;
 }
 
 function getTitleValues(input) {
@@ -1536,21 +1623,57 @@ async function syncIssue(report) {
   };
 }
 
-async function writeReport(report, outputPath) {
+async function writeReport(report, outputPath, pretty = true) {
   if (!outputPath) return;
   const resolved = path.resolve(outputPath);
   await fs.mkdir(path.dirname(resolved), { recursive: true });
-  await fs.writeFile(resolved, JSON.stringify(report, null, 2) + "\n", "utf8");
+  const json = pretty ? JSON.stringify(report, null, 2) : JSON.stringify(report);
+  await fs.writeFile(resolved, json + "\n", "utf8");
+}
+
+async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
+  if (agentOutputDir) {
+    return await Promise.all(
+      DEFAULT_GAMES.map(async (game) => {
+        const outputPath = path.join(
+          path.resolve(agentOutputDir),
+          `upstream-review-agent-${game}.json`
+        );
+        const outputText = await readTextFile(
+          outputPath,
+          `Codex ${game} review output`
+        );
+        const review = parseAgentReview(
+          outputText,
+          [game],
+          MAX_AGENT_FINDINGS_PER_GAME
+        );
+        return { game, ...review };
+      })
+    );
+  }
+
+  const outputText = await readTextFile(
+    legacyAgentOutputPath,
+    "Codex review output"
+  );
+  const review = parseAgentReview(outputText);
+  return DEFAULT_GAMES.map((game) => ({
+    game,
+    summary: review.summary,
+    findings: review.findings.filter((finding) => finding.game === game),
+  }));
 }
 
 async function finalizeAgenticReview() {
   const inputPath = process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim();
+  const agentOutputDir = process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR?.trim();
   const agentOutputPath = process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH?.trim();
   const reportPath = process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() || "";
 
-  const [inputText, agentOutputText] = await Promise.all([
+  const [inputText, agentGameReviews] = await Promise.all([
     readTextFile(inputPath, "collected review input"),
-    readTextFile(agentOutputPath, "Codex review output"),
+    readAgentGameReviews(agentOutputDir, agentOutputPath),
   ]);
 
   let collectedInput;
@@ -1561,24 +1684,37 @@ async function finalizeAgenticReview() {
   }
 
   const input = validateCollectedReviewInput(collectedInput);
-  const agentReview = parseAgentReview(agentOutputText);
+  const agentFindings = agentGameReviews.flatMap((review) => review.findings);
+  if (agentFindings.length > MAX_AGENT_FINDINGS) {
+    throw new Error(
+      `Invalid combined agent review: ${agentFindings.length} findings exceeds the ${MAX_AGENT_FINDINGS} limit`
+    );
+  }
+  const agentSummary = truncateText(
+    agentGameReviews
+      .map(
+        (review) =>
+          `${review.game}: ${review.summary || "No clear findings."}`
+      )
+      .join(" "),
+    MAX_AGENT_SUMMARY_LENGTH
+  );
   const suppressionsPath =
     process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() ||
     input.suppressions?.path ||
     DEFAULT_SUPPRESSIONS_PATH;
   const suppressions = await loadSuppressions(suppressionsPath);
   const { filteredFindings, suppressedFindings } = applySuppressions(
-    agentReview.findings,
+    agentFindings,
     suppressions
   );
   const modelLabel = "Codex via Responses API";
-  const gameReviews = input.review_datasets.map((dataset) => {
-    const gameFindings = agentReview.findings.filter((finding) => finding.game === dataset.game);
+  const gameReviews = agentGameReviews.map((review) => {
     return {
-      game: dataset.game,
+      game: review.game,
       model: modelLabel,
-      raw_summary: `${gameFindings.length} candidate finding(s) returned by Codex.`,
-      raw_finding_count: gameFindings.length,
+      raw_summary: review.summary,
+      raw_finding_count: review.findings.length,
     };
   });
 
@@ -1599,10 +1735,10 @@ async function finalizeAgenticReview() {
       engine: "codex",
       transport: "responses",
       model: modelLabel,
-      raw_summary: agentReview.summary,
+      raw_summary: agentSummary,
       game_reviews: gameReviews,
       summary: summarizeFilteredReview(
-        agentReview.summary,
+        agentSummary,
         filteredFindings.length,
         suppressedFindings.length
       ),
@@ -1632,12 +1768,19 @@ async function main() {
   const finalize =
     process.argv.includes("--finalize") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_FINALIZE, false);
+  const extractGame =
+    process.argv.includes("--extract-game") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_EXTRACT_GAME, false);
 
-  if (collectOnly && finalize) {
-    throw new Error("Collect-only and finalize modes are mutually exclusive");
+  if ([collectOnly, finalize, extractGame].filter(Boolean).length > 1) {
+    throw new Error("Collect-only, extract-game, and finalize modes are mutually exclusive");
   }
   if (finalize) {
     await finalizeAgenticReview();
+    return;
+  }
+  if (extractGame) {
+    await extractGameReviewInput(process.env.UPSTREAM_REVIEW_GAME);
     return;
   }
 
@@ -1719,6 +1862,7 @@ if (isMainModule) {
 }
 
 export {
+  extractGameReviewInput,
   finalizeAgenticReview,
   parseAgentReview,
   renderIssueBody,

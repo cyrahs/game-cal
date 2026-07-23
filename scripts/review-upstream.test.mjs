@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  extractGameReviewInput,
   finalizeAgenticReview,
   parseAgentReview,
   renderIssueBody,
@@ -54,6 +55,33 @@ function collectedInput() {
   };
 }
 
+function finding(game, overrides = {}) {
+  return {
+    game,
+    severity: "medium",
+    confidence: "high",
+    kind: "missing_event",
+    title: `${game} finding`,
+    raw_title: `${game} raw notice`,
+    api_title: "",
+    start_time: "",
+    end_time: "",
+    reason: "Missing from the API.",
+    ...overrides,
+  };
+}
+
+function gameReview(game, overrides = {}) {
+  return {
+    complete: true,
+    errors: [],
+    summary: `Reviewed ${game}.`,
+    reviewed_games: [game],
+    findings: [],
+    ...overrides,
+  };
+}
+
 test("accepts a complete six-game collector input", () => {
   assert.equal(validateCollectedReviewInput(collectedInput()).mode, "collect_only");
 });
@@ -90,6 +118,92 @@ test("accepts a complete structured Codex result", () => {
     summary: "No clear findings.",
     findings: [],
   });
+});
+
+test("extracts a compact single-game review input in place", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-upstream-shard-"));
+  const inputPath = path.join(tempDir, "input.json");
+  const previousLog = console.log;
+
+  try {
+    await fs.writeFile(inputPath, JSON.stringify(collectedInput()), "utf8");
+    console.log = () => {};
+
+    const shard = await extractGameReviewInput("ww", {
+      inputPath,
+      outputPath: inputPath,
+    });
+    const writtenText = await fs.readFile(inputPath, "utf8");
+    const written = JSON.parse(writtenText);
+
+    assert.deepEqual(written, shard);
+    assert.equal(writtenText.includes('\n  "'), false);
+    assert.equal(written.mode, "review_game");
+    assert.equal(written.target_game, "ww");
+    assert.equal(written.review_dataset.game, "ww");
+    assert.equal("datasets" in written, false);
+    assert.equal("review_datasets" in written, false);
+    assert.equal("suppressions" in written, false);
+  } finally {
+    console.log = previousLog;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("accepts a complete single-game Codex result", () => {
+  const result = parseAgentReview(
+    JSON.stringify(gameReview("genshin")),
+    ["genshin"],
+    8
+  );
+  assert.deepEqual(result, {
+    summary: "Reviewed genshin.",
+    findings: [],
+  });
+});
+
+test("rejects a single-game result for the wrong matrix game", () => {
+  assert.throws(
+    () =>
+      parseAgentReview(
+        JSON.stringify(gameReview("starrail")),
+        ["genshin"],
+        8
+      ),
+    /reviewed_games must cover genshin exactly once/
+  );
+});
+
+test("rejects a finding for a different matrix game", () => {
+  assert.throws(
+    () =>
+      parseAgentReview(
+        JSON.stringify(
+          gameReview("genshin", {
+            findings: [finding("starrail")],
+          })
+        ),
+        ["genshin"],
+        8
+      ),
+    /outside the expected game set/
+  );
+});
+
+test("rejects more than eight findings from one matrix job", () => {
+  assert.throws(
+    () =>
+      parseAgentReview(
+        JSON.stringify(
+          gameReview("genshin", {
+            findings: Array.from({ length: 9 }, () => finding("genshin")),
+          })
+        ),
+        ["genshin"],
+        8
+      ),
+    /exceeds the 8 limit/
+  );
 });
 
 test("truncates oversized agent prose instead of failing publish", () => {
@@ -210,13 +324,63 @@ test("keeps a large valid finding set within the Issue body budget", () => {
   assert.match(body, /\[high\]/);
 });
 
-test("finalizes a valid agent result without GitHub writes in dry-run mode", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-upstream-review-"));
+test("rejects finalize when a matrix review output is missing", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-upstream-missing-"));
   const inputPath = path.join(tempDir, "input.json");
-  const agentPath = path.join(tempDir, "agent.json");
+  const agentDir = path.join(tempDir, "agent-reviews");
   const reportPath = path.join(tempDir, "report.json");
   const previousEnv = {
     UPSTREAM_REVIEW_INPUT_PATH: process.env.UPSTREAM_REVIEW_INPUT_PATH,
+    UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR,
+    UPSTREAM_REVIEW_AGENT_OUTPUT_PATH: process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH,
+    UPSTREAM_REVIEW_REPORT_PATH: process.env.UPSTREAM_REVIEW_REPORT_PATH,
+    UPSTREAM_REVIEW_DRY_RUN: process.env.UPSTREAM_REVIEW_DRY_RUN,
+  };
+
+  try {
+    await fs.writeFile(inputPath, JSON.stringify(collectedInput()), "utf8");
+    await fs.mkdir(agentDir, { recursive: true });
+    await Promise.all(
+      games.slice(0, -1).map((game) =>
+        fs.writeFile(
+          path.join(agentDir, `upstream-review-agent-${game}.json`),
+          JSON.stringify(gameReview(game)),
+          "utf8"
+        )
+      )
+    );
+
+    process.env.UPSTREAM_REVIEW_INPUT_PATH = inputPath;
+    process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR = agentDir;
+    delete process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH;
+    process.env.UPSTREAM_REVIEW_REPORT_PATH = reportPath;
+    process.env.UPSTREAM_REVIEW_DRY_RUN = "1";
+
+    await assert.rejects(
+      () => finalizeAgenticReview(),
+      /Codex endfield review output/
+    );
+    await assert.rejects(() => fs.access(reportPath), /ENOENT/);
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("finalizes a valid agent result without GitHub writes in dry-run mode", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-upstream-review-"));
+  const inputPath = path.join(tempDir, "input.json");
+  const agentDir = path.join(tempDir, "agent-reviews");
+  const reportPath = path.join(tempDir, "report.json");
+  const previousEnv = {
+    UPSTREAM_REVIEW_INPUT_PATH: process.env.UPSTREAM_REVIEW_INPUT_PATH,
+    UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR,
     UPSTREAM_REVIEW_AGENT_OUTPUT_PATH: process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH,
     UPSTREAM_REVIEW_REPORT_PATH: process.env.UPSTREAM_REVIEW_REPORT_PATH,
     UPSTREAM_REVIEW_DRY_RUN: process.env.UPSTREAM_REVIEW_DRY_RUN,
@@ -225,20 +389,20 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
 
   try {
     await fs.writeFile(inputPath, JSON.stringify(collectedInput()), "utf8");
-    await fs.writeFile(
-      agentPath,
-      JSON.stringify({
-        complete: true,
-        errors: [],
-        summary: "No clear findings.",
-        reviewed_games: games,
-        findings: [],
-      }),
-      "utf8"
+    await fs.mkdir(agentDir, { recursive: true });
+    await Promise.all(
+      games.map((game) =>
+        fs.writeFile(
+          path.join(agentDir, `upstream-review-agent-${game}.json`),
+          JSON.stringify(gameReview(game)),
+          "utf8"
+        )
+      )
     );
 
     process.env.UPSTREAM_REVIEW_INPUT_PATH = inputPath;
-    process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH = agentPath;
+    process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR = agentDir;
+    delete process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH;
     process.env.UPSTREAM_REVIEW_REPORT_PATH = reportPath;
     process.env.UPSTREAM_REVIEW_DRY_RUN = "1";
     console.log = () => {};
@@ -247,6 +411,10 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
     const report = JSON.parse(await fs.readFile(reportPath, "utf8"));
     assert.equal(report.mode, "agentic_review");
     assert.equal(report.issue.action, "dry_run");
+    assert.deepEqual(
+      report.review.game_reviews.map((review) => review.game),
+      games
+    );
     assert.deepEqual(report.review.findings, []);
   } finally {
     console.log = previousLog;

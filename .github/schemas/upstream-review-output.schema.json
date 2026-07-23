@@ -16,7 +16,7 @@
     },
     "reviewed_games": {
       "type": "array",
-      "maxItems": 6,
+      "maxItems": 1,
       "items": {
         "type": "string",
         "enum": [
@@ -31,7 +31,7 @@
     },
     "findings": {
       "type": "array",
-      "maxItems": 50,
+      "maxItems": 8,
       "items": {
         "type": "object",
         "properties": {

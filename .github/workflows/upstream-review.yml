@@ -70,10 +70,21 @@ jobs:
 
   review:
     needs: collect
+    name: Review ${{ matrix.game }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game:
+          - genshin
+          - starrail
+          - ww
+          - zzz
+          - snowbreak
+          - endfield
     steps:
       - uses: actions/checkout@v6
         with:
@@ -85,6 +96,12 @@ jobs:
           name: upstream-review-input
           path: artifacts
 
+      - name: Prepare single-game review input
+        env:
+          UPSTREAM_REVIEW_GAME: ${{ matrix.game }}
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: node scripts/review-upstream.mjs --extract-game
+
       - name: Review with Codex
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
@@ -94,7 +111,7 @@ jobs:
           effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
           prompt-file: .github/prompts/upstream-review.md
           output-schema-file: .github/schemas/upstream-review-output.schema.json
-          output-file: artifacts/upstream-review-agent.json
+          output-file: artifacts/upstream-review-agent-${{ matrix.game }}.json
           codex-version: "0.145.0"
           permission-profile: ":read-only"
           safety-strategy: drop-sudo
@@ -102,8 +119,8 @@ jobs:
       - name: Upload Codex review
         uses: actions/upload-artifact@v7
         with:
-          name: upstream-review-agent
-          path: artifacts/upstream-review-agent.json
+          name: upstream-review-agent-${{ matrix.game }}
+          path: artifacts/upstream-review-agent-${{ matrix.game }}.json
           if-no-files-found: error
 
   publish:
@@ -131,15 +148,16 @@ jobs:
       - name: Download Codex review
         uses: actions/download-artifact@v8
         with:
-          name: upstream-review-agent
-          path: artifacts
+          pattern: upstream-review-agent-*
+          path: artifacts/agent-reviews
+          merge-multiple: true
 
       - name: Validate result and sync issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
-          UPSTREAM_REVIEW_AGENT_OUTPUT_PATH: artifacts/upstream-review-agent.json
+          UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
           UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
           UPSTREAM_REVIEW_ISSUE_NUMBER: "1"
           UPSTREAM_REVIEW_ISSUE_TITLE: Upstream Review Alerts
