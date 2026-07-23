@@ -169,11 +169,12 @@ pnpm --filter @game-cal/api start
 ## 上游巡检
 
 仓库内置了一条可手动触发的 Codex agentic workflow：
-`.github/workflows/upstream-review.yml`。它不再自动定时执行；需要时可在
-GitHub Actions 页面从默认分支手动触发；非默认分支不会运行，以免未合并的
-workflow 代码接触 Secrets。
+`.github/workflows/upstream-review.yml`，并通过
+`.github/workflows/upstream-review-pr-rework.yml` 复用单轮 PR 返工逻辑。它不再
+自动定时执行；需要时可在 GitHub Actions 页面从默认分支手动触发；非默认分支不会
+运行，以免未合并的 workflow 代码接触 Secrets。
 
-Workflow 分成十个相互隔离的阶段：
+初始审查分成十个相互隔离的阶段：
 
 - `preflight`：在接触仓库或调用模型前检查五个 Secrets，确认最终 reviewer token
   属于不同于 `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支会让
@@ -206,6 +207,19 @@ Workflow 分成十个相互隔离的阶段：
   review request，复验分支保护和 PR head 后，用独立身份把 review 绑定到精确
   `commit_id` 提交；若提交期间 head 发生变化，会立即撤销刚创建的 review 并失败。
   PR 仍保持 Draft，不会自动 ready 或 merge。
+- `rework_round_1` / `rework_round_2`：只有上一轮经过校验并成功提交的结果为
+  `REQUEST_CHANGES` 时才进入下一轮。每轮由独立的 `repair`、`validate`、`push`、
+  `review`、`validate_review` 和 `submit` job 组成；返工 agent 只能修改静态 parser
+  白名单，随后在无 Secrets 的新 runner 中复验并运行完整测试，再由只具备
+  `contents: write` 的 job 更新原 Draft PR，最后重新执行完整 PR review。
+
+返工轮次在主 workflow DAG 中静态展开，硬上限为 2，不能由 review 文本、PR 内容或
+dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，在原始 base 上创建新的
+单亲提交，并用绑定旧 head 的
+`--force-with-lease=refs/heads/<branch>:<old-head>` 替换同一个自动分支；因此审查覆盖
+原始 base 到最新 head 的完整差异，而不是只看本轮增量。若没有安全的有效补丁、验证
+失败、head/base 漂移、复审通过，或第 2 轮仍为 `REQUEST_CHANGES`，自动返工都会停止。
+第 2 轮耗尽时 PR 保持 Draft 和 blocked，不会启动第 3 轮、自动 ready 或 merge。
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
@@ -213,13 +227,17 @@ Workflow 分成十个相互隔离的阶段：
 Issue #1 的类型/标题不符时，发布步骤会失败且不修改 Issue。有 findings 时更新或
 reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关闭时不操作。
 自动修复若越过文件白名单、创建/删除/重命名文件、改变文件模式、只改空白、生成
-二进制或超过 512 KB 的 patch、测试失败，均不会进入提 PR 阶段。相同 findings 的
-open、closed 或 merged PR 都会被 fingerprint 去重，workflow 不会 force-push 覆盖
-人工修改。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与
-PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未
-配置“新提交使旧批准失效”时，也会在调用模型前失败。一次有 findings 的完整运行
-最多调用 8 个 agent：六个游戏 reviewer、一个 fix agent 和一个 PR review agent。
-运行产物和 API 日志会作为 Actions artifacts 保存。
+二进制或超过 512 KB 的初始 patch、测试失败，均不会进入提 PR 阶段；每轮返工的增量
+和累计 patch 还分别限制为 128 KiB，且累计 patch 不得丢失上一轮已修改的 parser。
+相同 findings 的 open、closed 或 merged PR 都会被 fingerprint 去重；只有返工链路能
+以精确旧 head lease 替换刚审查过的自动分支，任何并发或人工 head 变化都会使操作
+失败。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与 PR
+作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未配置
+“新提交使旧批准失效”时，也会在调用模型前失败。不含人工重新运行 job 的单次初始
+完整运行最多调用 8 个 agent；两轮都执行时，最多为 12 个：六个游戏 reviewer、
+一个初始 fix agent、一个初始 PR review agent，以及每轮各一个 rework agent 和一个
+完整 PR review agent。运行产物和 API 日志会作为 Actions artifacts 保存，并按
+round 0/1/2 使用不同名称。
 
 需要配置五个 GitHub Actions Secrets：
 
@@ -232,8 +250,9 @@ PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 r
 - `UPSTREAM_REVIEW_APPROVAL_TOKEN`：独立 GitHub 身份的 fine-grained PAT，只选择
   本仓库并授予 `Pull requests: Read and write` 与 `Administration: Read`。后者仅
   用于读取分支保护设置。该身份必须不同于 `github-actions[bot]`，并对仓库拥有
-  admin 权限；token 只会注入最终 `submit_pr_review` job 和不 checkout 仓库的
-  `preflight` 身份检查，绝不会提供给 Codex、补丁验证或执行 PR 代码的 job。
+  admin 权限；token 只在不 checkout 仓库的 `preflight` 身份检查、初始
+  `submit_pr_review` 和每轮不 checkout 的 `submit` job 中使用，绝不会提供给
+  Codex、补丁验证或执行 PR 代码的 job。
 
 网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
 `Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
@@ -242,7 +261,9 @@ PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 r
 `.github/prompts/upstream-review-fix.md` 与
 `.github/schemas/upstream-review-fix-output.schema.json`；独立 PR reviewer 使用
 `.github/prompts/upstream-review-pr-review.md` 与
-`.github/schemas/upstream-review-pr-review-output.schema.json`。
+`.github/schemas/upstream-review-pr-review-output.schema.json`；返工 agent 使用
+`.github/prompts/upstream-review-pr-rework.md` 与
+`.github/schemas/upstream-review-pr-rework-output.schema.json`。
 
 自动创建 PR 还需要在仓库 `Settings → Actions → General → Workflow permissions`
 中启用 **Allow GitHub Actions to create and approve pull requests**。GitHub 将“创建”
@@ -255,7 +276,7 @@ PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 r
 **Dismiss stale pull request approvals when new commits are pushed**；也可以用
 **Require approval of the most recent reviewable push** 提供同等的 fail-closed
 保证。workflow 会在开始和最终提交 review 前各复验一次，不满足时不会调用 agent
-或提交 review。
+或提交 review；每一轮返工提交 review 前也会重新复验。
 
 可选环境变量：
 
@@ -277,7 +298,17 @@ PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 r
 - `UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH`（PR review 的结构化上下文）
 - `UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON`（Codex review 的 inline JSON）
 - `UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH`（确定性 review Markdown）
+- `UPSTREAM_REVIEW_PR_REVIEW_RESULT_PATH`（规范化、可供下一轮验证的 review JSON）
 - `UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH`（绑定 commit 的 GitHub review request）
+- `UPSTREAM_REVIEW_PR_REWORK_ROUND` / `UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS`
+  （当前返工轮次与固定上限；生产 workflow 的上限固定为 `2`）
+- `UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH` / `UPSTREAM_REVIEW_PR_REWORK_AGENT_OUTPUT_PATH`
+  （digest-bound 返工请求与 Codex 输出）
+- `UPSTREAM_REVIEW_PR_REWORK_METADATA_PATH` /
+  `UPSTREAM_REVIEW_PR_REWORK_MANIFEST_PATH` /
+  `UPSTREAM_REVIEW_PR_REWORK_PATCH_PATH`（可信返工元数据、返工 manifest 与增量 patch）
+- `UPSTREAM_REVIEW_PR_REWORK_FIX_MANIFEST_PATH` /
+  `UPSTREAM_REVIEW_PR_REWORK_FIX_PATCH_PATH`（从原始 base 计算的累计 manifest 与 patch）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_ISSUE_NUMBER`（workflow 固定为 `1`）
 - `UPSTREAM_REVIEW_ISSUE_TITLE`（workflow 固定为 `Upstream Review Alerts`）
@@ -286,7 +317,9 @@ PR 作者身份相同都会 fail closed，不会批准。默认分支未启用 r
 `pnpm review:upstream` / `pnpm review:upstream:collect` 只执行确定性采集，不调用模型；
 `pnpm review:upstream:finalize` 校验已有 agent 输出并发布结果；
 `prepare-pr-review` / `finalize-pr-review` 对应 PR review 上下文和可信 request
-生成。生产 workflow 不再调用旧的 Chat Completions 接口。
+生成；`prepare-pr-rework` / `finalize-pr-rework` / `verify-pr-rework` 对应返工请求、
+增量与累计 patch 生成以及隔离复验。生产 workflow 不再调用旧的 Chat Completions
+接口。
 
 Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除；对于 `kind: "missing_event"` 的规则，对应 raw notice 会在送审前从 reviewer 输入中排除。
 

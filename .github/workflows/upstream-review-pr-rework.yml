@@ -1,0 +1,1194 @@
+name: Upstream Review PR Rework Round
+
+on:
+  workflow_call:
+    inputs:
+      round:
+        description: One-based, statically bounded rework round
+        required: true
+        type: number
+      base_sha:
+        description: Immutable default-branch commit used by the original fix
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact automatic PR head reviewed in the preceding round
+        required: true
+        type: string
+      pr_number:
+        description: Automatic draft pull request number
+        required: true
+        type: string
+      pr_url:
+        description: Automatic draft pull request URL
+        required: true
+        type: string
+      fix_branch:
+        description: Same-repository automatic fix branch
+        required: true
+        type: string
+      default_branch:
+        description: Repository default branch
+        required: true
+        type: string
+      previous_fix_artifact:
+        description: Verified cumulative patch artifact from the preceding round
+        required: true
+        type: string
+      previous_review_artifact:
+        description: Validated review artifact for the exact preceding head
+        required: true
+        type: string
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      OPENAI_BASE_URL:
+        required: true
+      OPENAI_MODEL:
+        required: true
+      OPENAI_REASONING_EFFORT:
+        required: true
+      UPSTREAM_REVIEW_APPROVAL_TOKEN:
+        required: true
+    outputs:
+      has_patch:
+        description: Whether this round produced a validated non-empty patch
+        value: ${{ jobs.repair.outputs.has_patch }}
+      head_sha:
+        description: Exact replacement head commit produced by this round
+        value: ${{ jobs.push.outputs.head_sha }}
+      review_event:
+        description: Validated review event for the replacement head
+        value: ${{ jobs.validate_review.outputs.review_event }}
+      review_verdict:
+        description: Validated Codex verdict for the replacement head
+        value: ${{ jobs.validate_review.outputs.review_verdict }}
+      review_context_sha256:
+        description: Digest of the exact replacement-head review context
+        value: ${{ jobs.validate_review.outputs.review_context_sha256 }}
+      review_result_sha256:
+        description: Digest of the normalized replacement-head review result
+        value: ${{ jobs.validate_review.outputs.review_result_sha256 }}
+      review_request_sha256:
+        description: Digest of the immutable replacement-head review request
+        value: ${{ jobs.validate_review.outputs.review_request_sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      has_patch: ${{ steps.finalize_rework.outputs.has_patch }}
+      patch_sha256: ${{ steps.finalize_rework.outputs.patch_sha256 }}
+      result_tree: ${{ steps.finalize_rework.outputs.result_tree }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download preceding verified cumulative patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.previous_fix_artifact }}
+          path: ${{ runner.temp }}/upstream-review-previous-fix
+
+      - name: Download preceding validated review
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.previous_review_artifact }}
+          path: ${{ runner.temp }}/upstream-review-previous-review
+
+      - name: Verify exact PR state and prepare rework request
+        id: prepare_rework
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-previous-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-previous-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-previous-fix/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-previous-review/input.json
+          UPSTREAM_REVIEW_PR_REVIEW_RESULT_PATH: ${{ runner.temp }}/upstream-review-previous-review/result.json
+          UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-previous-review/request.json
+          UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH: artifacts/upstream-review-pr-rework-input.json
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid pull request number." >&2
+            exit 1
+          fi
+          if ! [[ "$UPSTREAM_REVIEW_PR_REWORK_ROUND" =~ ^[12]$ ]]; then
+            echo "The reusable workflow only permits rework rounds 1 and 2." >&2
+            exit 1
+          fi
+          if ! [[ "$UPSTREAM_REVIEW_BASE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
+             ! [[ "$UPSTREAM_REVIEW_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          then
+            echo "Invalid trusted base or head SHA." >&2
+            exit 1
+          fi
+          if [ "$(/usr/bin/git rev-parse HEAD)" != "$UPSTREAM_REVIEW_HEAD_SHA" ]; then
+            echo "The rework checkout does not match the reviewed PR head." >&2
+            exit 1
+          fi
+          reviewed_line="$(/usr/bin/git rev-list --parents -n 1 "$UPSTREAM_REVIEW_HEAD_SHA")"
+          read -r reviewed_commit reviewed_parent extra_parent <<< "$reviewed_line"
+          if \
+            [ "$reviewed_commit" != "$UPSTREAM_REVIEW_HEAD_SHA" ] ||
+            [ "$reviewed_parent" != "$UPSTREAM_REVIEW_BASE_SHA" ] ||
+            [ -n "$extra_parent" ]
+          then
+            echo "The reviewed PR head is not a single-parent commit on the trusted base." >&2
+            exit 1
+          fi
+          current_patch="$RUNNER_TEMP/upstream-review-current-cumulative.patch"
+          /usr/bin/git --no-replace-objects diff \
+            --binary \
+            --full-index \
+            --no-renames \
+            --no-ext-diff \
+            --no-textconv \
+            "$UPSTREAM_REVIEW_BASE_SHA" \
+            HEAD \
+            -- \
+            > "$current_patch"
+          if ! /usr/bin/cmp -s "$current_patch" "$UPSTREAM_REVIEW_FIX_PATCH_PATH"; then
+            echo "The reviewed PR head does not match the preceding verified cumulative patch." >&2
+            exit 1
+          fi
+
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --argjson number "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$UPSTREAM_REVIEW_BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$UPSTREAM_REVIEW_HEAD_SHA" \
+            '
+              .number == $number and
+              .html_url == $url and
+              .state == "open" and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The automatic PR no longer matches the trusted rework snapshot." >&2
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          node scripts/review-upstream.mjs --prepare-pr-rework
+
+      - name: Preserve trusted state for post-agent validation
+        id: prepare_workspace
+        env:
+          FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-previous-fix/upstream-review-fix-input.json
+          FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-previous-fix/manifest.json
+          FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-previous-fix/fix.patch
+          REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-previous-review/input.json
+          REVIEW_RESULT_PATH: ${{ runner.temp }}/upstream-review-previous-review/result.json
+          REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-previous-review/request.json
+        run: |
+          trusted_state_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/upstream-review-rework-trusted-state.XXXXXX")"
+          /usr/bin/cp artifacts/upstream-review-pr-rework-input.json "$trusted_state_dir/rework-input.json"
+          /usr/bin/cp "$FIX_INPUT_PATH" "$trusted_state_dir/fix-input.json"
+          /usr/bin/cp "$FIX_MANIFEST_PATH" "$trusted_state_dir/previous-manifest.json"
+          /usr/bin/cp "$FIX_PATCH_PATH" "$trusted_state_dir/previous-fix.patch"
+          /usr/bin/cp "$REVIEW_INPUT_PATH" "$trusted_state_dir/review-input.json"
+          /usr/bin/cp "$REVIEW_RESULT_PATH" "$trusted_state_dir/review-result.json"
+          /usr/bin/cp "$REVIEW_REQUEST_PATH" "$trusted_state_dir/review-request.json"
+          /usr/bin/cp .git/config "$trusted_state_dir/git-config"
+          /usr/bin/cp .git/index "$trusted_state_dir/git-index"
+          /usr/bin/cp .git/HEAD "$trusted_state_dir/git-head"
+          if [ -f .git/config.worktree ]; then
+            /usr/bin/cp .git/config.worktree "$trusted_state_dir/git-config-worktree"
+          fi
+          if [ -f .git/info/attributes ]; then
+            /usr/bin/cp .git/info/attributes "$trusted_state_dir/git-info-attributes"
+          fi
+          /usr/bin/cp "$trusted_state_dir/fix-input.json" artifacts/upstream-review-fix-input.json
+          /usr/bin/cp "$trusted_state_dir/review-result.json" artifacts/upstream-review-pr-review-result.json
+          echo "trusted_state_dir=$trusted_state_dir" >> "$GITHUB_OUTPUT"
+          echo "node_bin=$(command -v node)" >> "$GITHUB_OUTPUT"
+
+      - name: Rework reviewed PR with Codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-pr-rework.md
+          output-schema-file: .github/schemas/upstream-review-pr-rework-output.schema.json
+          output-file: artifacts/upstream-review-pr-rework-agent.json
+          codex-version: "0.145.0"
+          permission-profile: ":workspace"
+          safety-strategy: drop-sudo
+
+      - name: Export and validate cumulative rework patch
+        id: finalize_rework
+        env:
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          TRUSTED_STATE_DIR: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}
+          TRUSTED_NODE_BIN: ${{ steps.prepare_workspace.outputs.node_bin }}
+          PATH: /usr/bin:/bin
+          NODE_OPTIONS: ""
+          NODE_PATH: ""
+          LD_PRELOAD: ""
+          DYLD_INSERT_LIBRARIES: ""
+          GIT_CONFIG_NOSYSTEM: "1"
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_COUNT: "0"
+          GIT_ATTR_NOSYSTEM: "1"
+          GIT_NO_REPLACE_OBJECTS: "1"
+          GIT_EXTERNAL_DIFF: ""
+          GIT_DIFF_OPTS: ""
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/previous-manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/previous-fix.patch
+          UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/rework-input.json
+          UPSTREAM_REVIEW_PR_REWORK_AGENT_OUTPUT_PATH: artifacts/upstream-review-pr-rework-agent.json
+        run: |
+          unset \
+            GIT_CONFIG_PARAMETERS \
+            GIT_INDEX_FILE \
+            GIT_OBJECT_DIRECTORY \
+            GIT_WORK_TREE \
+            GIT_DIR \
+            GIT_COMMON_DIR \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_EXEC_PATH
+
+          for trusted_pair in \
+            "artifacts/upstream-review-pr-rework-input.json:$TRUSTED_STATE_DIR/rework-input.json" \
+            "artifacts/upstream-review-fix-input.json:$TRUSTED_STATE_DIR/fix-input.json" \
+            "artifacts/upstream-review-pr-review-result.json:$TRUSTED_STATE_DIR/review-result.json"
+          do
+            workspace_path="${trusted_pair%%:*}"
+            trusted_path="${trusted_pair#*:}"
+            if ! /usr/bin/cmp -s "$workspace_path" "$trusted_path"; then
+              echo "Protected rework input changed during the Codex step: $workspace_path" >&2
+              exit 1
+            fi
+          done
+          if [ -e .git/config.worktree ]; then
+            if [ ! -f "$TRUSTED_STATE_DIR/git-config-worktree" ]; then
+              echo "Codex created an unexpected .git/config.worktree file." >&2
+              exit 1
+            fi
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-config-worktree" .git/config.worktree
+          elif [ -f "$TRUSTED_STATE_DIR/git-config-worktree" ]; then
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-config-worktree" .git/config.worktree
+          fi
+          if [ -e .git/info/attributes ]; then
+            if [ ! -f "$TRUSTED_STATE_DIR/git-info-attributes" ]; then
+              echo "Codex created an unexpected .git/info/attributes file." >&2
+              exit 1
+            fi
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-info-attributes" .git/info/attributes
+          elif [ -f "$TRUSTED_STATE_DIR/git-info-attributes" ]; then
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-info-attributes" .git/info/attributes
+          fi
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-config" .git/config
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-index" .git/index
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-head" .git/HEAD
+          if /usr/bin/find . -path './.git' -prune -o -name .gitattributes -print -quit | /usr/bin/grep -q .; then
+            echo "Codex created an unexpected .gitattributes file." >&2
+            exit 1
+          fi
+          if [ ! -x "$TRUSTED_NODE_BIN" ]; then
+            echo "The trusted Node binary is unavailable." >&2
+            exit 1
+          fi
+
+          export_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/upstream-review-rework-export.XXXXXX")"
+          candidate_dir="$export_dir/candidate"
+          /usr/bin/mkdir "$candidate_dir"
+          echo "candidate_dir=$candidate_dir" >> "$GITHUB_OUTPUT"
+          export UPSTREAM_REVIEW_PR_REWORK_METADATA_PATH="$candidate_dir/metadata.json"
+          export UPSTREAM_REVIEW_PR_REWORK_MANIFEST_PATH="$candidate_dir/rework-manifest.json"
+          export UPSTREAM_REVIEW_PR_REWORK_PATCH_PATH="$candidate_dir/incremental.patch"
+          export UPSTREAM_REVIEW_PR_REWORK_FIX_MANIFEST_PATH="$candidate_dir/manifest.json"
+          export UPSTREAM_REVIEW_PR_REWORK_FIX_PATCH_PATH="$candidate_dir/fix.patch"
+          /usr/bin/git --no-replace-objects show "$UPSTREAM_REVIEW_BASE_SHA:scripts/review-upstream.mjs" \
+            > "$export_dir/review-upstream.mjs"
+          "$TRUSTED_NODE_BIN" "$export_dir/review-upstream.mjs" --finalize-pr-rework
+          /usr/bin/cp "$UPSTREAM_REVIEW_FIX_INPUT_PATH" "$candidate_dir/upstream-review-fix-input.json"
+          /usr/bin/cp "$UPSTREAM_REVIEW_FIX_MANIFEST_PATH" "$candidate_dir/previous-manifest.json"
+          /usr/bin/cp "$UPSTREAM_REVIEW_FIX_PATCH_PATH" "$candidate_dir/previous-fix.patch"
+          /usr/bin/cp "$UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH" "$candidate_dir/upstream-review-pr-rework-input.json"
+          /usr/bin/cp "$TRUSTED_STATE_DIR/review-input.json" "$candidate_dir/review-input.json"
+          /usr/bin/cp "$TRUSTED_STATE_DIR/review-result.json" "$candidate_dir/review-result.json"
+          /usr/bin/cp "$TRUSTED_STATE_DIR/review-request.json" "$candidate_dir/review-request.json"
+          /usr/bin/cp artifacts/upstream-review-pr-rework-agent.json \
+            "$candidate_dir/upstream-review-pr-rework-agent.json"
+
+      - name: Confirm deterministic rework disposition
+        env:
+          HAS_PATCH: ${{ steps.finalize_rework.outputs.has_patch }}
+        run: |
+          if ! [[ "$HAS_PATCH" =~ ^(true|false)$ ]]; then
+            echo "The validated rework did not produce an explicit patch disposition." >&2
+            exit 1
+          fi
+
+      - name: Upload cumulative candidate diagnostics
+        if: >-
+          always() &&
+          steps.finalize_rework.outputs.candidate_dir != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-pr-rework-candidate-round-${{ inputs.round }}
+          path: ${{ steps.finalize_rework.outputs.candidate_dir }}
+          if-no-files-found: warn
+
+  validate:
+    needs: repair
+    if: needs.repair.result == 'success' && needs.repair.outputs.has_patch == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download cumulative candidate patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-rework-candidate-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-rework-candidate
+
+      - name: Fetch the exact preceding PR head
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+        run: |
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-previous"
+          if [ "$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-previous)" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "The automatic PR head changed before validation." >&2
+            exit 1
+          fi
+
+      - name: Verify cumulative candidate artifact
+        id: verify_rework
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/previous-manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/previous-fix.patch
+          UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/upstream-review-pr-rework-input.json
+          UPSTREAM_REVIEW_PR_REWORK_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/rework-manifest.json
+          UPSTREAM_REVIEW_PR_REWORK_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/incremental.patch
+          UPSTREAM_REVIEW_PR_REWORK_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/manifest.json
+          UPSTREAM_REVIEW_PR_REWORK_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/fix.patch
+        run: node scripts/review-upstream.mjs --verify-pr-rework-artifact
+
+      - name: Apply cumulative candidate patch
+        run: |
+          /usr/bin/git apply --check "$RUNNER_TEMP/upstream-review-pr-rework-candidate/fix.patch"
+          /usr/bin/git apply --index "$RUNNER_TEMP/upstream-review-pr-rework-candidate/fix.patch"
+          if [ "$(/usr/bin/git write-tree)" != "${{ steps.verify_rework.outputs.result_tree }}" ]; then
+            echo "The applied cumulative candidate tree does not match its verified manifest." >&2
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test upstream-review safeguards
+        run: pnpm test:upstream-review
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Confirm validation did not alter the cumulative patch
+        env:
+          EXPECTED_RESULT_TREE: ${{ steps.verify_rework.outputs.result_tree }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          /usr/bin/git add -u
+          if [ "$(/usr/bin/git write-tree)" != "$EXPECTED_RESULT_TREE" ]; then
+            echo "Repository validation changed the verified cumulative patch." >&2
+            exit 1
+          fi
+          /usr/bin/mkdir -p "$RUNNER_TEMP/upstream-review-pr-rework-verified"
+          /usr/bin/cp \
+            "$RUNNER_TEMP/upstream-review-pr-rework-candidate/"* \
+            "$RUNNER_TEMP/upstream-review-pr-rework-verified/"
+          /usr/bin/git cat-file commit "$EXPECTED_HEAD_SHA" \
+            > "$RUNNER_TEMP/upstream-review-pr-rework-verified/previous-head.commit"
+
+      - name: Upload verified cumulative rework patch
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-pr-rework-verified-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-rework-verified
+          if-no-files-found: error
+
+  push:
+    needs:
+      - repair
+      - validate
+    if: >-
+      needs.repair.result == 'success' &&
+      needs.repair.outputs.has_patch == 'true' &&
+      needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      head_sha: ${{ steps.commit_rework.outputs.head_sha }}
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download verified cumulative rework patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-rework-verified-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-rework-verified
+
+      - name: Restore the exact preceding head object
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          restored_head_sha="$(
+            /usr/bin/git hash-object \
+              -t commit \
+              -w \
+              "$RUNNER_TEMP/upstream-review-pr-rework-verified/previous-head.commit"
+          )"
+          if [ "$restored_head_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "The preserved preceding head object does not match the trusted SHA." >&2
+            exit 1
+          fi
+
+      - name: Verify immutable cumulative rework artifact
+        id: verify_rework
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/previous-manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/previous-fix.patch
+          UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-pr-rework-input.json
+          UPSTREAM_REVIEW_PR_REWORK_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/rework-manifest.json
+          UPSTREAM_REVIEW_PR_REWORK_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/incremental.patch
+          UPSTREAM_REVIEW_PR_REWORK_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/manifest.json
+          UPSTREAM_REVIEW_PR_REWORK_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/fix.patch
+        run: node scripts/review-upstream.mjs --verify-pr-rework-artifact
+
+      - name: Resolve exact replacement or recovery state
+        id: replacement_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_URL: ${{ inputs.pr_url }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_RESULT_TREE: ${{ steps.verify_rework.outputs.result_tree }}
+        run: |
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-current"
+          remote_commit="$(
+            /usr/bin/git rev-parse refs/remotes/origin/upstream-review-current
+          )"
+          remote_tree="$(
+            /usr/bin/git rev-parse refs/remotes/origin/upstream-review-current^{tree}
+          )"
+          remote_line="$(
+            /usr/bin/git rev-list \
+              --parents \
+              -n 1 \
+              refs/remotes/origin/upstream-review-current
+          )"
+          read -r _ remote_parent extra_parent <<< "$remote_line"
+
+          if [ "$remote_commit" = "$EXPECTED_HEAD_SHA" ]; then
+            push_required=true
+            trusted_pr_head="$EXPECTED_HEAD_SHA"
+          elif \
+            [ "$remote_parent" = "$BASE_SHA" ] &&
+            [ -z "$extra_parent" ] &&
+            [ "$remote_tree" = "$EXPECTED_RESULT_TREE" ]
+          then
+            push_required=false
+            trusted_pr_head="$remote_commit"
+          else
+            echo "The automatic branch is neither the exact lease head nor the verified replacement." >&2
+            exit 1
+          fi
+
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --argjson number "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$trusted_pr_head" \
+            '
+              .number == $number and
+              .html_url == $url and
+              .state == "open" and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The automatic PR changed before the guarded replacement." >&2
+            exit 1
+          fi
+          echo "push_required=$push_required" >> "$GITHUB_OUTPUT"
+          echo "current_head_sha=$trusted_pr_head" >> "$GITHUB_OUTPUT"
+
+      - name: Apply verified cumulative patch
+        env:
+          EXPECTED_RESULT_TREE: ${{ steps.verify_rework.outputs.result_tree }}
+        run: |
+          /usr/bin/git apply --check "$RUNNER_TEMP/upstream-review-pr-rework-verified/fix.patch"
+          /usr/bin/git apply --index "$RUNNER_TEMP/upstream-review-pr-rework-verified/fix.patch"
+          if [ "$(/usr/bin/git write-tree)" != "$EXPECTED_RESULT_TREE" ]; then
+            echo "The staged replacement tree does not match the verified rework artifact." >&2
+            exit 1
+          fi
+
+      - name: Commit and replace the automatic PR head
+        id: commit_rework
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          REWORK_ROUND: ${{ inputs.round }}
+          PUSH_REQUIRED: ${{ steps.replacement_state.outputs.push_required }}
+          CURRENT_HEAD_SHA: ${{ steps.replacement_state.outputs.current_head_sha }}
+        run: |
+          if [ "$PUSH_REQUIRED" = "false" ]; then
+            current_remote_sha="$(
+              /usr/bin/git ls-remote --heads origin "refs/heads/$FIX_BRANCH" |
+                /usr/bin/cut -f 1
+            )"
+            current_pr_head="$(
+              gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha
+            )"
+            if \
+              [ "$current_remote_sha" != "$CURRENT_HEAD_SHA" ] ||
+              [ "$current_pr_head" != "$CURRENT_HEAD_SHA" ]
+            then
+              echo "The recovered replacement head changed before reuse." >&2
+              exit 1
+            fi
+            echo "head_sha=$CURRENT_HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "Reusing rework round $REWORK_ROUND replacement head: \`$CURRENT_HEAD_SHA\`" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$PUSH_REQUIRED" != "true" ]; then
+            echo "Invalid guarded replacement state." >&2
+            exit 1
+          fi
+
+          /usr/bin/git switch -c "upstream-review-rework-round-$REWORK_ROUND"
+          /usr/bin/git config user.name "github-actions[bot]"
+          /usr/bin/git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          /usr/bin/git -c core.hooksPath=/dev/null commit \
+            -m "fix: address PR review feedback (round $REWORK_ROUND)"
+          new_head_sha="$(/usr/bin/git rev-parse HEAD)"
+          commit_line="$(/usr/bin/git rev-list --parents -n 1 "$new_head_sha")"
+          read -r commit_sha parent_sha extra_parent <<< "$commit_line"
+          if \
+            [ "$commit_sha" != "$new_head_sha" ] ||
+            [ "$parent_sha" != "$BASE_SHA" ] ||
+            [ -n "$extra_parent" ]
+          then
+            echo "The replacement commit is not an exact single-parent commit on the trusted base." >&2
+            exit 1
+          fi
+
+          current_remote_sha="$(
+            /usr/bin/git ls-remote --heads origin "refs/heads/$FIX_BRANCH" |
+              /usr/bin/cut -f 1
+          )"
+          if [ "$current_remote_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "The automatic branch changed immediately before push." >&2
+            exit 1
+          fi
+          /usr/bin/git push \
+            --force-with-lease="refs/heads/$FIX_BRANCH:$EXPECTED_HEAD_SHA" \
+            origin \
+            "HEAD:refs/heads/$FIX_BRANCH"
+
+          current_pr_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$current_pr_head" != "$new_head_sha" ]; then
+            echo "GitHub did not expose the exact replacement head after push." >&2
+            exit 1
+          fi
+          echo "head_sha=$new_head_sha" >> "$GITHUB_OUTPUT"
+          echo "Rework round $REWORK_ROUND replacement head: \`$new_head_sha\`" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  review:
+    needs:
+      - repair
+      - validate
+      - push
+    if: >-
+      needs.repair.result == 'success' &&
+      needs.repair.outputs.has_patch == 'true' &&
+      needs.validate.result == 'success' &&
+      needs.push.result == 'success' &&
+      needs.push.outputs.head_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      review_json: ${{ steps.review_fix.outputs['final-message'] }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.base_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download verified cumulative rework patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-rework-verified-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-rework-verified
+
+      - name: Prepare exact replacement-head review workspace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_URL: ${{ inputs.pr_url }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.push.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: artifacts/upstream-review-pr-review-input.json
+        run: |
+          node scripts/review-upstream.mjs --verify-fix-artifact
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --argjson number "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$UPSTREAM_REVIEW_BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$UPSTREAM_REVIEW_HEAD_SHA" \
+            '
+              .number == $number and
+              .html_url == $url and
+              .state == "open" and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed before replacement-head Codex review." >&2
+            exit 1
+          fi
+
+          /usr/bin/git apply --check "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          /usr/bin/git apply --index "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          expected_tree="$(/usr/bin/git write-tree)"
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-pr"
+          remote_commit="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr)"
+          remote_tree="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr^{tree})"
+          remote_line="$(/usr/bin/git rev-list --parents -n 1 refs/remotes/origin/upstream-review-pr)"
+          read -r _ remote_parent extra_parent <<< "$remote_line"
+          if \
+            [ "$remote_commit" != "$UPSTREAM_REVIEW_HEAD_SHA" ] ||
+            [ "$remote_parent" != "$UPSTREAM_REVIEW_BASE_SHA" ] ||
+            [ -n "$extra_parent" ] ||
+            [ "$remote_tree" != "$expected_tree" ]
+          then
+            echo "The replacement PR commit does not exactly match the verified cumulative patch." >&2
+            exit 1
+          fi
+
+          /usr/bin/git reset --hard "$UPSTREAM_REVIEW_HEAD_SHA"
+          mkdir -p artifacts
+          cp \
+            "$UPSTREAM_REVIEW_FIX_INPUT_PATH" \
+            artifacts/upstream-review-fix-input.json
+          node scripts/review-upstream.mjs --prepare-pr-review
+
+      - name: Review replacement head with Codex
+        id: review_fix
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-pr-review.md
+          output-schema-file: .github/schemas/upstream-review-pr-review-output.schema.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+  validate_review:
+    needs:
+      - repair
+      - validate
+      - push
+      - review
+    if: >-
+      needs.repair.result == 'success' &&
+      needs.repair.outputs.has_patch == 'true' &&
+      needs.validate.result == 'success' &&
+      needs.push.result == 'success' &&
+      needs.review.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      review_event: ${{ steps.finalize_review.outputs.review_event }}
+      review_verdict: ${{ steps.finalize_review.outputs.review_verdict }}
+      review_context_sha256: ${{ steps.finalize_review.outputs.review_context_sha256 }}
+      review_result_sha256: ${{ steps.finalize_review.outputs.review_result_sha256 }}
+      review_request_sha256: ${{ steps.finalize_review.outputs.review_request_sha256 }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.base_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download verified cumulative rework patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-rework-verified-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-rework-verified
+
+      - name: Reconstruct exact replacement commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_URL: ${{ inputs.pr_url }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.push.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/fix.patch
+        run: |
+          node scripts/review-upstream.mjs --verify-fix-artifact
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          if ! jq -e \
+            --argjson number "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$UPSTREAM_REVIEW_BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$UPSTREAM_REVIEW_HEAD_SHA" \
+            '
+              .number == $number and
+              .html_url == $url and
+              .state == "open" and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed after replacement-head Codex review." >&2
+            exit 1
+          fi
+
+          /usr/bin/git apply --check "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          /usr/bin/git apply --index "$UPSTREAM_REVIEW_FIX_PATCH_PATH"
+          expected_tree="$(/usr/bin/git write-tree)"
+          /usr/bin/git fetch \
+            --no-tags \
+            origin \
+            "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-pr"
+          remote_commit="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr)"
+          remote_tree="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-pr^{tree})"
+          remote_line="$(/usr/bin/git rev-list --parents -n 1 refs/remotes/origin/upstream-review-pr)"
+          read -r _ remote_parent extra_parent <<< "$remote_line"
+          if \
+            [ "$remote_commit" != "$UPSTREAM_REVIEW_HEAD_SHA" ] ||
+            [ "$remote_parent" != "$UPSTREAM_REVIEW_BASE_SHA" ] ||
+            [ -n "$extra_parent" ] ||
+            [ "$remote_tree" != "$expected_tree" ]
+          then
+            echo "The reviewed replacement commit no longer matches the verified cumulative patch." >&2
+            exit 1
+          fi
+          /usr/bin/git reset --hard "$UPSTREAM_REVIEW_HEAD_SHA"
+
+      - name: Rebuild trusted replacement-head review context
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.push.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-review/input.json
+        run: node scripts/review-upstream.mjs --prepare-pr-review
+
+      - name: Validate Codex review and render immutable request
+        id: finalize_review
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.push.outputs.head_sha }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/fix.patch
+          UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-review/input.json
+          UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON: ${{ needs.review.outputs.review_json }}
+          UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH: ${{ runner.temp }}/upstream-review-pr-review/body.md
+          UPSTREAM_REVIEW_PR_REVIEW_RESULT_PATH: ${{ runner.temp }}/upstream-review-pr-review/result.json
+          UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-pr-review/request.json
+        run: node scripts/review-upstream.mjs --finalize-pr-review
+
+      - name: Upload validated replacement-head review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-pr-review-validated-round-${{ inputs.round }}
+          path: |
+            ${{ runner.temp }}/upstream-review-pr-review/input.json
+            ${{ runner.temp }}/upstream-review-pr-review/result.json
+            ${{ runner.temp }}/upstream-review-pr-review/request.json
+          if-no-files-found: error
+
+  submit:
+    needs:
+      - push
+      - validate_review
+    if: >-
+      needs.push.result == 'success' &&
+      needs.validate_review.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Download validated replacement-head review
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-pr-review-validated-round-${{ inputs.round }}
+          path: ${{ runner.temp }}/upstream-review-pr-review
+
+      - name: Submit replacement-head review from the independent identity
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          FIX_BRANCH: ${{ inputs.fix_branch }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ needs.push.outputs.head_sha }}
+          EXPECTED_EVENT: ${{ needs.validate_review.outputs.review_event }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.validate_review.outputs.review_request_sha256 }}
+          REWORK_ROUND: ${{ inputs.round }}
+        run: |
+          request_path="$RUNNER_TEMP/upstream-review-pr-review/request.json"
+          actual_request_sha256="$(/usr/bin/sha256sum "$request_path" | /usr/bin/cut -d ' ' -f 1)"
+          if [ "$actual_request_sha256" != "$EXPECTED_REQUEST_SHA256" ]; then
+            echo "The validated replacement-head review request digest changed." >&2
+            exit 1
+          fi
+          if ! [[ "$EXPECTED_EVENT" =~ ^(APPROVE|REQUEST_CHANGES)$ ]]; then
+            echo "Invalid trusted replacement-head review event." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg event "$EXPECTED_EVENT" \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              (keys | sort) == ["body", "commit_id", "event"] and
+              .event == $event and
+              .commit_id == $head_sha and
+              (.body | type == "string") and
+              (.body | length > 0)
+            ' \
+            "$request_path" >/dev/null
+          then
+            echo "The validated replacement-head review request is malformed." >&2
+            exit 1
+          fi
+
+          reviewer_login="$(gh api user --jq .login)"
+          if ! gh api "repos/$GH_REPO" --jq '.permissions.admin == true' | grep -qx true; then
+            echo "The approval-token identity no longer has admin access to $GH_REPO." >&2
+            exit 1
+          fi
+          protection_path="$RUNNER_TEMP/upstream-review-branch-protection.json"
+          if ! gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection_path"; then
+            echo "The default branch protection could not be verified before review submission." >&2
+            exit 1
+          fi
+          if ! jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            )
+          ' "$protection_path" >/dev/null
+          then
+            echo "The default branch no longer invalidates stale approvals." >&2
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/upstream-review-pr.json"
+          author_login="$(jq -r .user.login "$RUNNER_TEMP/upstream-review-pr.json")"
+          if [ "$reviewer_login" = "$author_login" ]; then
+            echo "The PR author cannot review the same PR." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              .state == "open" and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
+          then
+            echo "The PR changed before replacement-head review submission." >&2
+            exit 1
+          fi
+
+          expected_state="CHANGES_REQUESTED"
+          if [ "$EXPECTED_EVENT" = "APPROVE" ]; then
+            expected_state="APPROVED"
+          fi
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+            > "$RUNNER_TEMP/upstream-review-existing-reviews.json"
+          if jq -e \
+            --arg login "$reviewer_login" \
+            --arg commit "$HEAD_SHA" \
+            --arg state "$expected_state" \
+            '
+              [
+                .[] |
+                select(
+                  .user.login == $login and
+                  .commit_id == $commit and
+                  (.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                )
+              ] |
+              sort_by(.submitted_at, .id) |
+              last |
+              .state == $state
+            ' \
+            "$RUNNER_TEMP/upstream-review-existing-reviews.json" >/dev/null
+          then
+            current_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+            if [ "$current_head" != "$HEAD_SHA" ]; then
+              echo "The PR head changed while an existing replacement-head review was checked." >&2
+              exit 1
+            fi
+            echo "Round $REWORK_ROUND already has the expected $expected_state review." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh api \
+            --method POST \
+            "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
+            --input "$request_path" \
+            > "$RUNNER_TEMP/upstream-review-created-review.json"
+          if ! jq -e \
+            --arg login "$reviewer_login" \
+            --arg commit "$HEAD_SHA" \
+            --arg state "$expected_state" \
+            '
+              .user.login == $login and
+              .commit_id == $commit and
+              .state == $state
+            ' \
+            "$RUNNER_TEMP/upstream-review-created-review.json" >/dev/null
+          then
+            echo "GitHub returned an unexpected replacement-head review snapshot." >&2
+            exit 1
+          fi
+          review_id="$(jq -r .id "$RUNNER_TEMP/upstream-review-created-review.json")"
+          if ! [[ "$review_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "GitHub returned an invalid replacement-head review id." >&2
+            exit 1
+          fi
+          current_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$current_head" != "$HEAD_SHA" ]; then
+            if ! gh api \
+              --method PUT \
+              "repos/$GH_REPO/pulls/$PR_NUMBER/reviews/$review_id/dismissals" \
+              -f message='Dismissed automatically because the PR head changed during review submission.' \
+              -f event='DISMISS' \
+              > "$RUNNER_TEMP/upstream-review-dismissed-review.json"
+            then
+              echo "The PR head changed and the just-created review could not be dismissed." >&2
+              exit 1
+            fi
+            if ! jq -e \
+              --arg login "$reviewer_login" \
+              --arg commit "$HEAD_SHA" \
+              --argjson id "$review_id" \
+              '
+                .id == $id and
+                .user.login == $login and
+                .commit_id == $commit and
+                .state == "DISMISSED"
+              ' \
+              "$RUNNER_TEMP/upstream-review-dismissed-review.json" >/dev/null
+            then
+              echo "GitHub returned an unexpected dismissed-review snapshot." >&2
+              exit 1
+            fi
+            echo "The PR head changed while the replacement-head review was submitted." >&2
+            exit 1
+          fi
+          review_url="$(jq -r .html_url "$RUNNER_TEMP/upstream-review-created-review.json")"
+          echo "Round $REWORK_ROUND $expected_state review: $review_url" \
+            >> "$GITHUB_STEP_SUMMARY"

@@ -715,30 +715,60 @@ jobs:
           BASE_SHA: ${{ github.sha }}
           HEAD_SHA: ${{ steps.commit_fix.outputs.head_sha }}
         run: |
-          pr_url="$(
-            gh pr create \
-              --repo "$GH_REPO" \
-              --draft \
-              --base "$DEFAULT_BRANCH" \
-              --head "$FIX_BRANCH" \
-              --title "fix: address upstream review findings" \
-              --body-file "$RUNNER_TEMP/upstream-review-pr-body.md"
+          repo_owner="${GH_REPO%%/*}"
+          gh api \
+            --method GET \
+            "repos/$GH_REPO/pulls" \
+            -f state=all \
+            -f head="$repo_owner:$FIX_BRANCH" \
+            -f base="$DEFAULT_BRANCH" \
+            -f per_page=100 \
+            > "$RUNNER_TEMP/upstream-review-matching-prs.json"
+          matching_pr_count="$(
+            jq 'length' "$RUNNER_TEMP/upstream-review-matching-prs.json"
           )"
-          pr_number="${pr_url##*/}"
+          if [ "$matching_pr_count" = "0" ]; then
+            pr_url="$(
+              gh pr create \
+                --repo "$GH_REPO" \
+                --draft \
+                --base "$DEFAULT_BRANCH" \
+                --head "$FIX_BRANCH" \
+                --title "fix: address upstream review findings" \
+                --body-file "$RUNNER_TEMP/upstream-review-pr-body.md"
+            )"
+            pr_number="${pr_url##*/}"
+          elif [ "$matching_pr_count" = "1" ]; then
+            pr_number="$(
+              jq -r '.[0].number' "$RUNNER_TEMP/upstream-review-matching-prs.json"
+            )"
+            pr_url="$(
+              jq -r '.[0].html_url' "$RUNNER_TEMP/upstream-review-matching-prs.json"
+            )"
+            echo "Reusing the exact draft PR after a prior post-creation failure."
+          else
+            echo "More than one pull request uses the automatic fingerprint branch." >&2
+            exit 1
+          fi
           if ! [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
-            echo "Could not determine the created PR number from: $pr_url" >&2
+            echo "Could not determine the automatic PR number from: $pr_url" >&2
             exit 1
           fi
           gh api "repos/$GH_REPO/pulls/$pr_number" > "$RUNNER_TEMP/upstream-review-pr.json"
           if ! jq -e \
+            --argjson number "$pr_number" \
+            --arg url "$pr_url" \
             --arg repo "$GH_REPO" \
             --arg base_ref "$DEFAULT_BRANCH" \
             --arg base_sha "$BASE_SHA" \
             --arg head_ref "$FIX_BRANCH" \
             --arg head_sha "$HEAD_SHA" \
             '
+              .number == $number and
+              .html_url == $url and
               .state == "open" and
               .draft == true and
+              .user.login == "github-actions[bot]" and
               .base.repo.full_name == $repo and
               .base.ref == $base_ref and
               .base.sha == $base_sha and
@@ -748,7 +778,7 @@ jobs:
             ' \
             "$RUNNER_TEMP/upstream-review-pr.json" >/dev/null
           then
-            echo "The created PR does not match the verified branch snapshot." >&2
+            echo "The automatic PR does not match the verified branch snapshot." >&2
             exit 1
           fi
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
@@ -885,12 +915,14 @@ jobs:
       needs.publish.result == 'success' &&
       needs.validate_patch.result == 'success' &&
       needs.open_pr.result == 'success' &&
-      needs.review_pr.result == 'success' &&
-      needs.review_pr.outputs.review_json != ''
+      needs.review_pr.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       review_event: ${{ steps.finalize_review.outputs.review_event }}
+      review_verdict: ${{ steps.finalize_review.outputs.review_verdict }}
+      review_context_sha256: ${{ steps.finalize_review.outputs.review_context_sha256 }}
+      review_result_sha256: ${{ steps.finalize_review.outputs.review_result_sha256 }}
       review_request_sha256: ${{ steps.finalize_review.outputs.review_request_sha256 }}
     permissions:
       contents: read
@@ -996,14 +1028,18 @@ jobs:
           UPSTREAM_REVIEW_PR_REVIEW_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-review/input.json
           UPSTREAM_REVIEW_PR_REVIEW_AGENT_OUTPUT_JSON: ${{ needs.review_pr.outputs.review_json }}
           UPSTREAM_REVIEW_PR_REVIEW_BODY_PATH: ${{ runner.temp }}/upstream-review-pr-review/body.md
-          UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-pr-review/review-request.json
+          UPSTREAM_REVIEW_PR_REVIEW_RESULT_PATH: ${{ runner.temp }}/upstream-review-pr-review/result.json
+          UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH: ${{ runner.temp }}/upstream-review-pr-review/request.json
         run: node scripts/review-upstream.mjs --finalize-pr-review
 
-      - name: Upload validated review request
+      - name: Upload validated review context, result, and request
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: upstream-review-pr-review-request
-          path: ${{ runner.temp }}/upstream-review-pr-review/review-request.json
+          name: upstream-review-pr-review-validated-round-0
+          path: |
+            ${{ runner.temp }}/upstream-review-pr-review/input.json
+            ${{ runner.temp }}/upstream-review-pr-review/result.json
+            ${{ runner.temp }}/upstream-review-pr-review/request.json
           if-no-files-found: error
 
   submit_pr_review:
@@ -1015,8 +1051,7 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       needs.publish.result == 'success' &&
       needs.open_pr.result == 'success' &&
-      needs.validate_pr_review.result == 'success' &&
-      needs.validate_pr_review.outputs.review_request_sha256 != ''
+      needs.validate_pr_review.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1025,7 +1060,7 @@ jobs:
       - name: Download validated review request
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: upstream-review-pr-review-request
+          name: upstream-review-pr-review-validated-round-0
           path: ${{ runner.temp }}/upstream-review-pr-review-request
 
       - name: Submit review from the independent identity
@@ -1040,7 +1075,7 @@ jobs:
           EXPECTED_EVENT: ${{ needs.validate_pr_review.outputs.review_event }}
           EXPECTED_REQUEST_SHA256: ${{ needs.validate_pr_review.outputs.review_request_sha256 }}
         run: |
-          request_path="$RUNNER_TEMP/upstream-review-pr-review-request/review-request.json"
+          request_path="$RUNNER_TEMP/upstream-review-pr-review-request/request.json"
           actual_request_sha256="$(/usr/bin/sha256sum "$request_path" | /usr/bin/cut -d ' ' -f 1)"
           if [ "$actual_request_sha256" != "$EXPECTED_REQUEST_SHA256" ]; then
             echo "The validated PR review request digest changed." >&2
@@ -1206,3 +1241,101 @@ jobs:
           fi
           review_url="$(jq -r .html_url "$RUNNER_TEMP/upstream-review-created-review.json")"
           echo "$expected_state review: $review_url" >> "$GITHUB_STEP_SUMMARY"
+
+  rework_round_1:
+    needs:
+      - publish
+      - open_pr
+      - validate_pr_review
+      - submit_pr_review
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.validate_pr_review.result == 'success' &&
+      needs.submit_pr_review.result == 'success' &&
+      needs.validate_pr_review.outputs.review_event == 'REQUEST_CHANGES'
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    uses: ./.github/workflows/upstream-review-pr-rework.yml
+    with:
+      round: 1
+      base_sha: ${{ github.sha }}
+      expected_head_sha: ${{ needs.open_pr.outputs.head_sha }}
+      pr_number: ${{ needs.open_pr.outputs.pr_number }}
+      pr_url: ${{ needs.open_pr.outputs.pr_url }}
+      fix_branch: ${{ needs.publish.outputs.fix_branch }}
+      default_branch: ${{ github.event.repository.default_branch }}
+      previous_fix_artifact: upstream-review-fix-verified
+      previous_review_artifact: upstream-review-pr-review-validated-round-0
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+      UPSTREAM_REVIEW_APPROVAL_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+
+  rework_round_2:
+    needs:
+      - publish
+      - open_pr
+      - rework_round_1
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.rework_round_1.result == 'success' &&
+      needs.rework_round_1.outputs.has_patch == 'true' &&
+      needs.rework_round_1.outputs.head_sha != '' &&
+      needs.rework_round_1.outputs.review_event == 'REQUEST_CHANGES'
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    uses: ./.github/workflows/upstream-review-pr-rework.yml
+    with:
+      round: 2
+      base_sha: ${{ github.sha }}
+      expected_head_sha: ${{ needs.rework_round_1.outputs.head_sha }}
+      pr_number: ${{ needs.open_pr.outputs.pr_number }}
+      pr_url: ${{ needs.open_pr.outputs.pr_url }}
+      fix_branch: ${{ needs.publish.outputs.fix_branch }}
+      default_branch: ${{ github.event.repository.default_branch }}
+      previous_fix_artifact: upstream-review-pr-rework-verified-round-1
+      previous_review_artifact: upstream-review-pr-review-validated-round-1
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+      UPSTREAM_REVIEW_APPROVAL_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+
+  rework_limit_summary:
+    needs:
+      - open_pr
+      - rework_round_2
+    if: >-
+      always() &&
+      needs.rework_round_2.result == 'success' &&
+      needs.rework_round_2.outputs.review_event == 'REQUEST_CHANGES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Report bounded rework exhaustion
+        env:
+          PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          HEAD_SHA: ${{ needs.rework_round_2.outputs.head_sha }}
+        run: |
+          {
+            echo "## Automatic PR rework stopped"
+            echo
+            echo "The independent reviewer still requested changes after the hard limit of 2 rework rounds."
+            echo
+            echo "- Draft PR: $PR_URL"
+            echo "- Last reviewed head: \`$HEAD_SHA\`"
+            echo
+            echo "The PR remains draft and blocked for manual follow-up. No further agent round was started."
+          } >> "$GITHUB_STEP_SUMMARY"

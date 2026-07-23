@@ -10,22 +10,29 @@ import { promisify } from "node:util";
 import {
   buildAgenticFixInput,
   buildAgenticPrReviewInput,
+  buildAgenticPrReworkInput,
   extractGameReviewInput,
   finalizeAgenticFix,
   finalizeAgenticPrReview,
+  finalizeAgenticPrRework,
   finalizeAgenticReview,
   parseAgentReview,
   parseAgentFixOutput,
   parseAgentPrReviewOutput,
+  parseAgentPrReworkOutput,
+  prepareAgenticPrRework,
   renderFixPrBody,
   renderIssueBody,
   prepareAgenticPrReview,
   renderPrReviewBody,
   renderPrReviewRequest,
   validateAgenticPrReviewInput,
+  validateAgenticPrReworkInput,
   validateCollectedReviewInput,
   validateFixManifest,
+  validatePrReworkManifest,
   verifyAgenticFixArtifact,
+  verifyAgenticPrReworkArtifact,
 } from "./review-upstream.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -170,6 +177,58 @@ function agentPrReviewOutput(input, overrides = {}) {
     verdict: "approve",
     summary: "The parser change is focused and passes the required checks.",
     findings: [],
+    ...overrides,
+  };
+}
+
+function agentPrReworkOutput(input, changedFiles, overrides = {}) {
+  const changedFileSet = new Set(changedFiles);
+  return {
+    complete: true,
+    errors: [],
+    context_sha256: input.context_sha256,
+    summary: "Addressed the blocking review feedback.",
+    changed_files: changedFiles,
+    outcomes: input.blocking_findings.map((finding) => ({
+      finding_id: finding.finding_id,
+      status: changedFileSet.has(finding.path) ? "fixed" : "not_fixed",
+      reason: changedFileSet.has(finding.path)
+        ? "Updated the affected parser."
+        : "No safe in-scope change was available.",
+    })),
+    ...overrides,
+  };
+}
+
+function prReworkContext(overrides = {}) {
+  return {
+    round: 1,
+    max_rounds: 2,
+    base_sha: "a".repeat(40),
+    reviewed_head_sha: "b".repeat(40),
+    finding_fingerprint: "d".repeat(64),
+    fix_branch: `codex/upstream-review-${"d".repeat(16)}`,
+    pull_request: {
+      number: 42,
+      url: "https://github.com/example/game-cal/pull/42",
+    },
+    fix_input_sha256: "e".repeat(64),
+    previous_manifest_sha256: "f".repeat(64),
+    previous_patch_sha256: "c".repeat(64),
+    review_context_sha256: "1".repeat(64),
+    review_result_sha256: "2".repeat(64),
+    allowed_files: ["apps/api/src/games/starrail.ts"],
+    changed_files: ["apps/api/src/games/starrail.ts"],
+    blocking_findings: [
+      {
+        finding_id: "review-finding-001",
+        severity: "P2",
+        path: "apps/api/src/games/starrail.ts",
+        line: 12,
+        title: "Incorrect filter",
+        body: "The parser still includes expired events.",
+      },
+    ],
     ...overrides,
   };
 }
@@ -844,6 +903,188 @@ test("enforces PR review field and finding count limits", () => {
   );
 });
 
+test("builds a strict digest-bound PR rework input for one of two rounds", () => {
+  const context = prReworkContext();
+  const input = buildAgenticPrReworkInput(context);
+
+  assert.equal(input.mode, "agentic_pr_rework");
+  assert.equal(input.round, 1);
+  assert.equal(input.max_rounds, 2);
+  assert.match(input.context_sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(validateAgenticPrReworkInput(input, context), input);
+  assert.equal(
+    buildAgenticPrReworkInput(context).context_sha256,
+    input.context_sha256
+  );
+  const secondRoundInput = buildAgenticPrReworkInput({
+    ...context,
+    round: 2,
+  });
+  assert.equal(secondRoundInput.round, 2);
+  assert.equal(secondRoundInput.max_rounds, 2);
+
+  for (const changedContext of [
+    { ...context, round: 0 },
+    { ...context, round: 3 },
+    { ...context, max_rounds: 3 },
+    { ...context, reviewed_head_sha: "a".repeat(40) },
+    { ...context, fix_branch: "codex/upstream-review-wrong" },
+    {
+      ...context,
+      blocking_findings: [
+        {
+          ...context.blocking_findings[0],
+          severity: "P3",
+        },
+      ],
+    },
+    {
+      ...context,
+      allowed_files: ["README.md"],
+    },
+  ]) {
+    assert.throws(() => buildAgenticPrReworkInput(changedContext));
+  }
+
+  const replayed = buildAgenticPrReworkInput({
+    ...context,
+    reviewed_head_sha: "c".repeat(40),
+  });
+  assert.throws(
+    () => validateAgenticPrReworkInput(replayed, context),
+    /does not match the trusted context/
+  );
+});
+
+test("validates PR rework model output against context, outcomes, and actual paths", () => {
+  const input = buildAgenticPrReworkInput(prReworkContext());
+  const changedFiles = ["apps/api/src/games/starrail.ts"];
+  const output = agentPrReworkOutput(input, changedFiles);
+  const parsed = parseAgentPrReworkOutput(
+    JSON.stringify(output),
+    input,
+    changedFiles
+  );
+  assert.equal(parsed.has_patch, true);
+  assert.equal(parsed.round, 1);
+  assert.deepEqual(parsed.changed_files, changedFiles);
+
+  for (const [patch, expectedError] of [
+    [
+      { context_sha256: "0".repeat(64) },
+      /context does not match/,
+    ],
+    [
+      { changed_files: [] },
+      /does not match the actual tracked diff/,
+    ],
+    [
+      { outcomes: [] },
+      /cover every blocking finding/,
+    ],
+    [
+      {
+        outcomes: [
+          output.outcomes[0],
+          output.outcomes[0],
+        ],
+      },
+      /Duplicate PR rework finding/,
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        parseAgentPrReworkOutput(
+          JSON.stringify({ ...output, ...patch }),
+          input,
+          changedFiles
+        ),
+      expectedError
+    );
+  }
+  assert.throws(
+    () =>
+      parseAgentPrReworkOutput(
+        JSON.stringify({
+          ...output,
+          changed_files: ["README.md"],
+        }),
+        input,
+        ["README.md"]
+      ),
+    /outside the allowlist/
+  );
+});
+
+test("rejects a rework that drops a previously changed parser", () => {
+  const fixInput = buildAgenticFixInput(
+    agenticReviewReport([finding("genshin"), finding("starrail")])
+  );
+  const previousChangedFiles = [
+    "apps/api/src/games/genshin.ts",
+    "apps/api/src/games/starrail.ts",
+  ];
+  const remainingChangedFiles = ["apps/api/src/games/starrail.ts"];
+  const context = prReworkContext({
+    finding_fingerprint: fixInput.finding_fingerprint,
+    fix_branch: `codex/upstream-review-${fixInput.finding_fingerprint.slice(0, 16)}`,
+    allowed_files: previousChangedFiles,
+    changed_files: previousChangedFiles,
+  });
+  const input = buildAgenticPrReworkInput(context);
+  const incrementalPatch = Buffer.from("incremental patch");
+  const cumulativePatch = Buffer.from("cumulative patch");
+  const cumulativeManifest = {
+    schema_version: 1,
+    mode: "agentic_fix_manifest",
+    base_sha: input.base_sha,
+    finding_fingerprint: fixInput.finding_fingerprint,
+    finding_ids: fixInput.findings.map((item) => item.finding_id),
+    target_games: fixInput.target_games,
+    changed_files: remainingChangedFiles,
+    patch_sha256: createHash("sha256")
+      .update(cumulativePatch)
+      .digest("hex"),
+    patch_bytes: cumulativePatch.length,
+  };
+  const manifest = {
+    schema_version: 1,
+    mode: "agentic_pr_rework_manifest",
+    round: input.round,
+    max_rounds: input.max_rounds,
+    base_sha: input.base_sha,
+    parent_sha: input.reviewed_head_sha,
+    finding_fingerprint: input.finding_fingerprint,
+    fix_branch: input.fix_branch,
+    rework_context_sha256: input.context_sha256,
+    review_context_sha256: input.review_context_sha256,
+    review_result_sha256: input.review_result_sha256,
+    previous_patch_sha256: input.previous_patch_sha256,
+    incremental_patch_sha256: createHash("sha256")
+      .update(incrementalPatch)
+      .digest("hex"),
+    incremental_patch_bytes: incrementalPatch.length,
+    incremental_changed_files: remainingChangedFiles,
+    patch_sha256: cumulativeManifest.patch_sha256,
+    patch_bytes: cumulativeManifest.patch_bytes,
+    changed_files: remainingChangedFiles,
+    result_tree: "3".repeat(40),
+  };
+
+  assert.throws(
+    () =>
+      validatePrReworkManifest(
+        manifest,
+        input,
+        incrementalPatch,
+        cumulativeManifest,
+        cumulativePatch,
+        fixInput
+      ),
+    /removed a previously changed file/
+  );
+});
+
 test("finalizes an allowed tracked parser modification into a bounded patch", async () => {
   const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-fix-repo-"));
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), "game-cal-fix-output-"));
@@ -859,6 +1100,7 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
   const patchPath = path.join(outputDir, "fix.patch");
   const reviewInputPath = path.join(outputDir, "review-input.json");
   const reviewBodyPath = path.join(outputDir, "review-body.md");
+  const reviewResultPath = path.join(outputDir, "review-result.json");
   const reviewRequestPath = path.join(outputDir, "review-request.json");
   const githubOutputPath = path.join(outputDir, "github-output.txt");
 
@@ -955,11 +1197,32 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
     const agentOutputJson = JSON.stringify(
       agentPrReviewOutput(reviewInput)
     );
+    await assert.rejects(
+      () =>
+        finalizeAgenticPrReview({
+          cwd: repoDir,
+          prReviewInputPath: reviewInputPath,
+          agentOutputJson: "",
+          bodyPath: reviewBodyPath,
+          resultPath: reviewResultPath,
+          requestPath: reviewRequestPath,
+          githubOutputPath,
+          inputPath,
+          manifestPath,
+          patchPath,
+          expectedBaseSha: baseSha,
+          headSha,
+          pullRequestNumber: 42,
+          pullRequestUrl: "https://github.com/example/game-cal/pull/42",
+        }),
+      /Missing Codex PR review output/
+    );
     const finalizedReview = await finalizeAgenticPrReview({
       cwd: repoDir,
       prReviewInputPath: reviewInputPath,
       agentOutputJson,
       bodyPath: reviewBodyPath,
+      resultPath: reviewResultPath,
       requestPath: reviewRequestPath,
       githubOutputPath,
       inputPath,
@@ -973,6 +1236,7 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
     assert.equal(finalizedReview.request.event, "APPROVE");
     assert.equal(finalizedReview.request.commit_id, headSha);
     const reviewRequestText = await fs.readFile(reviewRequestPath, "utf8");
+    const reviewResultText = await fs.readFile(reviewResultPath, "utf8");
     assert.deepEqual(
       JSON.parse(reviewRequestText),
       finalizedReview.request
@@ -981,9 +1245,29 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
       finalizedReview.request_sha256,
       createHash("sha256").update(reviewRequestText).digest("hex")
     );
+    assert.deepEqual(
+      JSON.parse(reviewResultText),
+      finalizedReview.review
+    );
+    assert.equal(
+      finalizedReview.result_sha256,
+      createHash("sha256").update(reviewResultText).digest("hex")
+    );
     assert.match(
       await fs.readFile(githubOutputPath, "utf8"),
       /review_event=APPROVE/
+    );
+    assert.match(
+      await fs.readFile(githubOutputPath, "utf8"),
+      /review_verdict=approve/
+    );
+    assert.match(
+      await fs.readFile(githubOutputPath, "utf8"),
+      new RegExp(`review_context_sha256=${reviewInput.context_sha256}`)
+    );
+    assert.match(
+      await fs.readFile(githubOutputPath, "utf8"),
+      /blocking_finding_count=0/
     );
     assert.match(
       await fs.readFile(githubOutputPath, "utf8"),
@@ -1051,6 +1335,375 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
   } finally {
     await fs.rm(repoDir, { recursive: true, force: true });
     await fs.rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("prepares, finalizes, and verifies a bounded squash-style PR rework", async () => {
+  const repoDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-rework-repo-")
+  );
+  const outputDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-rework-output-")
+  );
+  const recoveryRepoDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-rework-recovery-")
+  );
+  const sourcePath = path.join(
+    repoDir,
+    "apps/api/src/games/starrail.ts"
+  );
+  const fixInputPath = path.join(outputDir, "upstream-review-fix-input.json");
+  const fixAgentPath = path.join(outputDir, "upstream-review-fix-agent.json");
+  const fixMetadataPath = path.join(outputDir, "initial-metadata.json");
+  const fixManifestPath = path.join(outputDir, "initial-manifest.json");
+  const fixPatchPath = path.join(outputDir, "initial-fix.patch");
+  const reviewInputPath = path.join(outputDir, "review-input.json");
+  const reviewResultPath = path.join(outputDir, "review-result.json");
+  const reviewRequestPath = path.join(outputDir, "review-request.json");
+  const reworkInputPath = path.join(outputDir, "rework-input.json");
+  const reworkAgentPath = path.join(outputDir, "rework-agent.json");
+  const reworkMetadataPath = path.join(outputDir, "rework-metadata.json");
+  const reworkManifestPath = path.join(outputDir, "rework-manifest.json");
+  const incrementalPatchPath = path.join(outputDir, "incremental.patch");
+  const cumulativeManifestPath = path.join(
+    outputDir,
+    "cumulative-manifest.json"
+  );
+  const cumulativePatchPath = path.join(outputDir, "fix.patch");
+
+  try {
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+    await fs.writeFile(sourcePath, "export const value = 1;\n", "utf8");
+    await execFileAsync("git", ["init", "-q"], { cwd: repoDir });
+    await execFileAsync("git", ["config", "user.name", "Test"], {
+      cwd: repoDir,
+    });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+      cwd: repoDir,
+    });
+    await execFileAsync("git", ["add", "."], { cwd: repoDir });
+    await execFileAsync("git", ["commit", "-qm", "base"], { cwd: repoDir });
+    const { stdout: baseStdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "HEAD"],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    const baseSha = baseStdout.trim();
+
+    const fixInput = buildAgenticFixInput(
+      agenticReviewReport([finding("starrail")])
+    );
+    await fs.writeFile(
+      fixInputPath,
+      `${JSON.stringify(fixInput)}\n`,
+      "utf8"
+    );
+    await fs.writeFile(
+      fixAgentPath,
+      JSON.stringify(
+        agentFixOutput(fixInput, ["apps/api/src/games/starrail.ts"])
+      ),
+      "utf8"
+    );
+    await fs.writeFile(sourcePath, "export const value = 2;\n", "utf8");
+    const initial = await finalizeAgenticFix({
+      cwd: repoDir,
+      inputPath: fixInputPath,
+      agentOutputPath: fixAgentPath,
+      metadataPath: fixMetadataPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      baseSha,
+      githubOutputPath: "",
+    });
+    assert.ok(initial.manifest.patch_bytes > 0);
+
+    await execFileAsync("git", ["add", "."], { cwd: repoDir });
+    await execFileAsync("git", ["commit", "-qm", "initial fix"], {
+      cwd: repoDir,
+    });
+    const { stdout: headStdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "HEAD"],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    const reviewedHeadSha = headStdout.trim();
+    const { stdout: preservedHeadCommit } = await execFileAsync(
+      "git",
+      ["cat-file", "commit", reviewedHeadSha],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    const pullRequestUrl =
+      "https://github.com/example/game-cal/pull/42";
+    const reviewInput = await prepareAgenticPrReview({
+      cwd: repoDir,
+      outputPath: reviewInputPath,
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      expectedBaseSha: baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+      githubOutputPath: "",
+    });
+    await finalizeAgenticPrReview({
+      cwd: repoDir,
+      prReviewInputPath: reviewInputPath,
+      agentOutputJson: JSON.stringify(
+        agentPrReviewOutput(reviewInput, {
+          verdict: "request_changes",
+          summary: "The parser fix still has a blocking regression.",
+          findings: [
+            {
+              severity: "P2",
+              path: "apps/api/src/games/starrail.ts",
+              line: 1,
+              title: "Use the corrected value",
+              body: "The current value is still incorrect.",
+            },
+          ],
+        })
+      ),
+      resultPath: reviewResultPath,
+      requestPath: reviewRequestPath,
+      githubOutputPath: "",
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      expectedBaseSha: baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+    });
+    const reworkInput = await prepareAgenticPrRework({
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      prReviewInputPath: reviewInputPath,
+      prReviewResultPath: reviewResultPath,
+      outputPath: reworkInputPath,
+      baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+      round: 1,
+      maxRounds: 2,
+      githubOutputPath: "",
+    });
+    assert.equal(reworkInput.blocking_findings.length, 1);
+
+    await fs.writeFile(
+      reworkAgentPath,
+      JSON.stringify(
+        agentPrReworkOutput(reworkInput, [
+          "apps/api/src/games/starrail.ts",
+        ])
+      ),
+      "utf8"
+    );
+    await fs.writeFile(sourcePath, "export const value = 3;\n", "utf8");
+    const rework = await finalizeAgenticPrRework({
+      cwd: repoDir,
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      reworkInputPath,
+      agentOutputPath: reworkAgentPath,
+      metadataPath: reworkMetadataPath,
+      reworkManifestPath,
+      incrementalPatchPath,
+      cumulativeManifestPath,
+      cumulativePatchPath,
+      baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+      round: 1,
+      githubOutputPath: "",
+    });
+    assert.equal(rework.rework_manifest.parent_sha, reviewedHeadSha);
+    assert.equal(rework.rework_manifest.base_sha, baseSha);
+    assert.notEqual(
+      rework.rework_manifest.incremental_patch_sha256,
+      rework.rework_manifest.patch_sha256
+    );
+    assert.ok(rework.rework_manifest.patch_bytes <= 128 * 1024);
+
+    await execFileAsync("git", ["reset", "--hard", "-q", baseSha], {
+      cwd: repoDir,
+    });
+    const verified = await verifyAgenticPrReworkArtifact({
+      cwd: repoDir,
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      reworkInputPath,
+      reworkManifestPath,
+      incrementalPatchPath,
+      cumulativeManifestPath,
+      cumulativePatchPath,
+      baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+      round: 1,
+      githubOutputPath: "",
+    });
+    assert.equal(
+      verified.rework_manifest.result_tree,
+      rework.rework_manifest.result_tree
+    );
+
+    await execFileAsync(
+      "git",
+      ["clone", "-q", "--no-local", repoDir, recoveryRepoDir]
+    );
+    const preservedHeadPath = path.join(outputDir, "previous-head.commit");
+    await fs.writeFile(preservedHeadPath, preservedHeadCommit, "utf8");
+    const { stdout: restoredHeadStdout } = await execFileAsync(
+      "git",
+      ["hash-object", "-t", "commit", "-w", preservedHeadPath],
+      { cwd: recoveryRepoDir, encoding: "utf8" }
+    );
+    assert.equal(restoredHeadStdout.trim(), reviewedHeadSha);
+    const recoveredVerification = await verifyAgenticPrReworkArtifact({
+      cwd: recoveryRepoDir,
+      inputPath: fixInputPath,
+      manifestPath: fixManifestPath,
+      patchPath: fixPatchPath,
+      reworkInputPath,
+      reworkManifestPath,
+      incrementalPatchPath,
+      cumulativeManifestPath,
+      cumulativePatchPath,
+      baseSha,
+      headSha: reviewedHeadSha,
+      pullRequestNumber: 42,
+      pullRequestUrl,
+      round: 1,
+      githubOutputPath: "",
+    });
+    assert.equal(
+      recoveredVerification.rework_manifest.result_tree,
+      rework.rework_manifest.result_tree
+    );
+
+    await execFileAsync("git", ["apply", cumulativePatchPath], {
+      cwd: repoDir,
+    });
+    await execFileAsync(
+      "git",
+      ["add", "apps/api/src/games/starrail.ts"],
+      { cwd: repoDir }
+    );
+    const { stdout: appliedTreeStdout } = await execFileAsync(
+      "git",
+      ["write-tree"],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    assert.equal(
+      appliedTreeStdout.trim(),
+      rework.rework_manifest.result_tree
+    );
+
+    const originalIncrementalPatch = await fs.readFile(incrementalPatchPath);
+    const originalCumulativePatch = await fs.readFile(cumulativePatchPath);
+    const originalReworkManifest = await fs.readFile(
+      reworkManifestPath,
+      "utf8"
+    );
+    await fs.writeFile(
+      incrementalPatchPath,
+      Buffer.concat([originalIncrementalPatch, Buffer.from("\n")])
+    );
+    await execFileAsync("git", ["reset", "--hard", "-q", baseSha], {
+      cwd: repoDir,
+    });
+    await assert.rejects(
+      () =>
+        verifyAgenticPrReworkArtifact({
+          cwd: repoDir,
+          inputPath: fixInputPath,
+          manifestPath: fixManifestPath,
+          patchPath: fixPatchPath,
+          reworkInputPath,
+          reworkManifestPath,
+          incrementalPatchPath,
+          cumulativeManifestPath,
+          cumulativePatchPath,
+          baseSha,
+          headSha: reviewedHeadSha,
+          pullRequestNumber: 42,
+          pullRequestUrl,
+          round: 1,
+          githubOutputPath: "",
+        }),
+      /incremental patch mismatch/
+    );
+
+    await fs.writeFile(incrementalPatchPath, originalIncrementalPatch);
+    await fs.writeFile(
+      cumulativePatchPath,
+      Buffer.concat([originalCumulativePatch, Buffer.from("\n")])
+    );
+    await assert.rejects(
+      () =>
+        verifyAgenticPrReworkArtifact({
+          cwd: repoDir,
+          inputPath: fixInputPath,
+          manifestPath: fixManifestPath,
+          patchPath: fixPatchPath,
+          reworkInputPath,
+          reworkManifestPath,
+          incrementalPatchPath,
+          cumulativeManifestPath,
+          cumulativePatchPath,
+          baseSha,
+          headSha: reviewedHeadSha,
+          pullRequestNumber: 42,
+          pullRequestUrl,
+          round: 1,
+          githubOutputPath: "",
+        }),
+      /patch byte count mismatch|cumulative patch mismatch/
+    );
+
+    await fs.writeFile(cumulativePatchPath, originalCumulativePatch);
+    const tamperedReworkManifest = {
+      ...JSON.parse(originalReworkManifest),
+      result_tree: "f".repeat(40),
+    };
+    await fs.writeFile(
+      reworkManifestPath,
+      `${JSON.stringify(tamperedReworkManifest)}\n`,
+      "utf8"
+    );
+    await assert.rejects(
+      () =>
+        verifyAgenticPrReworkArtifact({
+          cwd: repoDir,
+          inputPath: fixInputPath,
+          manifestPath: fixManifestPath,
+          patchPath: fixPatchPath,
+          reworkInputPath,
+          reworkManifestPath,
+          incrementalPatchPath,
+          cumulativeManifestPath,
+          cumulativePatchPath,
+          baseSha,
+          headSha: reviewedHeadSha,
+          pullRequestNumber: 42,
+          pullRequestUrl,
+          round: 1,
+          githubOutputPath: "",
+        }),
+      /result tree mismatch/
+    );
+  } finally {
+    await fs.rm(repoDir, { recursive: true, force: true });
+    await fs.rm(outputDir, { recursive: true, force: true });
+    await fs.rm(recoveryRepoDir, { recursive: true, force: true });
   }
 });
 
