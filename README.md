@@ -173,7 +173,7 @@ pnpm --filter @game-cal/api start
 GitHub Actions 页面从默认分支手动触发；非默认分支不会运行，以免未合并的
 workflow 代码接触 Secrets。
 
-Workflow 分成三个相互隔离的 job：
+Workflow 分成六个相互隔离的阶段：
 
 - `collect`：启动本地 Node API，抓取六个游戏的原始公告与当前
   `/api/events/:game` 输出，过滤已过期项和 reviewer-input suppression。
@@ -182,14 +182,27 @@ Workflow 分成三个相互隔离的 job：
   单个 shard 最多返回 8 条 findings，六份合计不超过 48 条。
 - `publish`：在第三个 runner 中严格校验结构化结果、再次应用 suppression，再由
   确定性脚本维护固定的 Issue #1 `Upstream Review Alerts`。这个 job 不接触
-  OpenAI Secrets。
+  OpenAI Secrets，并生成只含已确认 findings、匹配证据和静态 parser 白名单的紧凑
+  修复请求。
+- `repair`：仅在存在 findings 且没有相同 finding fingerprint 的历史 PR 时，再发起
+  **一个** workspace-write Codex 会话。它没有 GitHub 写权限，只能修改受影响游戏
+  对应的 `apps/api/src/games/<game>.ts`；补丁、base SHA、路径和 SHA-256 会由可信
+  脚本重新导出并校验。
+- `validate_patch`：在全新、无 Secrets、无 GitHub 写权限的 runner 中复验 artifact，
+  应用补丁并运行 `pnpm test:upstream-review`、`pnpm typecheck` 和 `pnpm build`。
+- `open_pr`：只接收上一步验证过的补丁，再次核对 base SHA、digest、路径和默认分支
+  tip，然后用固定 commit/PR 文案非强制推送 fingerprint 分支并创建 Draft PR。这个
+  job 不安装依赖，也不执行被修改的 parser 代码。
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
 采集数据、任一 Codex 输出不完整、六个游戏未全部审查、JSON 不符合约束，或
 Issue #1 的类型/标题不符时，发布步骤会失败且不修改 Issue。有 findings 时更新或
 reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；已关闭时不操作。
-运行产物和 API 日志会作为 Actions artifacts 保存。
+自动修复若越过文件白名单、创建/删除/重命名文件、改变文件模式、只改空白、生成
+二进制或超过 512 KB 的 patch、测试失败，均不会进入提 PR 阶段。相同 findings 的
+open、closed 或 merged PR 都会被 fingerprint 去重，workflow 不会 force-push 覆盖
+人工修改。运行产物和 API 日志会作为 Actions artifacts 保存。
 
 需要配置四个 GitHub Actions Secrets：
 
@@ -203,7 +216,15 @@ reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；
 网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
 `Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
 `.github/prompts/upstream-review.md` 与
-`.github/schemas/upstream-review-output.schema.json`。
+`.github/schemas/upstream-review-output.schema.json`；修复 agent 使用
+`.github/prompts/upstream-review-fix.md` 与
+`.github/schemas/upstream-review-fix-output.schema.json`。
+
+自动创建 PR 还需要在仓库 `Settings → Actions → General → Workflow permissions`
+中启用 **Allow GitHub Actions to create and approve pull requests**。GitHub 将“创建”
+和“批准”合并在同一个仓库级开关里；本 workflow 只在 `open_pr` job 申请
+`contents: write` / `pull-requests: write`，不会批准 PR。未启用时，前面的审查、
+Issue 和补丁验证仍可运行，但最终创建 PR 会被 GitHub 拒绝。
 
 可选环境变量：
 
@@ -215,6 +236,11 @@ reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；
 - `UPSTREAM_REVIEW_AGENT_OUTPUT_DIR`（finalize 模式读取六份 Codex JSON 的目录）
 - `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（兼容旧版单文件 Codex JSON）
 - `UPSTREAM_REVIEW_REPORT_PATH`（finalize 模式写出的完整 JSON 报告）
+- `UPSTREAM_REVIEW_FIX_INPUT_PATH`（prepare/finalize-fix 使用的紧凑修复请求）
+- `UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH`（Codex 修复结果）
+- `UPSTREAM_REVIEW_FIX_METADATA_PATH`（可信校验后的修复元数据）
+- `UPSTREAM_REVIEW_FIX_MANIFEST_PATH`（包含 base SHA、路径、patch digest 的 manifest）
+- `UPSTREAM_REVIEW_FIX_PATCH_PATH`（候选或已验证 patch）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_ISSUE_NUMBER`（workflow 固定为 `1`）
 - `UPSTREAM_REVIEW_ISSUE_TITLE`（workflow 固定为 `Upstream Review Alerts`）

@@ -12,6 +12,8 @@
     "review:upstream": "node scripts/review-upstream.mjs",
     "review:upstream:collect": "node scripts/review-upstream.mjs --collect-only",
     "review:upstream:finalize": "node scripts/review-upstream.mjs --finalize",
+    "review:upstream:prepare-fix": "node scripts/review-upstream.mjs --prepare-fix",
+    "review:upstream:finalize-fix": "node scripts/review-upstream.mjs --finalize-fix",
     "test:upstream-review": "node --test scripts/review-upstream.test.mjs",
     "cf:dev": "pnpm --filter @game-cal/web build && wrangler dev",
     "cf:deploy": "pnpm --filter @game-cal/web build && wrangler deploy",

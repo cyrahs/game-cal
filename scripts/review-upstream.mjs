@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+
+const execFileAsync = promisify(execFile);
 
 const GENSHIN_LIST_API =
   "https://hk4e-api.mihoyo.com/common/hk4e_cn/announcement/api/getAnnList?game=hk4e&game_biz=hk4e_cn&lang=zh-cn&bundle_id=hk4e_cn&platform=pc&region=cn_gf01&level=55&uid=100000000";
@@ -59,6 +64,12 @@ const MAX_AGENT_TITLE_LENGTH = 500;
 const MAX_AGENT_TIME_LENGTH = 100;
 const MAX_AGENT_REASON_LENGTH = 1_000;
 const MAX_ISSUE_BODY_BYTES = 60_000;
+const MAX_FIX_EVIDENCE_ITEMS = 4;
+const MAX_FIX_PATCH_BYTES = 512_000;
+const FIX_WORKSPACE_ARTIFACTS = new Set([
+  "artifacts/upstream-review-fix-input.json",
+  "artifacts/upstream-review-fix-agent.json",
+]);
 
 const GAME_LABELS = {
   genshin: "原神",
@@ -67,6 +78,15 @@ const GAME_LABELS = {
   zzz: "绝区零",
   snowbreak: "尘白禁区",
   endfield: "明日方舟：终末地",
+};
+
+const GAME_SOURCE_FILES = {
+  genshin: "apps/api/src/games/genshin.ts",
+  starrail: "apps/api/src/games/starrail.ts",
+  ww: "apps/api/src/games/ww.ts",
+  zzz: "apps/api/src/games/zzz.ts",
+  snowbreak: "apps/api/src/games/snowbreak.ts",
+  endfield: "apps/api/src/games/endfield.ts",
 };
 
 function trimTrailingSlash(input) {
@@ -1115,6 +1135,475 @@ function validateCollectedReviewInput(input) {
   return input;
 }
 
+function parseJsonDocument(text, label) {
+  try {
+    return JSON.parse(String(text ?? "").trim());
+  } catch (error) {
+    throw new Error(`Failed to parse ${label}: ${getErrorMessage(error)}`);
+  }
+}
+
+function validateAgenticReviewReport(report) {
+  if (!isRecord(report) || report.mode !== "agentic_review" || report.schema_version !== 2) {
+    throw new Error("Invalid agentic review report");
+  }
+  if (!isRecord(report.review) || !Array.isArray(report.review.findings)) {
+    throw new Error("Invalid agentic review report: missing findings");
+  }
+  if (report.review.findings.length > MAX_AGENT_FINDINGS) {
+    throw new Error(
+      `Invalid agentic review report: ${report.review.findings.length} findings exceeds the ${MAX_AGENT_FINDINGS} limit`
+    );
+  }
+
+  const findings = report.review.findings.map((finding, index) =>
+    validateAgentFinding(finding, index)
+  );
+  const reviewDatasets = report.review_datasets;
+  if (!Array.isArray(reviewDatasets)) {
+    throw new Error("Invalid agentic review report: missing review_datasets");
+  }
+
+  const datasetGames = reviewDatasets.map((dataset, index) => {
+    if (
+      !isRecord(dataset) ||
+      !SUPPORTED_GAMES.has(dataset.game) ||
+      typeof dataset.notes !== "string" ||
+      !Array.isArray(dataset.raw_notices) ||
+      !Array.isArray(dataset.api_events) ||
+      dataset.raw_notices.some((item) => !isRecord(item)) ||
+      dataset.api_events.some((item) => !isRecord(item))
+    ) {
+      throw new Error(
+        `Invalid agentic review report: review_datasets[${index}] is invalid`
+      );
+    }
+    return dataset.game;
+  });
+
+  if (
+    datasetGames.length !== DEFAULT_GAMES.length ||
+    new Set(datasetGames).size !== DEFAULT_GAMES.length ||
+    datasetGames
+      .slice()
+      .sort()
+      .some((game, index) => game !== [...DEFAULT_GAMES].sort()[index])
+  ) {
+    throw new Error(
+      "Invalid agentic review report: review_datasets must cover all six games"
+    );
+  }
+
+  return {
+    ...report,
+    review: {
+      ...report.review,
+      findings,
+    },
+  };
+}
+
+function getEvidenceTitles(item) {
+  return [
+    item?.title,
+    item?.subtitle,
+    item?.left_title,
+    item?.name,
+  ]
+    .map((value) => normalizeWhitespace(value || ""))
+    .filter(Boolean);
+}
+
+function evidenceTitleMatches(itemTitle, findingTitle) {
+  if (itemTitle === findingTitle) return true;
+  const shorterLength = Math.min(
+    Array.from(itemTitle).length,
+    Array.from(findingTitle).length
+  );
+  return (
+    shorterLength >= 8 &&
+    (itemTitle.includes(findingTitle) || findingTitle.includes(itemTitle))
+  );
+}
+
+function selectFindingEvidence(items, candidateTitles) {
+  const titles = [...new Set(candidateTitles.map(normalizeWhitespace).filter(Boolean))];
+  return items
+    .filter((item) =>
+      getEvidenceTitles(item).some((itemTitle) =>
+        titles.some((findingTitle) => evidenceTitleMatches(itemTitle, findingTitle))
+      )
+    )
+    .slice(0, MAX_FIX_EVIDENCE_ITEMS);
+}
+
+function sha256(input) {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function compareCodePoints(a, b) {
+  const left = String(a);
+  const right = String(b);
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function getFindingFingerprint(findings) {
+  const canonicalFindings = findings
+    .map((finding) => ({
+      game: finding.game,
+      kind: finding.kind,
+      raw_title: normalizeWhitespace(finding.raw_title),
+      api_title: normalizeWhitespace(finding.api_title),
+      start_time: normalizeWhitespace(finding.start_time),
+      end_time: normalizeWhitespace(finding.end_time),
+    }))
+    .sort((a, b) => compareCodePoints(JSON.stringify(a), JSON.stringify(b)));
+  return sha256(JSON.stringify(canonicalFindings));
+}
+
+function compareFixFindings(a, b) {
+  const gameOrder =
+    DEFAULT_GAMES.indexOf(a.game) - DEFAULT_GAMES.indexOf(b.game);
+  if (gameOrder !== 0) return gameOrder;
+  for (const field of [
+    "kind",
+    "raw_title",
+    "api_title",
+    "start_time",
+    "end_time",
+    "title",
+    "severity",
+    "confidence",
+  ]) {
+    const comparison = compareCodePoints(a[field], b[field]);
+    if (comparison !== 0) return comparison;
+  }
+  return 0;
+}
+
+function buildAgenticFixInput(rawReport) {
+  const report = validateAgenticReviewReport(rawReport);
+  const findings = [...report.review.findings]
+    .sort(compareFixFindings)
+    .map((finding, index) => ({
+      finding_id: `finding-${String(index + 1).padStart(3, "0")}`,
+      ...finding,
+    }));
+  const findingGames = new Set(findings.map((finding) => finding.game));
+  const targetGames = DEFAULT_GAMES.filter((game) => findingGames.has(game));
+  const datasetsByGame = new Map(
+    report.review_datasets.map((dataset) => [dataset.game, dataset])
+  );
+
+  const evidence = targetGames.map((game) => {
+    const dataset = datasetsByGame.get(game);
+    const gameFindings = findings.filter((finding) => finding.game === game);
+    const rawTitles = gameFindings.flatMap((finding) => [
+      finding.raw_title,
+      finding.title,
+    ]);
+    const apiTitles = gameFindings.flatMap((finding) => [
+      finding.api_title,
+      finding.title,
+    ]);
+    return {
+      game,
+      notes: dataset.notes,
+      matching_raw_notices: selectFindingEvidence(dataset.raw_notices, rawTitles),
+      matching_api_events: selectFindingEvidence(dataset.api_events, apiTitles),
+    };
+  });
+
+  return {
+    schema_version: 1,
+    mode: "agentic_fix",
+    source_report: {
+      generated_at: normalizeWhitespace(report.generated_at || ""),
+      finalized_at: normalizeWhitespace(report.finalized_at || ""),
+      issue_url: truncateText(
+        normalizeWhitespace(report.issue?.issue_url || ""),
+        MAX_AGENT_TITLE_LENGTH
+      ),
+    },
+    finding_fingerprint: getFindingFingerprint(findings),
+    target_games: targetGames,
+    allowed_files: targetGames.map((game) => GAME_SOURCE_FILES[game]),
+    findings,
+    evidence,
+  };
+}
+
+function validateAgenticFixInput(input) {
+  if (!isRecord(input) || input.mode !== "agentic_fix" || input.schema_version !== 1) {
+    throw new Error("Invalid agentic fix input");
+  }
+  if (
+    !Array.isArray(input.target_games) ||
+    input.target_games.some((game) => !SUPPORTED_GAMES.has(game)) ||
+    new Set(input.target_games).size !== input.target_games.length
+  ) {
+    throw new Error("Invalid agentic fix input: target_games is invalid");
+  }
+  if (
+    !isRecord(input.source_report) ||
+    typeof input.source_report.generated_at !== "string" ||
+    typeof input.source_report.finalized_at !== "string" ||
+    typeof input.source_report.issue_url !== "string" ||
+    typeof input.finding_fingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(input.finding_fingerprint)
+  ) {
+    throw new Error("Invalid agentic fix input: source metadata is invalid");
+  }
+
+  const expectedTargetGames = DEFAULT_GAMES.filter((game) =>
+    input.target_games.includes(game)
+  );
+  if (
+    input.target_games.some((game, index) => game !== expectedTargetGames[index])
+  ) {
+    throw new Error("Invalid agentic fix input: target_games must use canonical order");
+  }
+
+  const expectedAllowedFiles = expectedTargetGames.map(
+    (game) => GAME_SOURCE_FILES[game]
+  );
+  if (
+    !Array.isArray(input.allowed_files) ||
+    input.allowed_files.length !== expectedAllowedFiles.length ||
+    input.allowed_files.some((file, index) => file !== expectedAllowedFiles[index])
+  ) {
+    throw new Error("Invalid agentic fix input: allowed_files does not match target_games");
+  }
+  if (!Array.isArray(input.findings) || input.findings.length > MAX_AGENT_FINDINGS) {
+    throw new Error("Invalid agentic fix input: findings is invalid");
+  }
+
+  const findingIds = new Set();
+  for (const [index, finding] of input.findings.entries()) {
+    if (
+      !isRecord(finding) ||
+      typeof finding.finding_id !== "string" ||
+      finding.finding_id !== `finding-${String(index + 1).padStart(3, "0")}` ||
+      findingIds.has(finding.finding_id)
+    ) {
+      throw new Error(`Invalid agentic fix input finding at index ${index}`);
+    }
+    findingIds.add(finding.finding_id);
+    const validatedFinding = validateAgentFinding(finding, index);
+    if (!input.target_games.includes(validatedFinding.game)) {
+      throw new Error(
+        `Invalid agentic fix input: finding ${finding.finding_id} is outside target_games`
+      );
+    }
+    if (
+      index > 0 &&
+      compareFixFindings(input.findings[index - 1], finding) > 0
+    ) {
+      throw new Error("Invalid agentic fix input: findings must use canonical order");
+    }
+  }
+  const findingGames = new Set(input.findings.map((finding) => finding.game));
+  const expectedFindingGames = DEFAULT_GAMES.filter((game) =>
+    findingGames.has(game)
+  );
+  if (
+    input.target_games.length !== expectedFindingGames.length ||
+    input.target_games.some(
+      (game, index) => game !== expectedFindingGames[index]
+    )
+  ) {
+    throw new Error(
+      "Invalid agentic fix input: target_games must exactly match findings"
+    );
+  }
+  if (getFindingFingerprint(input.findings) !== input.finding_fingerprint) {
+    throw new Error("Invalid agentic fix input: finding fingerprint mismatch");
+  }
+
+  if (
+    !Array.isArray(input.evidence) ||
+    input.evidence.length !== expectedTargetGames.length ||
+    input.evidence.some(
+      (entry, index) =>
+        !isRecord(entry) ||
+        entry.game !== expectedTargetGames[index] ||
+        typeof entry.notes !== "string" ||
+        !Array.isArray(entry.matching_raw_notices) ||
+        !Array.isArray(entry.matching_api_events) ||
+        entry.matching_raw_notices.some((item) => !isRecord(item)) ||
+        entry.matching_api_events.some((item) => !isRecord(item))
+    )
+  ) {
+    throw new Error("Invalid agentic fix input: evidence is invalid");
+  }
+
+  return input;
+}
+
+function normalizeChangedFiles(changedFiles) {
+  if (!Array.isArray(changedFiles)) {
+    throw new Error("Invalid changed-file list");
+  }
+  const normalized = changedFiles
+    .map((file) => String(file ?? "").trim())
+    .filter(Boolean);
+  if (
+    new Set(normalized).size !== normalized.length ||
+    normalized.some(
+      (file) =>
+        path.posix.isAbsolute(file) ||
+        file.includes("\\") ||
+        file.split("/").includes("..")
+    )
+  ) {
+    throw new Error("Invalid changed-file list");
+  }
+  return normalized.sort();
+}
+
+function assertExactStringSet(actual, expected, label) {
+  if (
+    actual.length !== expected.length ||
+    actual.some((value, index) => value !== expected[index])
+  ) {
+    throw new Error(`${label} does not match the actual tracked diff`);
+  }
+}
+
+function parseAgentFixOutput(text, rawFixInput, actualChangedFiles) {
+  const fixInput = validateAgenticFixInput(rawFixInput);
+  const parsed = parseJsonDocument(text, "Codex fix output");
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid Codex fix output: expected an object");
+  }
+
+  const allowedTopLevelFields = new Set([
+    "complete",
+    "errors",
+    "summary",
+    "changed_files",
+    "outcomes",
+  ]);
+  if (Object.keys(parsed).some((field) => !allowedTopLevelFields.has(field))) {
+    throw new Error("Invalid Codex fix output: unexpected field");
+  }
+  if (
+    !Array.isArray(parsed.errors) ||
+    parsed.errors.length > 20 ||
+    parsed.errors.some((error) => typeof error !== "string")
+  ) {
+    throw new Error("Invalid Codex fix output: errors must contain at most 20 strings");
+  }
+  const errors = parsed.errors
+    .map((error) => truncateText(normalizeWhitespace(error), MAX_AGENT_ERROR_LENGTH))
+    .filter(Boolean);
+  if (parsed.complete !== true || errors.length > 0) {
+    const detail = errors.length > 0 ? `: ${errors.join("; ")}` : "";
+    throw new Error(`Codex reported an incomplete fix${detail}`);
+  }
+  if (typeof parsed.summary !== "string") {
+    throw new Error("Invalid Codex fix output: summary must be a string");
+  }
+
+  const claimedChangedFiles = normalizeChangedFiles(parsed.changed_files);
+  const changedFiles = normalizeChangedFiles(actualChangedFiles);
+  const allowedFiles = new Set(fixInput.allowed_files);
+  const disallowedFile = changedFiles.find((file) => !allowedFiles.has(file));
+  if (disallowedFile) {
+    throw new Error(`Codex changed a file outside the allowlist: ${disallowedFile}`);
+  }
+  assertExactStringSet(
+    claimedChangedFiles,
+    changedFiles,
+    "Codex changed_files"
+  );
+
+  if (!Array.isArray(parsed.outcomes)) {
+    throw new Error("Invalid Codex fix output: outcomes must be an array");
+  }
+  const findingsById = new Map(
+    fixInput.findings.map((finding) => [finding.finding_id, finding])
+  );
+  const seenFindingIds = new Set();
+  const outcomes = parsed.outcomes.map((outcome, index) => {
+    if (
+      !isRecord(outcome) ||
+      Object.keys(outcome).some(
+        (field) => !["finding_id", "status", "reason"].includes(field)
+      ) ||
+      typeof outcome.finding_id !== "string" ||
+      !["fixed", "not_fixed"].includes(outcome.status) ||
+      typeof outcome.reason !== "string"
+    ) {
+      throw new Error(`Invalid Codex fix outcome at index ${index}`);
+    }
+    if (!findingsById.has(outcome.finding_id)) {
+      throw new Error(`Unknown finding outcome: ${outcome.finding_id}`);
+    }
+    if (seenFindingIds.has(outcome.finding_id)) {
+      throw new Error(`Duplicate finding outcome: ${outcome.finding_id}`);
+    }
+    seenFindingIds.add(outcome.finding_id);
+    const reason = truncateText(
+      normalizeWhitespace(outcome.reason),
+      MAX_AGENT_REASON_LENGTH
+    );
+    if (!reason) {
+      throw new Error(`Missing outcome reason for ${outcome.finding_id}`);
+    }
+    return {
+      finding_id: outcome.finding_id,
+      status: outcome.status,
+      reason,
+    };
+  });
+
+  if (
+    outcomes.length !== fixInput.findings.length ||
+    fixInput.findings.some((finding) => !seenFindingIds.has(finding.finding_id))
+  ) {
+    throw new Error("Codex fix outcomes must cover every finding exactly once");
+  }
+
+  const gameBySourceFile = new Map(
+    Object.entries(GAME_SOURCE_FILES).map(([game, file]) => [file, game])
+  );
+  const fixedGames = new Set(
+    outcomes
+      .filter((outcome) => outcome.status === "fixed")
+      .map((outcome) => findingsById.get(outcome.finding_id).game)
+  );
+  const changedGames = new Set(
+    changedFiles.map((file) => gameBySourceFile.get(file))
+  );
+  if (
+    [...fixedGames].some((game) => !changedGames.has(game)) ||
+    [...changedGames].some((game) => !fixedGames.has(game))
+  ) {
+    throw new Error(
+      "Codex fixed outcomes and changed game parser files do not match"
+    );
+  }
+
+  return {
+    schema_version: 1,
+    mode: "agentic_fix_result",
+    source_report: fixInput.source_report,
+    summary: truncateText(
+      normalizeWhitespace(parsed.summary),
+      MAX_AGENT_SUMMARY_LENGTH
+    ),
+    target_games: fixInput.target_games,
+    allowed_files: fixInput.allowed_files,
+    changed_files: changedFiles,
+    has_patch: changedFiles.length > 0,
+    findings: fixInput.findings,
+    outcomes,
+  };
+}
+
 async function extractGameReviewInput(game, options = {}) {
   const targetGame = String(game ?? "").trim();
   if (!SUPPORTED_GAMES.has(targetGame)) {
@@ -1631,6 +2120,599 @@ async function writeReport(report, outputPath, pretty = true) {
   await fs.writeFile(resolved, json + "\n", "utf8");
 }
 
+async function writeTextFile(outputPath, content) {
+  if (!outputPath) {
+    throw new Error("Missing output path");
+  }
+  const resolved = path.resolve(outputPath);
+  await fs.mkdir(path.dirname(resolved), { recursive: true });
+  await fs.writeFile(resolved, content, "utf8");
+}
+
+async function appendGitHubOutputs(values, outputPath = process.env.GITHUB_OUTPUT) {
+  if (!outputPath) return;
+  const lines = Object.entries(values).map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`Invalid GitHub output name: ${key}`);
+    }
+    const normalizedValue = String(value ?? "");
+    if (/[\r\n]/.test(normalizedValue)) {
+      throw new Error(`Invalid multiline GitHub output: ${key}`);
+    }
+    return `${key}=${normalizedValue}`;
+  });
+  await fs.appendFile(path.resolve(outputPath), `${lines.join("\n")}\n`, "utf8");
+}
+
+async function prepareAgenticFix(options = {}) {
+  const reportPath =
+    options.reportPath ??
+    process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim();
+  const outputPath =
+    options.outputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_INPUT_PATH?.trim();
+  const reportText = await readTextFile(reportPath, "agentic review report");
+  const report = parseJsonDocument(reportText, "agentic review report");
+  const fixInput = buildAgenticFixInput(report);
+  await writeReport(fixInput, outputPath, false);
+
+  const hasFindings = fixInput.findings.length > 0;
+  const fixBranch = hasFindings
+    ? `codex/upstream-review-${fixInput.finding_fingerprint.slice(0, 16)}`
+    : "";
+  await appendGitHubOutputs(
+    {
+      has_findings: hasFindings,
+      finding_count: fixInput.findings.length,
+      finding_fingerprint: fixInput.finding_fingerprint,
+      fix_branch: fixBranch,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: fixInput.mode,
+      finding_count: fixInput.findings.length,
+      target_games: fixInput.target_games,
+      output_path: path.resolve(outputPath),
+    })
+  );
+  return fixInput;
+}
+
+async function runGit(args, options = {}) {
+  const cwd = options.cwd ?? process.cwd();
+  const encoding = options.encoding === null ? null : "utf8";
+  const env = { ...process.env };
+  for (const key of [
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_WORK_TREE",
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_EXEC_PATH",
+    "GIT_CONFIG_PARAMETERS",
+  ]) {
+    delete env[key];
+  }
+  Object.assign(env, {
+    PATH: "/usr/bin:/bin",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "0",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_EXTERNAL_DIFF: "",
+    GIT_DIFF_OPTS: "",
+  });
+  return await execFileAsync("git", ["--no-replace-objects", ...args], {
+    cwd,
+    encoding,
+    env,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+async function assertSemanticDiff(cwd) {
+  try {
+    await runGit(["diff", "-w", "--quiet", "HEAD", "--"], { cwd });
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === 1) return;
+    throw error;
+  }
+  throw new Error("Codex produced only whitespace changes");
+}
+
+function parseModifiedFileStatus(text) {
+  const files = [];
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (!line) continue;
+    const separatorIndex = line.indexOf("\t");
+    const status = separatorIndex === -1 ? line : line.slice(0, separatorIndex);
+    const file = separatorIndex === -1 ? "" : line.slice(separatorIndex + 1);
+    if (status !== "M" || !file) {
+      throw new Error(
+        `Codex fix may only modify existing regular files; found ${line}`
+      );
+    }
+    files.push(file);
+  }
+  return normalizeChangedFiles(files);
+}
+
+function validateFixManifest(manifest, fixInput, patch, expectedBaseSha = "") {
+  if (
+    !isRecord(manifest) ||
+    manifest.schema_version !== 1 ||
+    manifest.mode !== "agentic_fix_manifest" ||
+    typeof manifest.base_sha !== "string" ||
+    !/^[a-f0-9]{40}$/.test(manifest.base_sha) ||
+    typeof manifest.finding_fingerprint !== "string" ||
+    typeof manifest.patch_sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.patch_sha256) ||
+    !Number.isInteger(manifest.patch_bytes) ||
+    manifest.patch_bytes <= 0 ||
+    manifest.patch_bytes > MAX_FIX_PATCH_BYTES ||
+    !Array.isArray(manifest.finding_ids) ||
+    !Array.isArray(manifest.target_games) ||
+    !Array.isArray(manifest.changed_files)
+  ) {
+    throw new Error("Invalid agentic fix manifest");
+  }
+  if (expectedBaseSha && manifest.base_sha !== expectedBaseSha) {
+    throw new Error(
+      `Agentic fix base SHA mismatch: expected ${expectedBaseSha}, got ${manifest.base_sha}`
+    );
+  }
+  if (manifest.finding_fingerprint !== fixInput.finding_fingerprint) {
+    throw new Error("Agentic fix manifest finding fingerprint mismatch");
+  }
+
+  const expectedFindingIds = fixInput.findings
+    .map((finding) => finding.finding_id)
+    .sort();
+  const manifestFindingIds = normalizeChangedFiles(manifest.finding_ids);
+  assertExactStringSet(
+    manifestFindingIds,
+    expectedFindingIds,
+    "Agentic fix manifest finding_ids"
+  );
+  const expectedTargetGames = [...fixInput.target_games].sort();
+  const manifestTargetGames = normalizeChangedFiles(manifest.target_games);
+  assertExactStringSet(
+    manifestTargetGames,
+    expectedTargetGames,
+    "Agentic fix manifest target_games"
+  );
+
+  const changedFiles = normalizeChangedFiles(manifest.changed_files);
+  if (
+    changedFiles.length === 0 ||
+    changedFiles.some((file) => !fixInput.allowed_files.includes(file))
+  ) {
+    throw new Error("Agentic fix manifest contains an invalid changed file");
+  }
+  if (!Buffer.isBuffer(patch) || patch.length !== manifest.patch_bytes) {
+    throw new Error("Agentic fix patch byte count mismatch");
+  }
+  if (sha256(patch) !== manifest.patch_sha256) {
+    throw new Error("Agentic fix patch SHA-256 mismatch");
+  }
+  return {
+    ...manifest,
+    finding_ids: manifestFindingIds,
+    target_games: manifestTargetGames,
+    changed_files: changedFiles,
+  };
+}
+
+async function readAndValidateFixArtifact(options = {}) {
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_INPUT_PATH?.trim();
+  const manifestPath =
+    options.manifestPath ??
+    process.env.UPSTREAM_REVIEW_FIX_MANIFEST_PATH?.trim();
+  const patchPath =
+    options.patchPath ??
+    process.env.UPSTREAM_REVIEW_FIX_PATCH_PATH?.trim();
+  const expectedBaseSha =
+    options.expectedBaseSha ??
+    process.env.UPSTREAM_REVIEW_BASE_SHA?.trim() ??
+    "";
+  const [inputText, manifestText, patch] = await Promise.all([
+    readTextFile(inputPath, "agentic fix input"),
+    readTextFile(manifestPath, "agentic fix manifest"),
+    fs.readFile(path.resolve(patchPath)),
+  ]);
+  const fixInput = validateAgenticFixInput(
+    parseJsonDocument(inputText, "agentic fix input")
+  );
+  const manifest = validateFixManifest(
+    parseJsonDocument(manifestText, "agentic fix manifest"),
+    fixInput,
+    patch,
+    expectedBaseSha
+  );
+  return { fixInput, manifest, patch };
+}
+
+async function inspectAgenticFixPatch(patchPath, cwd) {
+  const resolvedPatchPath = path.resolve(patchPath);
+  const [headResult, numstatResult, summaryResult] = await Promise.all([
+    runGit(["rev-parse", "HEAD"], { cwd }),
+    runGit(["apply", "--numstat", "-z", "--", resolvedPatchPath], {
+      cwd,
+      encoding: null,
+    }),
+    runGit(["apply", "--summary", "--", resolvedPatchPath], { cwd }),
+    runGit(["apply", "--check", "--", resolvedPatchPath], { cwd }),
+  ]);
+  const summary = String(summaryResult.stdout).trim();
+  if (summary) {
+    throw new Error(
+      `Agentic fix patch may only modify existing regular files: ${summary}`
+    );
+  }
+
+  const changedFiles = [];
+  for (const record of Buffer.from(numstatResult.stdout)
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)) {
+    const fields = record.split("\t");
+    if (
+      fields.length !== 3 ||
+      !fields[2] ||
+      (fields[0] === "-" && fields[1] === "-")
+    ) {
+      throw new Error("Agentic fix artifact contains an invalid or binary patch");
+    }
+    changedFiles.push(fields[2]);
+  }
+  return {
+    head_sha: String(headResult.stdout).trim(),
+    changed_files: normalizeChangedFiles(changedFiles),
+  };
+}
+
+async function verifyAgenticFixArtifact(options = {}) {
+  const patchPath =
+    options.patchPath ??
+    process.env.UPSTREAM_REVIEW_FIX_PATCH_PATH?.trim();
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const { manifest } = await readAndValidateFixArtifact(options);
+  const inspection = await inspectAgenticFixPatch(patchPath, cwd);
+  if (inspection.head_sha !== manifest.base_sha) {
+    throw new Error(
+      `Agentic fix checkout mismatch: expected ${manifest.base_sha}, got ${inspection.head_sha}`
+    );
+  }
+  assertExactStringSet(
+    inspection.changed_files,
+    manifest.changed_files,
+    "Agentic fix patch paths"
+  );
+  const fixBranch = `codex/upstream-review-${manifest.finding_fingerprint.slice(0, 16)}`;
+  await appendGitHubOutputs(
+    {
+      fix_branch: fixBranch,
+      patch_sha256: manifest.patch_sha256,
+      patch_bytes: manifest.patch_bytes,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: manifest.mode,
+      base_sha: manifest.base_sha,
+      changed_files: manifest.changed_files,
+      patch_sha256: manifest.patch_sha256,
+    })
+  );
+  return manifest;
+}
+
+async function finalizeAgenticFix(options = {}) {
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_INPUT_PATH?.trim();
+  const agentOutputPath =
+    options.agentOutputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH?.trim();
+  const metadataPath =
+    options.metadataPath ??
+    process.env.UPSTREAM_REVIEW_FIX_METADATA_PATH?.trim();
+  const manifestPath =
+    options.manifestPath ??
+    process.env.UPSTREAM_REVIEW_FIX_MANIFEST_PATH?.trim();
+  const patchPath =
+    options.patchPath ??
+    process.env.UPSTREAM_REVIEW_FIX_PATCH_PATH?.trim();
+  const expectedManifestPath =
+    options.expectedManifestPath ??
+    process.env.UPSTREAM_REVIEW_EXPECTED_FIX_MANIFEST_PATH?.trim();
+  const baseSha =
+    options.baseSha ??
+    process.env.UPSTREAM_REVIEW_BASE_SHA?.trim() ??
+    "";
+
+  if (!/^[a-f0-9]{40}$/.test(baseSha)) {
+    throw new Error(`Invalid base SHA: ${baseSha || "(empty)"}`);
+  }
+  const [inputText, agentOutputText, headResult] = await Promise.all([
+    readTextFile(inputPath, "agentic fix input"),
+    readTextFile(agentOutputPath, "Codex fix output"),
+    runGit(["rev-parse", "HEAD"], { cwd }),
+  ]);
+  const headSha = String(headResult.stdout).trim();
+  if (headSha !== baseSha) {
+    throw new Error(`Worktree HEAD mismatch: expected ${baseSha}, got ${headSha}`);
+  }
+
+  const [statusResult, summaryResult, untrackedResult] = await Promise.all([
+    runGit(["diff", "--name-status", "--no-renames", "HEAD", "--"], { cwd }),
+    runGit(["diff", "--summary", "--no-renames", "HEAD", "--"], { cwd }),
+    runGit(["ls-files", "--others", "--exclude-standard", "-z"], {
+      cwd,
+      encoding: null,
+    }),
+  ]);
+  if (String(summaryResult.stdout).trim()) {
+    throw new Error(
+      `Codex changed a file mode or type: ${String(summaryResult.stdout).trim()}`
+    );
+  }
+
+  const untrackedFiles = Buffer.from(untrackedResult.stdout)
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  const unexpectedUntrackedFile = untrackedFiles.find(
+    (file) => !FIX_WORKSPACE_ARTIFACTS.has(file)
+  );
+  if (unexpectedUntrackedFile) {
+    throw new Error(
+      `Codex created an unexpected untracked file: ${unexpectedUntrackedFile}`
+    );
+  }
+
+  const changedFiles = parseModifiedFileStatus(statusResult.stdout);
+  const fixInput = validateAgenticFixInput(
+    parseJsonDocument(inputText, "agentic fix input")
+  );
+  const metadata = parseAgentFixOutput(
+    agentOutputText,
+    fixInput,
+    changedFiles
+  );
+  await writeReport(metadata, metadataPath);
+
+  if (!metadata.has_patch) {
+    await writeTextFile(patchPath, "");
+    await appendGitHubOutputs(
+      {
+        has_patch: false,
+        changed_file_count: 0,
+      },
+      options.githubOutputPath
+    );
+    return { metadata, manifest: null };
+  }
+
+  const [numstatResult] = await Promise.all([
+    runGit(["diff", "--numstat", "HEAD", "--"], { cwd }),
+    runGit(["diff", "--check", "HEAD", "--"], { cwd }),
+    assertSemanticDiff(cwd),
+  ]);
+  if (
+    String(numstatResult.stdout)
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .some((line) => line.startsWith("-\t-\t"))
+  ) {
+    throw new Error("Codex produced a binary patch");
+  }
+
+  const patchResult = await runGit(
+    [
+      "diff",
+      "--binary",
+      "--full-index",
+      "--no-ext-diff",
+      "--no-textconv",
+      "HEAD",
+      "--",
+    ],
+    { cwd, encoding: null }
+  );
+  const patch = Buffer.from(patchResult.stdout);
+  if (patch.length === 0 || patch.length > MAX_FIX_PATCH_BYTES) {
+    throw new Error(
+      `Agentic fix patch is ${patch.length} bytes; expected 1-${MAX_FIX_PATCH_BYTES}`
+    );
+  }
+
+  const manifest = {
+    schema_version: 1,
+    mode: "agentic_fix_manifest",
+    base_sha: baseSha,
+    finding_fingerprint: fixInput.finding_fingerprint,
+    finding_ids: fixInput.findings.map((finding) => finding.finding_id),
+    target_games: fixInput.target_games,
+    changed_files: metadata.changed_files,
+    patch_sha256: sha256(patch),
+    patch_bytes: patch.length,
+  };
+  validateFixManifest(manifest, fixInput, patch, baseSha);
+
+  if (expectedManifestPath) {
+    const expectedManifestText = await readTextFile(
+      expectedManifestPath,
+      "expected agentic fix manifest"
+    );
+    const expectedManifest = validateFixManifest(
+      parseJsonDocument(expectedManifestText, "expected agentic fix manifest"),
+      fixInput,
+      patch,
+      baseSha
+    );
+    for (const field of [
+      "finding_fingerprint",
+      "patch_sha256",
+      "patch_bytes",
+    ]) {
+      if (manifest[field] !== expectedManifest[field]) {
+        throw new Error(`Verified agentic fix ${field} mismatch`);
+      }
+    }
+    assertExactStringSet(
+      [...manifest.changed_files].sort(),
+      [...expectedManifest.changed_files].sort(),
+      "Verified agentic fix changed_files"
+    );
+  }
+
+  await fs.mkdir(path.dirname(path.resolve(patchPath)), { recursive: true });
+  await fs.writeFile(path.resolve(patchPath), patch);
+  await writeReport(manifest, manifestPath);
+  await appendGitHubOutputs(
+    {
+      has_patch: true,
+      changed_file_count: metadata.changed_files.length,
+      patch_sha256: manifest.patch_sha256,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: metadata.mode,
+      changed_files: metadata.changed_files,
+      patch_sha256: manifest.patch_sha256,
+      patch_bytes: manifest.patch_bytes,
+    })
+  );
+  return { metadata, manifest };
+}
+
+function renderFixPrBody(metadata, manifest, options = {}) {
+  if (
+    !isRecord(metadata) ||
+    metadata.mode !== "agentic_fix_result" ||
+    !Array.isArray(metadata.findings) ||
+    !Array.isArray(metadata.outcomes)
+  ) {
+    throw new Error("Invalid agentic fix metadata for PR rendering");
+  }
+  const repository = String(options.repository ?? "").trim();
+  const runId = String(options.runId ?? "").trim();
+  if (
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+    !/^\d+$/.test(runId)
+  ) {
+    throw new Error("Invalid trusted GitHub context for PR rendering");
+  }
+  if (
+    manifest.patch_sha256 !== options.patchSha256 ||
+    manifest.changed_files.length === 0
+  ) {
+    throw new Error("Invalid verified patch context for PR rendering");
+  }
+
+  const findingsById = new Map(
+    metadata.findings.map((finding) => [finding.finding_id, finding])
+  );
+  const lines = [
+    "## Summary",
+    "",
+    "Codex generated a candidate fix for the latest upstream-review findings. This PR is opened as a draft for human review.",
+    "",
+    "## Findings",
+    "",
+  ];
+  for (const outcome of metadata.outcomes) {
+    const finding = findingsById.get(outcome.finding_id);
+    if (!finding) {
+      throw new Error(`Missing PR finding metadata for ${outcome.finding_id}`);
+    }
+    const title =
+      finding.api_title || finding.raw_title || finding.title || "(untitled)";
+    lines.push(
+      `- ${outcome.status === "fixed" ? "Addressed" : "Not addressed"} · \`${escapeIssueCode(outcome.finding_id)}\` · ${escapeIssueText(finding.game)} / ${escapeIssueText(finding.kind)} · \`${escapeIssueCode(title)}\``
+    );
+  }
+
+  lines.push("", "## Changed files", "");
+  for (const file of manifest.changed_files) {
+    lines.push(`- \`${escapeIssueCode(file)}\``);
+  }
+  lines.push(
+    "",
+    "## Validation",
+    "",
+    "- `pnpm test:upstream-review`",
+    "- `pnpm typecheck`",
+    "- `pnpm build`",
+    "",
+    `Source: [workflow run](https://github.com/${repository}/actions/runs/${runId}) · [Upstream Review Alerts](https://github.com/${repository}/issues/1)`,
+    "",
+    `Verified patch SHA-256: \`${manifest.patch_sha256}\``,
+    "",
+    "_This PR was generated automatically and intentionally left as a draft._",
+    ""
+  );
+  const body = lines.join("\n");
+  if (Buffer.byteLength(body, "utf8") > MAX_ISSUE_BODY_BYTES) {
+    throw new Error("Rendered automatic fix PR body exceeds the safety limit");
+  }
+  return body;
+}
+
+async function renderAgenticFixPr(options = {}) {
+  const metadataPath =
+    options.metadataPath ??
+    process.env.UPSTREAM_REVIEW_FIX_METADATA_PATH?.trim();
+  const repository =
+    options.repository ??
+    process.env.GITHUB_REPOSITORY?.trim();
+  const runId =
+    options.runId ??
+    process.env.GITHUB_RUN_ID?.trim();
+  const outputPath =
+    options.outputPath ??
+    process.env.UPSTREAM_REVIEW_PR_BODY_PATH?.trim();
+  const { manifest } = await readAndValidateFixArtifact(options);
+  const metadataText = await readTextFile(
+    metadataPath,
+    "agentic fix metadata"
+  );
+  const metadata = parseJsonDocument(metadataText, "agentic fix metadata");
+  const body = renderFixPrBody(metadata, manifest, {
+    repository,
+    runId,
+    patchSha256: manifest.patch_sha256,
+  });
+  await writeTextFile(outputPath, body);
+  console.log(
+    JSON.stringify({
+      output_path: path.resolve(outputPath),
+      body_bytes: Buffer.byteLength(body, "utf8"),
+    })
+  );
+  return body;
+}
+
 async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
   if (agentOutputDir) {
     return await Promise.all(
@@ -1771,9 +2853,31 @@ async function main() {
   const extractGame =
     process.argv.includes("--extract-game") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_EXTRACT_GAME, false);
+  const prepareFix =
+    process.argv.includes("--prepare-fix") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_PREPARE_FIX, false);
+  const finalizeFix =
+    process.argv.includes("--finalize-fix") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_FINALIZE_FIX, false);
+  const verifyFixArtifact =
+    process.argv.includes("--verify-fix-artifact") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_VERIFY_FIX_ARTIFACT, false);
+  const renderFixPr =
+    process.argv.includes("--render-fix-pr") ||
+    parseBoolean(process.env.UPSTREAM_REVIEW_RENDER_FIX_PR, false);
 
-  if ([collectOnly, finalize, extractGame].filter(Boolean).length > 1) {
-    throw new Error("Collect-only, extract-game, and finalize modes are mutually exclusive");
+  if (
+    [
+      collectOnly,
+      finalize,
+      extractGame,
+      prepareFix,
+      finalizeFix,
+      verifyFixArtifact,
+      renderFixPr,
+    ].filter(Boolean).length > 1
+  ) {
+    throw new Error("Upstream review command modes are mutually exclusive");
   }
   if (finalize) {
     await finalizeAgenticReview();
@@ -1781,6 +2885,22 @@ async function main() {
   }
   if (extractGame) {
     await extractGameReviewInput(process.env.UPSTREAM_REVIEW_GAME);
+    return;
+  }
+  if (prepareFix) {
+    await prepareAgenticFix();
+    return;
+  }
+  if (finalizeFix) {
+    await finalizeAgenticFix();
+    return;
+  }
+  if (verifyFixArtifact) {
+    await verifyAgenticFixArtifact();
+    return;
+  }
+  if (renderFixPr) {
+    await renderAgenticFixPr();
     return;
   }
 
@@ -1862,9 +2982,16 @@ if (isMainModule) {
 }
 
 export {
+  buildAgenticFixInput,
   extractGameReviewInput,
+  finalizeAgenticFix,
   finalizeAgenticReview,
   parseAgentReview,
+  parseAgentFixOutput,
+  prepareAgenticFix,
+  renderFixPrBody,
   renderIssueBody,
   validateCollectedReviewInput,
+  validateFixManifest,
+  verifyAgenticFixArtifact,
 };

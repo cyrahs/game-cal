@@ -12,20 +12,21 @@ permissions:
 
 jobs:
   collect:
-    if: github.ref_name == github.event.repository.default_branch
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 9.9.0
           run_install: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 25
           cache: pnpm
@@ -54,7 +55,7 @@ jobs:
         run: pnpm review:upstream:collect
 
       - name: Upload review input
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: upstream-review-input
           path: artifacts/upstream-review-input.json
@@ -62,7 +63,7 @@ jobs:
 
       - name: Upload API log
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: upstream-review-api-log
           path: ${{ runner.temp }}/api.log
@@ -86,12 +87,13 @@ jobs:
           - snowbreak
           - endfield
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Download review input
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: upstream-review-input
           path: artifacts
@@ -117,7 +119,7 @@ jobs:
           safety-strategy: drop-sudo
 
       - name: Upload Codex review
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: upstream-review-agent-${{ matrix.game }}
           path: artifacts/upstream-review-agent-${{ matrix.game }}.json
@@ -127,26 +129,32 @@ jobs:
     needs: review
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      has_findings: ${{ steps.prepare_fix.outputs.has_findings }}
+      finding_count: ${{ steps.prepare_fix.outputs.finding_count }}
+      finding_fingerprint: ${{ steps.prepare_fix.outputs.finding_fingerprint }}
+      fix_branch: ${{ steps.prepare_fix.outputs.fix_branch }}
     permissions:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 25
 
       - name: Download review input
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: upstream-review-input
           path: artifacts
 
       - name: Download Codex review
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: upstream-review-agent-*
           path: artifacts/agent-reviews
@@ -163,10 +171,482 @@ jobs:
           UPSTREAM_REVIEW_ISSUE_TITLE: Upstream Review Alerts
         run: node scripts/review-upstream.mjs --finalize
 
+      - name: Prepare automatic fix request
+        id: prepare_fix
+        env:
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: artifacts/upstream-review-fix-input.json
+        run: node scripts/review-upstream.mjs --prepare-fix
+
       - name: Upload final review artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: upstream-review
           path: artifacts
           if-no-files-found: warn
+
+  repair:
+    needs: publish
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.publish.outputs.has_findings == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      has_patch: ${{ steps.finalize_fix.outputs.has_patch }}
+      existing_pr_url: ${{ steps.guard.outputs.existing_pr_url }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Skip findings that already have an automatic PR
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          existing_url="$(
+            gh pr list \
+              --repo "$GH_REPO" \
+              --state all \
+              --base "$DEFAULT_BRANCH" \
+              --head "$FIX_BRANCH" \
+              --limit 100 \
+              --json isCrossRepository,url \
+              --jq '[.[] | select(.isCrossRepository == false)][0].url // ""'
+          )"
+          if [ -n "$existing_url" ]; then
+            echo "should_repair=false" >> "$GITHUB_OUTPUT"
+            echo "existing_pr_url=$existing_url" >> "$GITHUB_OUTPUT"
+            echo "An automatic PR already exists for this finding fingerprint: $existing_url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_repair=true" >> "$GITHUB_OUTPUT"
+            echo "existing_pr_url=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.guard.outputs.should_repair == 'true'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.guard.outputs.should_repair == 'true'
+        with:
+          node-version: 25
+
+      - name: Download finalized review
+        if: steps.guard.outputs.should_repair == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review
+          path: ${{ runner.temp }}/upstream-review
+
+      - name: Place compact fix request in the workspace
+        id: prepare_fix_workspace
+        if: steps.guard.outputs.should_repair == 'true'
+        run: |
+          hash_or_absent() {
+            if [ -f "$1" ]; then
+              /usr/bin/sha256sum "$1" | /usr/bin/cut -d ' ' -f 1
+            else
+              echo "absent"
+            fi
+          }
+          trusted_state_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/upstream-review-trusted-state.XXXXXX")"
+          /usr/bin/cp \
+            "$RUNNER_TEMP/upstream-review/upstream-review-fix-input.json" \
+            "$trusted_state_dir/fix-input.json"
+          /usr/bin/cp .git/config "$trusted_state_dir/git-config"
+          /usr/bin/cp .git/index "$trusted_state_dir/git-index"
+          /usr/bin/cp .git/HEAD "$trusted_state_dir/git-head"
+          if [ -f .git/config.worktree ]; then
+            /usr/bin/cp .git/config.worktree "$trusted_state_dir/git-config-worktree"
+          fi
+          if [ -f .git/info/attributes ]; then
+            /usr/bin/cp .git/info/attributes "$trusted_state_dir/git-info-attributes"
+          fi
+          mkdir -p artifacts
+          cp \
+            "$trusted_state_dir/fix-input.json" \
+            artifacts/upstream-review-fix-input.json
+          echo "trusted_state_dir=$trusted_state_dir" >> "$GITHUB_OUTPUT"
+          echo "input_sha256=$(hash_or_absent "$trusted_state_dir/fix-input.json")" >> "$GITHUB_OUTPUT"
+          echo "git_config_sha256=$(hash_or_absent "$trusted_state_dir/git-config")" >> "$GITHUB_OUTPUT"
+          echo "git_config_worktree_sha256=$(hash_or_absent "$trusted_state_dir/git-config-worktree")" >> "$GITHUB_OUTPUT"
+          echo "git_index_sha256=$(hash_or_absent "$trusted_state_dir/git-index")" >> "$GITHUB_OUTPUT"
+          echo "git_head_sha256=$(hash_or_absent "$trusted_state_dir/git-head")" >> "$GITHUB_OUTPUT"
+          echo "git_info_attributes_sha256=$(hash_or_absent "$trusted_state_dir/git-info-attributes")" >> "$GITHUB_OUTPUT"
+          echo "node_bin=$(command -v node)" >> "$GITHUB_OUTPUT"
+
+      - name: Repair with Codex
+        if: steps.guard.outputs.should_repair == 'true'
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-fix.md
+          output-schema-file: .github/schemas/upstream-review-fix-output.schema.json
+          output-file: artifacts/upstream-review-fix-agent.json
+          codex-version: "0.145.0"
+          permission-profile: ":workspace"
+          safety-strategy: drop-sudo
+
+      - name: Export and validate candidate patch
+        id: finalize_fix
+        if: steps.guard.outputs.should_repair == 'true'
+        env:
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          EXPECTED_FIX_INPUT_SHA256: ${{ steps.prepare_fix_workspace.outputs.input_sha256 }}
+          EXPECTED_GIT_CONFIG_SHA256: ${{ steps.prepare_fix_workspace.outputs.git_config_sha256 }}
+          EXPECTED_GIT_CONFIG_WORKTREE_SHA256: ${{ steps.prepare_fix_workspace.outputs.git_config_worktree_sha256 }}
+          EXPECTED_GIT_INDEX_SHA256: ${{ steps.prepare_fix_workspace.outputs.git_index_sha256 }}
+          EXPECTED_GIT_HEAD_SHA256: ${{ steps.prepare_fix_workspace.outputs.git_head_sha256 }}
+          EXPECTED_GIT_INFO_ATTRIBUTES_SHA256: ${{ steps.prepare_fix_workspace.outputs.git_info_attributes_sha256 }}
+          TRUSTED_STATE_DIR: ${{ steps.prepare_fix_workspace.outputs.trusted_state_dir }}
+          TRUSTED_NODE_BIN: ${{ steps.prepare_fix_workspace.outputs.node_bin }}
+          PATH: /usr/bin:/bin
+          NODE_OPTIONS: ""
+          NODE_PATH: ""
+          LD_PRELOAD: ""
+          DYLD_INSERT_LIBRARIES: ""
+          GIT_CONFIG_NOSYSTEM: "1"
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_COUNT: "0"
+          GIT_ATTR_NOSYSTEM: "1"
+          GIT_NO_REPLACE_OBJECTS: "1"
+          GIT_EXTERNAL_DIFF: ""
+          GIT_DIFF_OPTS: ""
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ steps.prepare_fix_workspace.outputs.trusted_state_dir }}/fix-input.json
+          UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: artifacts/upstream-review-fix-agent.json
+        run: |
+          unset \
+            GIT_CONFIG_PARAMETERS \
+            GIT_INDEX_FILE \
+            GIT_OBJECT_DIRECTORY \
+            GIT_WORK_TREE \
+            GIT_DIR \
+            GIT_COMMON_DIR \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_EXEC_PATH
+          hash_or_absent() {
+            if [ -f "$1" ]; then
+              /usr/bin/sha256sum "$1" | /usr/bin/cut -d ' ' -f 1
+            else
+              echo "absent"
+            fi
+          }
+          for state_check in \
+            "$UPSTREAM_REVIEW_FIX_INPUT_PATH:$EXPECTED_FIX_INPUT_SHA256" \
+            "$TRUSTED_STATE_DIR/git-config:$EXPECTED_GIT_CONFIG_SHA256" \
+            "$TRUSTED_STATE_DIR/git-config-worktree:$EXPECTED_GIT_CONFIG_WORKTREE_SHA256" \
+            "$TRUSTED_STATE_DIR/git-index:$EXPECTED_GIT_INDEX_SHA256" \
+            "$TRUSTED_STATE_DIR/git-head:$EXPECTED_GIT_HEAD_SHA256" \
+            "$TRUSTED_STATE_DIR/git-info-attributes:$EXPECTED_GIT_INFO_ATTRIBUTES_SHA256"
+          do
+            state_path="${state_check%%:*}"
+            expected_state="${state_check#*:}"
+            if [ "$(hash_or_absent "$state_path")" != "$expected_state" ]; then
+              echo "Protected state changed during the Codex step: $state_path" >&2
+              exit 1
+            fi
+          done
+          if [ "$EXPECTED_GIT_CONFIG_WORKTREE_SHA256" = "absent" ]; then
+            if [ -e .git/config.worktree ]; then
+              echo "Codex created an unexpected .git/config.worktree file." >&2
+              exit 1
+            fi
+          else
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-config-worktree" .git/config.worktree
+          fi
+          if [ "$EXPECTED_GIT_INFO_ATTRIBUTES_SHA256" = "absent" ]; then
+            if [ -e .git/info/attributes ]; then
+              echo "Codex created an unexpected .git/info/attributes file." >&2
+              exit 1
+            fi
+          else
+            /usr/bin/cp "$TRUSTED_STATE_DIR/git-info-attributes" .git/info/attributes
+          fi
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-config" .git/config
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-index" .git/index
+          /usr/bin/cp "$TRUSTED_STATE_DIR/git-head" .git/HEAD
+          if /usr/bin/find . -path './.git' -prune -o -name .gitattributes -print -quit | /usr/bin/grep -q .; then
+            echo "Codex created an unexpected .gitattributes file." >&2
+            exit 1
+          fi
+          if [ ! -x "$TRUSTED_NODE_BIN" ]; then
+            echo "The trusted Node binary is unavailable." >&2
+            exit 1
+          fi
+
+          export_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/upstream-review-export.XXXXXX")"
+          candidate_dir="$export_dir/candidate"
+          /usr/bin/mkdir "$candidate_dir"
+          echo "candidate_dir=$candidate_dir" >> "$GITHUB_OUTPUT"
+          export UPSTREAM_REVIEW_FIX_METADATA_PATH="$candidate_dir/metadata.json"
+          export UPSTREAM_REVIEW_FIX_MANIFEST_PATH="$candidate_dir/manifest.json"
+          export UPSTREAM_REVIEW_FIX_PATCH_PATH="$candidate_dir/fix.patch"
+          /usr/bin/git --no-replace-objects show "$UPSTREAM_REVIEW_BASE_SHA:scripts/review-upstream.mjs" > "$export_dir/review-upstream.mjs"
+          "$TRUSTED_NODE_BIN" "$export_dir/review-upstream.mjs" --finalize-fix
+          /usr/bin/cp \
+            "$UPSTREAM_REVIEW_FIX_INPUT_PATH" \
+            "$candidate_dir/upstream-review-fix-input.json"
+          /usr/bin/cp \
+            artifacts/upstream-review-fix-agent.json \
+            "$candidate_dir/upstream-review-fix-agent.json"
+
+      - name: Upload candidate patch diagnostics
+        if: >-
+          always() &&
+          steps.guard.outputs.should_repair == 'true' &&
+          steps.finalize_fix.outputs.candidate_dir != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-fix-candidate
+          path: ${{ steps.finalize_fix.outputs.candidate_dir }}
+          if-no-files-found: warn
+
+  validate_patch:
+    needs:
+      - publish
+      - repair
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.repair.result == 'success' &&
+      needs.repair.outputs.has_patch == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download candidate patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-fix-candidate
+          path: ${{ runner.temp }}/upstream-review-fix-candidate
+
+      - name: Verify candidate artifact
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/fix.patch
+        run: node scripts/review-upstream.mjs --verify-fix-artifact
+
+      - name: Apply candidate patch
+        run: |
+          /usr/bin/git apply --check "$RUNNER_TEMP/upstream-review-fix-candidate/fix.patch"
+          /usr/bin/git apply "$RUNNER_TEMP/upstream-review-fix-candidate/fix.patch"
+
+      - name: Revalidate applied candidate
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/upstream-review-fix-agent.json
+          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-verified/metadata.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_EXPECTED_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/manifest.json
+        run: node scripts/review-upstream.mjs --finalize-fix
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test upstream-review safeguards
+        run: pnpm test:upstream-review
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Confirm tests did not alter the patch
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/upstream-review-fix-agent.json
+          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-verified/metadata.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_EXPECTED_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-candidate/manifest.json
+        run: |
+          node scripts/review-upstream.mjs --finalize-fix
+          cp \
+            "$RUNNER_TEMP/upstream-review-fix-candidate/upstream-review-fix-input.json" \
+            "$RUNNER_TEMP/upstream-review-fix-candidate/upstream-review-fix-agent.json" \
+            "$RUNNER_TEMP/upstream-review-fix-verified/"
+
+      - name: Upload verified patch
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-fix-verified
+          path: ${{ runner.temp }}/upstream-review-fix-verified
+          if-no-files-found: error
+
+  open_pr:
+    needs:
+      - publish
+      - repair
+      - validate_patch
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.repair.result == 'success' &&
+      needs.repair.outputs.has_patch == 'true' &&
+      needs.validate_patch.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Download verified patch
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-fix-verified
+          path: ${{ runner.temp }}/upstream-review-fix-verified
+
+      - name: Verify immutable patch artifact
+        id: verify_fix
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+        run: node scripts/review-upstream.mjs --verify-fix-artifact
+
+      - name: Confirm branch identity and repository state
+        id: repository_state
+        env:
+          EXPECTED_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          VERIFIED_BRANCH: ${{ steps.verify_fix.outputs.fix_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          if [ "$VERIFIED_BRANCH" != "$EXPECTED_BRANCH" ]; then
+            echo "Verified branch does not match the published finding fingerprint." >&2
+            exit 1
+          fi
+          /usr/bin/git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH"
+          if [ "$(/usr/bin/git rev-parse FETCH_HEAD)" != "$BASE_SHA" ]; then
+            echo "The default branch advanced during review; rerun the workflow." >&2
+            exit 1
+          fi
+          remote_ref="$(/usr/bin/git ls-remote --heads origin "refs/heads/$VERIFIED_BRANCH")"
+          if [ -n "$remote_ref" ]; then
+            echo "remote_branch_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "remote_branch_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply and revalidate verified patch
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-agent.json
+          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-recheck/metadata.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-recheck/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-recheck/fix.patch
+          UPSTREAM_REVIEW_EXPECTED_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+        run: |
+          /usr/bin/git apply --check "$RUNNER_TEMP/upstream-review-fix-verified/fix.patch"
+          /usr/bin/git apply --index "$RUNNER_TEMP/upstream-review-fix-verified/fix.patch"
+          node scripts/review-upstream.mjs --finalize-fix
+
+      - name: Render deterministic PR body
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-recheck/metadata.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_PR_BODY_PATH: ${{ runner.temp }}/upstream-review-pr-body.md
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/review-upstream.mjs --render-fix-pr
+
+      - name: Commit and push automatic fix branch
+        env:
+          FIX_BRANCH: ${{ steps.verify_fix.outputs.fix_branch }}
+          BASE_SHA: ${{ github.sha }}
+          REMOTE_BRANCH_EXISTS: ${{ steps.repository_state.outputs.remote_branch_exists }}
+        run: |
+          if [ "$REMOTE_BRANCH_EXISTS" = "true" ]; then
+            /usr/bin/git fetch \
+              --no-tags \
+              origin \
+              "refs/heads/$FIX_BRANCH:refs/remotes/origin/upstream-review-existing"
+            expected_tree="$(/usr/bin/git write-tree)"
+            remote_tree="$(/usr/bin/git rev-parse refs/remotes/origin/upstream-review-existing^{tree})"
+            remote_line="$(/usr/bin/git rev-list --parents -n 1 refs/remotes/origin/upstream-review-existing)"
+            read -r remote_commit remote_parent extra_parent <<< "$remote_line"
+            if \
+              [ -n "$extra_parent" ] ||
+              [ "$remote_parent" != "$BASE_SHA" ] ||
+              [ "$remote_tree" != "$expected_tree" ]
+            then
+              echo "The existing automatic branch does not exactly match this verified patch." >&2
+              exit 1
+            fi
+            echo "Reusing the exact orphaned automatic branch after a prior PR creation failure."
+          else
+            /usr/bin/git switch -c "$FIX_BRANCH"
+            /usr/bin/git config user.name "github-actions[bot]"
+            /usr/bin/git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            /usr/bin/git -c core.hooksPath=/dev/null commit -m "fix: address upstream review findings"
+            /usr/bin/git push origin "HEAD:refs/heads/$FIX_BRANCH"
+          fi
+
+      - name: Open draft pull request
+        id: create_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FIX_BRANCH: ${{ steps.verify_fix.outputs.fix_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          pr_url="$(
+            gh pr create \
+              --repo "$GH_REPO" \
+              --draft \
+              --base "$DEFAULT_BRANCH" \
+              --head "$FIX_BRANCH" \
+              --title "fix: address upstream review findings" \
+              --body-file "$RUNNER_TEMP/upstream-review-pr-body.md"
+          )"
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "Draft PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
