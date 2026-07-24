@@ -140,6 +140,9 @@ function extractRelativeEndText(input: string): string | null {
   const maintenanceMatch = /(?:下次)?版本更新维护前/.exec(text);
   if (maintenanceMatch?.[0]) return maintenanceMatch[0];
 
+  const versionPeriodMatch = /((?:[「『“"][^」』”"]+[」』”"]|\bV?\d+(?:\.\d+)+)?\s*版本期间)/i.exec(text);
+  if (versionPeriodMatch?.[1]) return versionPeriodMatch[1].trim();
+
   const match = /(?:，|,)?\s*(于[^，,。]*?后结束(?:（[^）]*）)?)/.exec(text);
   return match?.[1]?.trim() || null;
 }
@@ -184,10 +187,25 @@ function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   const endKw = new RegExp(
     `(?:结束时间|截止时间|截至|截止)\\s*(?:[:：])?\\s*(${ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN})`
   ).exec(text);
+  const start = normalizeDateTimeCandidate(startKw?.[1]);
+  const end = normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]);
+
+  if (start || end) {
+    return { start, end };
+  }
+
+  const standaloneRelativeEndText = extractRelativeEndText(text);
+  if (standaloneRelativeEndText?.includes("版本期间")) {
+    return {
+      start: null,
+      end: null,
+      endText: standaloneRelativeEndText,
+    };
+  }
 
   return {
-    start: normalizeDateTimeCandidate(startKw?.[1]),
-    end: normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]),
+    start: null,
+    end: null,
   };
 }
 
@@ -616,7 +634,7 @@ function resolveEndfieldStartNaive(
   if (parsedStart) return parsedStart;
 
   const text = stripHtml(html);
-  if (/版本(?:开启后|更新后(?:开启)?)/.test(text)) {
+  if (/版本(?:开启后|更新后(?:开启)?|期间)/.test(text)) {
     return versionStartNaive;
   }
 

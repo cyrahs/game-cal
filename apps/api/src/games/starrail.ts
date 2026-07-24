@@ -120,6 +120,20 @@ function shouldIgnoreStarRailTitle(title: string): boolean {
   return false;
 }
 
+function isOperationalResourceUpdateNotice(
+  title: string,
+  content: string | undefined
+): boolean {
+  if (!title.includes("更新公告")) return false;
+
+  const text = stripHtml(content);
+  return (
+    /更新了?[^。；;]{0,80}资源/.test(text) &&
+    /(?:获取|下载)[^。；;]{0,80}更新/.test(text) &&
+    /(?:强制下线|重新登录)/.test(text)
+  );
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&nbsp;/g, " ")
@@ -754,6 +768,12 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     return items[0];
   };
 
+  const filteredWithContent = filtered.filter((item) => {
+    const title = item.title?.trim() || item.subtitle?.trim() || "";
+    const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
+    return !isOperationalResourceUpdateNotice(title, contentItem?.content ?? item.content);
+  });
+
   const versionMaintenanceEndByLabel = new Map<string, string>();
   for (const noticeItem of list) {
     if (!isVersionNoticeText(noticeItem.title ?? "") && !isVersionNoticeText(noticeItem.subtitle ?? "")) {
@@ -779,7 +799,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     versionMaintenanceEnds.length === 1 ? versionMaintenanceEnds[0]! : null;
 
   const filteredKeys = new Set(
-    filtered.map((item) => `${item.ann_id}|${normalizeTitle(item.title?.trim() || item.subtitle?.trim() || "")}`)
+    filteredWithContent.map((item) => `${item.ann_id}|${normalizeTitle(item.title?.trim() || item.subtitle?.trim() || "")}`)
   );
   const contentOnlyItems: MihoyoAnnItem[] = [];
   for (const contentItems of contentById.values()) {
@@ -788,6 +808,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       if (!title) continue;
       if (IGNORE_ANN_IDS.has(contentItem.ann_id)) continue;
       if (!shouldKeepStarRailEventTitle(title)) continue;
+      if (isOperationalResourceUpdateNotice(title, contentItem.content)) continue;
 
       const key = `${contentItem.ann_id}|${normalizeTitle(title)}`;
       if (filteredKeys.has(key)) continue;
@@ -814,7 +835,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
-  return [...filtered, ...contentOnlyItems].map((item) => {
+  return [...filteredWithContent, ...contentOnlyItems].map((item) => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
