@@ -380,6 +380,7 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
 function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
+    title: string;
     versionMaintenanceEndByLabel: Map<string, string>;
     singleVersionMaintenanceEndIso: string | null;
     listEndIso: string;
@@ -401,6 +402,20 @@ function extractStarRailTimeRangeFromContent(
 
     return { startIso: null, endIso: null };
   };
+
+  const titleSubject = opts.title.replace(/\s+/g, "").replace(/(?:活动)?说明$/, "");
+  const titleLongTermRange = titleSubject
+    ? text
+        .split("\n")
+        .map((line) => line.replace(/\s+/g, ""))
+        .filter((line) => line.includes(titleSubject))
+        .map((line) => {
+          const subjectEnd = line.indexOf(titleSubject) + titleSubject.length;
+          return longTermFallback(line.slice(subjectEnd, subjectEnd + 96));
+        })
+        .find((range) => range.startIso && range.endText)
+    : undefined;
+  if (titleLongTermRange) return titleLongTermRange;
 
   const section = extractStarRailTimeSection(content);
   if (!section) return longTermFallback(text);
@@ -873,6 +888,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       if (filteredKeys.has(key)) continue;
 
       const parsed = extractStarRailTimeRangeFromContent(contentItem.content, {
+        title,
         versionMaintenanceEndByLabel,
         singleVersionMaintenanceEndIso,
         listEndIso: "9999-12-31T23:59:59+08:00",
@@ -903,6 +919,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const listStartIso = toIsoWithSourceOffset(item.start_time!, STARRAIL_SOURCE_TZ_OFFSET);
     const listEndIso = toIsoWithSourceOffset(item.end_time!, STARRAIL_SOURCE_TZ_OFFSET);
     const contentRange = extractStarRailTimeRangeFromContent(content, {
+      title,
       versionMaintenanceEndByLabel,
       singleVersionMaintenanceEndIso,
       listEndIso,

@@ -143,7 +143,7 @@ function extractRelativeEndText(input: string): string | null {
   const versionPeriodMatch = /((?:[「『“"][^」』”"]+[」』”"]|\bV?\d+(?:\.\d+)+)?\s*版本期间)/i.exec(text);
   if (versionPeriodMatch?.[1]) return versionPeriodMatch[1].trim();
 
-  const activationMatch = /((?:激活|开启|参与|登录|触发)(?:之日|当日|当天|起|后)[^，,。；;]{0,64}?(?:结束|截止))/.exec(text);
+  const activationMatch = /((?:激活|开启|参与|登录|触发)(?:[「『“"][^」』”"]+[」』”"])?[^，,。；;]{0,24}?(?:之日|当日|当天|起|后)[^，,。；;]{0,64}?(?:结束|截止))/.exec(text);
   if (activationMatch?.[1]) return activationMatch[1].trim();
 
   const match = /(?:，|,)?\s*(于[^，,。]*?后结束(?:（[^）]*）)?)/.exec(text);
