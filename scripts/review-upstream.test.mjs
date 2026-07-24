@@ -6248,7 +6248,7 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
     mergeJob,
     /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/
   );
-  assert.match(mergeJob, /MERGE_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(mergeJob, /MERGE_TOKEN/);
   assert.doesNotMatch(mergeJob, /secrets\.OPENAI_/);
   assert.doesNotMatch(
     mergeJob,
@@ -6259,6 +6259,14 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   );
   assert.notEqual(mergeStepStart, -1);
   const mergeStep = mergeJob.slice(mergeStepStart);
+  assert.match(
+    mergeStep,
+    /GH_TOKEN: \$\{\{ github\.token \}\}/
+  );
+  assert.doesNotMatch(
+    mergeStep,
+    /UPSTREAM_REVIEW_APPROVAL_TOKEN|MERGE_TOKEN/
+  );
   const mergeResponseValidation = mergeStep.indexOf(".merged == true");
   const mergedOutput = mergeStep.indexOf(
     'echo "merged=true" >> "$GITHUB_OUTPUT"'
@@ -6291,7 +6299,11 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
     approvalStep,
     /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/
   );
-  assert.match(approvalStep, /MERGE_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(approvalStep, /MERGE_TOKEN|github\.token/);
+  assert.doesNotMatch(
+    approvalStep,
+    /--method\s+(?:POST|PUT|PATCH|DELETE)|gh pr ready|pulls\/\$PR_NUMBER\/merge/
+  );
   assert.match(
     approvalStep,
     /jq -e '\.permissions\.admin == true' "\$reviewer_repository_path"/
@@ -6302,7 +6314,7 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   );
   assert.match(
     approvalStep,
-    /if ! GH_TOKEN="\$MERGE_TOKEN" gh api "repos\/\$GH_REPO" > "\$merge_repository_path"; then/
+    /if ! gh api "repos\/\$GH_REPO" > "\$merge_repository_path"; then/
   );
   assert.match(
     approvalStep,
@@ -6314,12 +6326,12 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   );
   assert.deepEqual(
     approvalStep.match(
-      /(?:GH_TOKEN="\$MERGE_TOKEN" )?gh api "repos\/\$GH_REPO" > "\$[A-Za-z_]+"/g
+      /gh api "repos\/\$GH_REPO" > "\$[A-Za-z_]+"/g
     ),
     [
       'gh api "repos/$GH_REPO" > "$reviewer_repository_path"',
-      'GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"',
-      'GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"',
+      'gh api "repos/$GH_REPO" > "$merge_repository_path"',
+      'gh api "repos/$GH_REPO" > "$merge_repository_path"',
     ]
   );
 });

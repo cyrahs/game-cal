@@ -1705,7 +1705,6 @@ jobs:
         id: approved
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
-          MERGE_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
           PR_URL: ${{ needs.open_pr.outputs.pr_url }}
@@ -1828,8 +1827,8 @@ jobs:
           fi
 
           merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
-          if ! GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"; then
-            echo "The repository merge configuration could not be verified with GITHUB_TOKEN." >&2
+          if ! gh api "repos/$GH_REPO" > "$merge_repository_path"; then
+            echo "The repository merge configuration could not be verified with the approval token." >&2
             exit 1
           fi
           if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
@@ -2335,7 +2334,6 @@ jobs:
         id: reviewer
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
-          MERGE_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EXPECTED_REVIEWER_LOGIN: ${{ needs.resolve_approved_snapshot.outputs.reviewer_login }}
@@ -2367,8 +2365,8 @@ jobs:
             exit 1
           fi
           merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
-          if ! GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"; then
-            echo "The repository merge configuration could not be verified with GITHUB_TOKEN." >&2
+          if ! gh api "repos/$GH_REPO" > "$merge_repository_path"; then
+            echo "The repository merge configuration could not be verified with the approval token." >&2
             exit 1
           fi
           if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
