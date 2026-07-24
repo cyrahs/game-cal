@@ -57,6 +57,7 @@ type StarRailParsedTimeRange = {
   startIso: string | null;
   endIso: string | null;
   endText?: string;
+  unresolvedVersionStart?: boolean;
 };
 
 const STARRAIL_DEFAULT_LIST_API =
@@ -431,7 +432,12 @@ export function extractStarRailTimeRangeFromContent(
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
 
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length > 0) {
-    if (!relativeStartIso) return longTermFallback(section);
+    if (!relativeStartIso) {
+      const fallback = longTermFallback(section);
+      return fallback.startIso
+        ? fallback
+        : { ...fallback, unresolvedVersionStart: true };
+    }
 
     const rawEndIso = toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET);
     return {
@@ -448,7 +454,10 @@ export function extractStarRailTimeRangeFromContent(
       };
     }
 
-    return longTermFallback(section);
+    const fallback = longTermFallback(section);
+    return fallback.startIso
+      ? fallback
+      : { ...fallback, unresolvedVersionStart: true };
   }
 
   if (dates.length >= 2) {
@@ -923,7 +932,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
-  return [...filteredWithContent, ...contentOnlyItems].map((item): CalendarEvent => {
+  return [...filteredWithContent, ...contentOnlyItems].flatMap((item): CalendarEvent[] => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
@@ -937,6 +946,8 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       singleVersionMaintenanceEndIso,
       listEndIso,
     });
+    if (contentRange.unresolvedVersionStart) return [];
+
     const resolvedStartIso = contentRange.startIso ?? listStartIso;
     const resolvedEndIso = contentRange.endIso ?? listEndIso;
     const sMs = Date.parse(resolvedStartIso);
@@ -948,7 +959,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       Number.isFinite(Date.parse(contentRange.startIso)) &&
       relativeEndText != null;
 
-    return {
+    return [{
       id: `starrail:${makeAnnItemKey(item)}`,
       title,
       start_time: hasValidRelativeContentRange
@@ -967,7 +978,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,
       content,
-    };
+    }];
   });
 }
 
