@@ -12,10 +12,12 @@ import {
   buildAgenticPrReviewInput,
   buildAgenticPrReworkInput,
   extractGameReviewInput,
+  finalizeRemediationIssue,
   finalizeAgenticFix,
   finalizeAgenticPrReview,
   finalizeAgenticPrRework,
   finalizeAgenticReview,
+  getFixBranch,
   parseAgentReview,
   parseAgentFixOutput,
   parseAgentPrReviewOutput,
@@ -26,6 +28,7 @@ import {
   prepareAgenticPrReview,
   renderPrReviewBody,
   renderPrReviewRequest,
+  syncIssue,
   validateAgenticPrReviewInput,
   validateAgenticPrReworkInput,
   validateCollectedReviewInput,
@@ -45,6 +48,123 @@ const gameLabels = {
   snowbreak: "尘白禁区",
   endfield: "明日方舟：终末地",
 };
+const repository = "example/game-cal";
+const issueNumber = 42;
+const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+const remediationCycle = "9".repeat(64);
+const reviewBaseSha = "a".repeat(40);
+
+function cycleMarker(findingFingerprint, cycle = remediationCycle) {
+  return `<!-- upstream-review-cycle:v1 fingerprint=${findingFingerprint} cycle=${cycle} -->`;
+}
+
+function parseRequestBody(init = {}) {
+  if (init.body == null || init.body === "") return null;
+  return typeof init.body === "string" ? JSON.parse(init.body) : init.body;
+}
+
+function remediationFinalizationFixture({
+  allFindingsAddressed = true,
+  issueState = "open",
+  issueBody = null,
+} = {}) {
+  const findingFingerprint = "d".repeat(64);
+  const pullRequestNumber = 77;
+  const pullRequestUrl =
+    `https://github.com/${repository}/pull/${pullRequestNumber}`;
+  const mergeSha = "f".repeat(40);
+  const relation = allFindingsAddressed
+    ? `Closes #${issueNumber}`
+    : `Refs #${issueNumber}`;
+  const prMarker =
+    `<!-- upstream-review-pr:v1 issue=${issueNumber} fingerprint=${findingFingerprint} cycle=${remediationCycle} -->`;
+  const prBody =
+    `${prMarker}\n\n## Summary\n\nAutomatic remediation.\n\n${relation}\n`;
+  const prBodySha256 = createHash("sha256")
+    .update(prBody)
+    .digest("hex");
+  const issue = {
+    number: issueNumber,
+    html_url: issueUrl,
+    title: "Upstream Review Alerts",
+    state: issueState,
+    state_reason: issueState === "closed" ? "completed" : null,
+    user: {
+      login: "github-actions[bot]",
+    },
+    body:
+      issueBody ??
+      `${cycleMarker(findingFingerprint, remediationCycle)}\n\nIssue body.\n`,
+  };
+  const pullRequest = {
+    number: pullRequestNumber,
+    html_url: pullRequestUrl,
+    state: "closed",
+    merged: true,
+    merged_at: "2026-07-23T13:00:00.000Z",
+    merge_commit_sha: mergeSha,
+    body: prBody,
+    user: {
+      login: "github-actions[bot]",
+    },
+    base: {
+      repo: {
+        full_name: repository,
+      },
+    },
+    head: {
+      repo: {
+        full_name: repository,
+      },
+    },
+  };
+  const calls = [];
+  const request = async (pathname, init = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = parseRequestBody(init);
+    calls.push({ pathname, method, body });
+    if (
+      method === "GET" &&
+      pathname === `/repos/${repository}/pulls/${pullRequestNumber}`
+    ) {
+      return pullRequest;
+    }
+    if (
+      method === "GET" &&
+      pathname === `/repos/${repository}/issues/${issueNumber}`
+    ) {
+      return issue;
+    }
+    if (
+      method === "PATCH" &&
+      pathname === `/repos/${repository}/issues/${issueNumber}`
+    ) {
+      return {
+        ...issue,
+        ...body,
+        number: issueNumber,
+        html_url: issueUrl,
+      };
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
+  };
+  return {
+    args: {
+      request,
+      repository,
+      issueNumber,
+      issueUrl,
+      findingFingerprint,
+      remediationCycle,
+      pullRequestNumber,
+      pullRequestUrl,
+      prBodySha256,
+      mergeSha,
+      allFindingsAddressed,
+    },
+    calls,
+  };
+}
 
 function dataset(game) {
   return {
@@ -56,6 +176,31 @@ function dataset(game) {
     raw_notices: [{ title: `${game} raw notice` }],
     api_events: [{ title: `${game} API event` }],
   };
+}
+
+function findingFingerprint(findings) {
+  const normalize = (value) =>
+    String(value ?? "")
+      .replace(/\\[rnt]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const canonical = findings
+    .map((item) => ({
+      game: item.game,
+      kind: item.kind,
+      raw_title: normalize(item.raw_title),
+      api_title: normalize(item.api_title),
+      start_time: normalize(item.start_time),
+      end_time: normalize(item.end_time),
+    }))
+    .sort((left, right) => {
+      const a = JSON.stringify(left);
+      const b = JSON.stringify(right);
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  return createHash("sha256")
+    .update(JSON.stringify(canonical))
+    .digest("hex");
 }
 
 function collectedInput() {
@@ -106,21 +251,30 @@ function gameReview(game, overrides = {}) {
   };
 }
 
-function agenticReviewReport(findings = []) {
+function agenticReviewReport(
+  findings = [],
+  { baseSha = reviewBaseSha } = {}
+) {
   const input = collectedInput();
   return {
     schema_version: 2,
     mode: "agentic_review",
     generated_at: input.generated_at,
     finalized_at: "2026-07-23T12:05:00.000Z",
+    base_sha: baseSha,
     api_base_url: input.api_base_url,
     datasets: input.datasets,
     review_datasets: input.review_datasets,
     review: {
+      model: "Codex via Responses API",
+      summary: `${findings.length} finding(s) detected.`,
       findings,
     },
     issue: {
-      issue_url: "https://github.com/example/game-cal/issues/1",
+      issue_number: issueNumber,
+      issue_url: issueUrl,
+      finding_fingerprint: findingFingerprint(findings),
+      remediation_cycle: remediationCycle,
     },
   };
 }
@@ -154,12 +308,35 @@ function agentFixOutput(fixInput, changedFiles, overrides = {}) {
   };
 }
 
-function prReviewContext(overrides = {}) {
+function fixManifest(fixInput, changedFiles, patch, overrides = {}) {
   return {
-    base_sha: "a".repeat(40),
+    schema_version: 2,
+    mode: "agentic_fix_manifest",
+    base_sha: fixInput.source_report.base_sha,
+    finding_fingerprint: fixInput.finding_fingerprint,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    fix_branch: fixInput.fix_branch,
+    finding_ids: fixInput.findings.map((item) => item.finding_id),
+    target_games: fixInput.target_games,
+    changed_files: changedFiles,
+    patch_sha256: createHash("sha256").update(patch).digest("hex"),
+    patch_bytes: patch.length,
+    ...overrides,
+  };
+}
+
+function prReviewContext(overrides = {}) {
+  const findingFingerprint = "d".repeat(64);
+  const baseSha = reviewBaseSha;
+  return {
+    base_sha: baseSha,
     head_sha: "b".repeat(40),
     patch_sha256: "c".repeat(64),
-    finding_fingerprint: "d".repeat(64),
+    finding_fingerprint: findingFingerprint,
+    issue_number: issueNumber,
+    remediation_cycle: remediationCycle,
+    fix_branch: getFixBranch(findingFingerprint, issueNumber, baseSha),
     pull_request: {
       number: 42,
       url: "https://github.com/example/game-cal/pull/42",
@@ -201,13 +378,17 @@ function agentPrReworkOutput(input, changedFiles, overrides = {}) {
 }
 
 function prReworkContext(overrides = {}) {
+  const findingFingerprint = "d".repeat(64);
+  const baseSha = reviewBaseSha;
   return {
     round: 1,
     max_rounds: 3,
-    base_sha: "a".repeat(40),
+    base_sha: baseSha,
     reviewed_head_sha: "b".repeat(40),
-    finding_fingerprint: "d".repeat(64),
-    fix_branch: `codex/upstream-review-${"d".repeat(16)}`,
+    finding_fingerprint: findingFingerprint,
+    issue_number: issueNumber,
+    remediation_cycle: remediationCycle,
+    fix_branch: getFixBranch(findingFingerprint, issueNumber, baseSha),
     pull_request: {
       number: 42,
       url: "https://github.com/example/game-cal/pull/42",
@@ -440,7 +621,16 @@ test("builds a compact, stable fix request from unsuppressed findings", () => {
   ]);
   const input = buildAgenticFixInput(report);
 
+  assert.equal(input.schema_version, 2);
   assert.equal(input.mode, "agentic_fix");
+  assert.deepEqual(input.source_report, {
+    generated_at: report.generated_at,
+    finalized_at: report.finalized_at,
+    issue_number: issueNumber,
+    issue_url: issueUrl,
+    remediation_cycle: remediationCycle,
+    base_sha: report.base_sha,
+  });
   assert.deepEqual(
     input.findings.map((item) => item.finding_id),
     ["finding-001", "finding-002"]
@@ -451,6 +641,10 @@ test("builds a compact, stable fix request from unsuppressed findings", () => {
     "apps/api/src/games/zzz.ts",
   ]);
   assert.match(input.finding_fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(
+    input.fix_branch,
+    getFixBranch(input.finding_fingerprint, issueNumber, report.base_sha)
+  );
   assert.deepEqual(
     input.evidence.map((entry) => entry.game),
     ["starrail", "zzz"]
@@ -472,6 +666,44 @@ test("builds a compact, stable fix request from unsuppressed findings", () => {
   );
   assert.equal(reordered.finding_fingerprint, input.finding_fingerprint);
   assert.deepEqual(reordered.findings, input.findings);
+});
+
+test("scopes an automatic fix branch to its remediation Issue cycle", () => {
+  const fingerprint = "d".repeat(64);
+  const firstBase = "a".repeat(40);
+  const nextBase = "b".repeat(40);
+  const first = getFixBranch(fingerprint, 42, firstBase);
+  const repeated = getFixBranch(fingerprint, 42, firstBase);
+  const recurrence = getFixBranch(fingerprint, 43, firstBase);
+  const advancedBase = getFixBranch(fingerprint, 42, nextBase);
+
+  assert.equal(
+    first,
+    `codex/upstream-review-${"d".repeat(16)}-i42-b${"a".repeat(12)}`
+  );
+  assert.equal(repeated, first);
+  assert.equal(
+    recurrence,
+    `codex/upstream-review-${"d".repeat(16)}-i43-b${"a".repeat(12)}`
+  );
+  assert.equal(
+    advancedBase,
+    `codex/upstream-review-${"d".repeat(16)}-i42-b${"b".repeat(12)}`
+  );
+  assert.notEqual(recurrence, first);
+  assert.notEqual(advancedBase, first);
+  assert.throws(
+    () => getFixBranch("short", 42, firstBase),
+    /fingerprint/i
+  );
+  assert.throws(
+    () => getFixBranch(fingerprint, 0, firstBase),
+    /issue/i
+  );
+  assert.throws(
+    () => getFixBranch(fingerprint, 42, "short"),
+    /base SHA/i
+  );
 });
 
 test("accepts a partial fix only when fixed games match the actual diff", () => {
@@ -567,37 +799,61 @@ test("validates patch bytes and renders escaped deterministic PR copy", () => {
     changedFiles
   );
   const patch = Buffer.from("diff --git a/a b/a\n");
-  const manifest = {
-    schema_version: 1,
-    mode: "agentic_fix_manifest",
-    base_sha: "a".repeat(40),
-    finding_fingerprint: input.finding_fingerprint,
-    finding_ids: input.findings.map((item) => item.finding_id),
-    target_games: input.target_games,
-    changed_files: changedFiles,
-    patch_sha256: createHash("sha256").update(patch).digest("hex"),
-    patch_bytes: patch.length,
-  };
+  const manifest = fixManifest(input, changedFiles, patch);
   validateFixManifest(manifest, input, patch, manifest.base_sha);
 
   const body = renderFixPrBody(metadata, manifest, {
-    repository: "example/game-cal",
+    repository,
     runId: "12345",
     patchSha256: manifest.patch_sha256,
+    issueUrl,
   });
   assert.match(body, /finding-001/);
   assert.match(body, /@​team/);
   assert.doesNotMatch(body, /<script>/);
   assert.match(body, /actions\/runs\/12345/);
   assert.match(body, /pnpm typecheck/);
+  assert.match(body, new RegExp(`^Closes #${issueNumber}$`, "m"));
+  assert.doesNotMatch(body, new RegExp(`^Refs #${issueNumber}$`, "m"));
+  assert.match(body, new RegExp(`/issues/${issueNumber}\\b`));
+});
+
+test("uses a non-closing Issue reference when an automatic fix is partial", () => {
+  const input = buildAgenticFixInput(
+    agenticReviewReport([finding("starrail"), finding("zzz")])
+  );
+  const changedFiles = ["apps/api/src/games/starrail.ts"];
+  const metadata = parseAgentFixOutput(
+    JSON.stringify(agentFixOutput(input, changedFiles)),
+    input,
+    changedFiles
+  );
+  const patch = Buffer.from("diff --git a/a b/a\n");
+  const manifest = fixManifest(input, changedFiles, patch);
+  validateFixManifest(manifest, input, patch, manifest.base_sha);
+
+  const body = renderFixPrBody(metadata, manifest, {
+    repository,
+    runId: "12345",
+    patchSha256: manifest.patch_sha256,
+    issueUrl,
+  });
+
+  assert.match(body, new RegExp(`^Refs #${issueNumber}$`, "m"));
+  assert.doesNotMatch(body, new RegExp(`^Closes #${issueNumber}$`, "m"));
+  assert.match(body, new RegExp(`/issues/${issueNumber}\\b`));
 });
 
 test("builds a digest-bound PR review input and validates exact trusted context", () => {
   const context = prReviewContext();
   const input = buildAgenticPrReviewInput(context);
 
+  assert.equal(input.schema_version, 2);
   assert.equal(input.mode, "agentic_pr_review");
   assert.match(input.context_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(input.issue_number, issueNumber);
+  assert.equal(input.remediation_cycle, remediationCycle);
+  assert.equal(input.fix_branch, context.fix_branch);
   assert.deepEqual(input.pull_request, context.pull_request);
   assert.deepEqual(
     validateAgenticPrReviewInput(input, context),
@@ -617,10 +873,36 @@ test("builds a digest-bound PR review input and validates exact trusted context"
     /context SHA-256 mismatch/
   );
   for (const changedContext of [
-    { ...context, base_sha: "e".repeat(40) },
+    {
+      ...context,
+      base_sha: "e".repeat(40),
+      fix_branch: getFixBranch(
+        context.finding_fingerprint,
+        context.issue_number,
+        "e".repeat(40)
+      ),
+    },
     { ...context, head_sha: "e".repeat(40) },
     { ...context, patch_sha256: "e".repeat(64) },
-    { ...context, finding_fingerprint: "e".repeat(64) },
+    {
+      ...context,
+      finding_fingerprint: "e".repeat(64),
+      fix_branch: getFixBranch(
+        "e".repeat(64),
+        context.issue_number,
+        context.base_sha
+      ),
+    },
+    {
+      ...context,
+      issue_number: 43,
+      fix_branch: getFixBranch(
+        context.finding_fingerprint,
+        43,
+        context.base_sha
+      ),
+    },
+    { ...context, remediation_cycle: "8".repeat(64) },
     {
       ...context,
       pull_request: {
@@ -639,6 +921,14 @@ test("builds a digest-bound PR review input and validates exact trusted context"
       /does not match the trusted PR context/
     );
   }
+  assert.throws(
+    () =>
+      buildAgenticPrReviewInput({
+        ...context,
+        fix_branch: "codex/upstream-review-wrong",
+      }),
+    /fix branch|fix_branch|branch|remediation cycle context/i
+  );
 });
 
 test("accepts P3-only approval and renders a deterministic escaped review request", () => {
@@ -907,9 +1197,13 @@ test("builds a strict digest-bound PR rework input for one of three rounds", () 
   const context = prReworkContext();
   const input = buildAgenticPrReworkInput(context);
 
+  assert.equal(input.schema_version, 2);
   assert.equal(input.mode, "agentic_pr_rework");
   assert.equal(input.round, 1);
   assert.equal(input.max_rounds, 3);
+  assert.equal(input.issue_number, issueNumber);
+  assert.equal(input.remediation_cycle, remediationCycle);
+  assert.equal(input.fix_branch, context.fix_branch);
   assert.match(input.context_sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(validateAgenticPrReworkInput(input, context), input);
   assert.equal(
@@ -934,6 +1228,8 @@ test("builds a strict digest-bound PR rework input for one of three rounds", () 
     { ...context, round: 4 },
     { ...context, max_rounds: 2 },
     { ...context, reviewed_head_sha: "a".repeat(40) },
+    { ...context, issue_number: 0 },
+    { ...context, remediation_cycle: "short" },
     { ...context, fix_branch: "codex/upstream-review-wrong" },
     {
       ...context,
@@ -958,6 +1254,14 @@ test("builds a strict digest-bound PR rework input for one of three rounds", () 
   });
   assert.throws(
     () => validateAgenticPrReworkInput(replayed, context),
+    /does not match the trusted context/
+  );
+  const replayedCycle = buildAgenticPrReworkInput({
+    ...context,
+    remediation_cycle: "8".repeat(64),
+  });
+  assert.throws(
+    () => validateAgenticPrReworkInput(replayedCycle, context),
     /does not match the trusted context/
   );
 });
@@ -1033,7 +1337,9 @@ test("rejects a rework that drops a previously changed parser", () => {
   const remainingChangedFiles = ["apps/api/src/games/starrail.ts"];
   const context = prReworkContext({
     finding_fingerprint: fixInput.finding_fingerprint,
-    fix_branch: `codex/upstream-review-${fixInput.finding_fingerprint.slice(0, 16)}`,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    fix_branch: fixInput.fix_branch,
     allowed_files: previousChangedFiles,
     changed_files: previousChangedFiles,
   });
@@ -1041,10 +1347,13 @@ test("rejects a rework that drops a previously changed parser", () => {
   const incrementalPatch = Buffer.from("incremental patch");
   const cumulativePatch = Buffer.from("cumulative patch");
   const cumulativeManifest = {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_fix_manifest",
     base_sha: input.base_sha,
     finding_fingerprint: fixInput.finding_fingerprint,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    fix_branch: fixInput.fix_branch,
     finding_ids: fixInput.findings.map((item) => item.finding_id),
     target_games: fixInput.target_games,
     changed_files: remainingChangedFiles,
@@ -1054,13 +1363,15 @@ test("rejects a rework that drops a previously changed parser", () => {
     patch_bytes: cumulativePatch.length,
   };
   const manifest = {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_pr_rework_manifest",
     round: input.round,
     max_rounds: input.max_rounds,
     base_sha: input.base_sha,
     parent_sha: input.reviewed_head_sha,
     finding_fingerprint: input.finding_fingerprint,
+    issue_number: input.issue_number,
+    remediation_cycle: input.remediation_cycle,
     fix_branch: input.fix_branch,
     rework_context_sha256: input.context_sha256,
     review_context_sha256: input.review_context_sha256,
@@ -1128,7 +1439,7 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
     });
     const baseSha = stdout.trim();
     const input = buildAgenticFixInput(
-      agenticReviewReport([finding("starrail")])
+      agenticReviewReport([finding("starrail")], { baseSha })
     );
     await fs.writeFile(inputPath, JSON.stringify(input), "utf8");
     await fs.writeFile(
@@ -1152,6 +1463,10 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
     });
     const patch = await fs.readFile(patchPath);
     assert.equal(result.metadata.has_patch, true);
+    assert.equal(result.manifest.schema_version, 2);
+    assert.equal(result.manifest.issue_number, issueNumber);
+    assert.equal(result.manifest.remediation_cycle, remediationCycle);
+    assert.equal(result.manifest.fix_branch, input.fix_branch);
     assert.ok(patch.length > 0);
     assert.equal(result.manifest.patch_bytes, patch.length);
     assert.equal(
@@ -1397,7 +1712,7 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
     const baseSha = baseStdout.trim();
 
     const fixInput = buildAgenticFixInput(
-      agenticReviewReport([finding("starrail")])
+      agenticReviewReport([finding("starrail")], { baseSha })
     );
     await fs.writeFile(
       fixInputPath,
@@ -1530,6 +1845,10 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
     });
     assert.equal(rework.rework_manifest.parent_sha, reviewedHeadSha);
     assert.equal(rework.rework_manifest.base_sha, baseSha);
+    assert.equal(rework.rework_manifest.schema_version, 2);
+    assert.equal(rework.rework_manifest.issue_number, issueNumber);
+    assert.equal(rework.rework_manifest.remediation_cycle, remediationCycle);
+    assert.equal(rework.rework_manifest.fix_branch, fixInput.fix_branch);
     assert.notEqual(
       rework.rework_manifest.incremental_patch_sha256,
       rework.rework_manifest.patch_sha256
@@ -1711,6 +2030,244 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
     await fs.rm(outputDir, { recursive: true, force: true });
     await fs.rm(recoveryRepoDir, { recursive: true, force: true });
   }
+});
+
+test("reuses only the open remediation Issue with a matching fingerprint", async () => {
+  const findings = [finding("starrail")];
+  const report = agenticReviewReport(findings);
+  const findingFingerprint =
+    buildAgenticFixInput(report).finding_fingerprint;
+  delete report.issue;
+  const closedCycle = "7".repeat(64);
+  const openCycle = "8".repeat(64);
+  const issues = [
+    {
+      number: 39,
+      html_url: `https://github.com/${repository}/issues/39`,
+      title: "Upstream Review Alerts",
+      state: "closed",
+      body: `${cycleMarker(findingFingerprint, closedCycle)}\n`,
+      user: { login: "github-actions[bot]" },
+    },
+    {
+      number: 40,
+      html_url: `https://github.com/${repository}/issues/40`,
+      title: "Upstream Review Alerts",
+      state: "open",
+      body: `${cycleMarker("e".repeat(64), "6".repeat(64))}\n`,
+      user: { login: "github-actions[bot]" },
+    },
+    {
+      number: 41,
+      html_url: `https://github.com/${repository}/pull/41`,
+      title: "Upstream Review Alerts",
+      state: "open",
+      body: `${cycleMarker(findingFingerprint, "5".repeat(64))}\n`,
+      user: { login: "github-actions[bot]" },
+      pull_request: {
+        url: `https://api.github.com/repos/${repository}/pulls/41`,
+      },
+    },
+    {
+      number: issueNumber,
+      html_url: issueUrl,
+      title: "Upstream Review Alerts",
+      state: "open",
+      body: `${cycleMarker(findingFingerprint, openCycle)}\n`,
+      user: { login: "github-actions[bot]" },
+    },
+  ];
+  const calls = [];
+  const request = async (pathname, init = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = parseRequestBody(init);
+    calls.push({ pathname, method, body });
+    if (
+      method === "GET" &&
+      pathname.startsWith(`/repos/${repository}/issues?`)
+    ) {
+      return issues;
+    }
+    if (
+      method === "PATCH" &&
+      pathname === `/repos/${repository}/issues/${issueNumber}`
+    ) {
+      return {
+        ...issues.at(-1),
+        ...body,
+        number: issueNumber,
+        html_url: issueUrl,
+        state: "open",
+      };
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
+  };
+
+  const result = await syncIssue(report, {
+    request,
+    repository,
+    runId: "12345",
+    runAttempt: "2",
+    dryRun: false,
+  });
+
+  assert.equal(result.issue_number, issueNumber);
+  assert.equal(result.issue_url, issueUrl);
+  assert.equal(result.remediation_cycle, openCycle);
+  assert.deepEqual(
+    calls.filter((call) => call.method === "PATCH").map((call) => call.pathname),
+    [`/repos/${repository}/issues/${issueNumber}`]
+  );
+  assert.equal(calls.some((call) => call.method === "POST"), false);
+  const update = calls.find((call) => call.method === "PATCH");
+  assert.equal(
+    update.body.body.split("\n")[0],
+    cycleMarker(findingFingerprint, openCycle)
+  );
+  assert.equal(Object.hasOwn(update.body, "state"), false);
+});
+
+test("creates a new remediation Issue instead of reopening a closed cycle", async () => {
+  const findings = [finding("starrail")];
+  const report = agenticReviewReport(findings);
+  const findingFingerprint =
+    buildAgenticFixInput(report).finding_fingerprint;
+  delete report.issue;
+  const closedCycle = "7".repeat(64);
+  const closedIssue = {
+    number: 39,
+    html_url: `https://github.com/${repository}/issues/39`,
+    title: "Upstream Review Alerts",
+    state: "closed",
+    body: `${cycleMarker(findingFingerprint, closedCycle)}\n`,
+    user: { login: "github-actions[bot]" },
+  };
+  const createdIssueNumber = 43;
+  const createdIssueUrl =
+    `https://github.com/${repository}/issues/${createdIssueNumber}`;
+  const calls = [];
+  const request = async (pathname, init = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = parseRequestBody(init);
+    calls.push({ pathname, method, body });
+    if (
+      method === "GET" &&
+      pathname.startsWith(`/repos/${repository}/issues?`)
+    ) {
+      return [closedIssue];
+    }
+    if (
+      method === "POST" &&
+      pathname === `/repos/${repository}/issues`
+    ) {
+      return {
+        number: createdIssueNumber,
+        html_url: createdIssueUrl,
+        title: body.title,
+        body: body.body,
+        state: "open",
+        user: { login: "github-actions[bot]" },
+      };
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
+  };
+
+  const result = await syncIssue(report, {
+    request,
+    repository,
+    runId: "67890",
+    runAttempt: "1",
+    dryRun: false,
+  });
+
+  assert.equal(result.issue_number, createdIssueNumber);
+  assert.equal(result.issue_url, createdIssueUrl);
+  assert.match(result.remediation_cycle, /^[a-f0-9]{64}$/);
+  assert.notEqual(result.remediation_cycle, closedCycle);
+  assert.equal(calls.some((call) => call.method === "PATCH"), false);
+  const create = calls.find((call) => call.method === "POST");
+  assert.ok(create);
+  assert.equal(
+    create.body.body.split("\n")[0],
+    cycleMarker(findingFingerprint, result.remediation_cycle)
+  );
+  assert.match(create.body.body, /Regression of: #39/);
+});
+
+test("does not query or mutate GitHub when a review has no findings", async () => {
+  const report = agenticReviewReport([]);
+  delete report.issue;
+  let requestCount = 0;
+
+  const result = await syncIssue(report, {
+    request: async () => {
+      requestCount += 1;
+      throw new Error("A clean review must not call GitHub");
+    },
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+
+  assert.equal(result.action, "noop");
+  assert.equal(requestCount, 0);
+});
+
+test("closes an exact all-addressed remediation Issue after its PR merges", async () => {
+  const fixture = remediationFinalizationFixture();
+
+  await finalizeRemediationIssue(fixture.args);
+
+  const updates = fixture.calls.filter((call) => call.method === "PATCH");
+  assert.equal(updates.length, 1);
+  assert.equal(
+    updates[0].pathname,
+    `/repos/${repository}/issues/${issueNumber}`
+  );
+  assert.equal(updates[0].body.state, "closed");
+  assert.equal(updates[0].body.state_reason, "completed");
+});
+
+test("treats an Issue auto-closed by a merged PR as finalized", async () => {
+  const fixture = remediationFinalizationFixture({
+    issueState: "closed",
+  });
+
+  await finalizeRemediationIssue(fixture.args);
+
+  assert.equal(
+    fixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+});
+
+test("keeps a partially addressed remediation Issue open after merge", async () => {
+  const fixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+  });
+
+  await finalizeRemediationIssue(fixture.args);
+
+  assert.equal(
+    fixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+});
+
+test("refuses to finalize an Issue whose remediation marker changed", async () => {
+  const fixture = remediationFinalizationFixture({
+    issueBody: `${cycleMarker("e".repeat(64), remediationCycle)}\n`,
+  });
+
+  await assert.rejects(
+    () => finalizeRemediationIssue(fixture.args),
+    /managed Issue|fingerprint|marker|cycle/i
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
 });
 
 test("rejects an issue body above the safety limit", () => {

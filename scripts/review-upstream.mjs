@@ -42,6 +42,8 @@ const ENDFIELD_AGGREGATE_API =
 const ENDFIELD_CODE_FALLBACK = "endfield_5SD9TN";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8787";
 const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
+const GITHUB_ACTIONS_LOGIN = "github-actions[bot]";
+const ISSUE_MARKER_VERSION = "v1";
 const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
 const DEFAULT_GAMES = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
@@ -1282,6 +1284,123 @@ function getFindingFingerprint(findings) {
   return sha256(JSON.stringify(canonicalFindings));
 }
 
+function validateIssueNumber(value, label = "issue number") {
+  const number = Number(value);
+  if (
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    number > 2_147_483_647
+  ) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return number;
+}
+
+function validateRepositorySlug(value) {
+  const repository = String(value ?? "").trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error("Invalid GitHub repository");
+  }
+  return repository;
+}
+
+function validateIssueUrl(value, repository, issueNumber) {
+  const issueUrl = String(value ?? "").trim();
+  const expectedUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+  if (
+    issueUrl !== expectedUrl ||
+    Array.from(issueUrl).length > MAX_PR_REVIEW_URL_LENGTH
+  ) {
+    throw new Error("Issue URL does not match the trusted repository and number");
+  }
+  return issueUrl;
+}
+
+function parseIssueUrl(value) {
+  const issueUrl = String(value ?? "").trim();
+  const match =
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([1-9]\d*)$/.exec(
+      issueUrl
+    );
+  if (!match || Array.from(issueUrl).length > MAX_PR_REVIEW_URL_LENGTH) {
+    throw new Error("Invalid remediation cycle issue URL");
+  }
+  return {
+    issue_url: issueUrl,
+    repository: match[1],
+    issue_number: validateIssueNumber(match[2]),
+  };
+}
+
+function getFixBranch(findingFingerprint, issueNumber, baseSha) {
+  if (
+    typeof findingFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(findingFingerprint)
+  ) {
+    throw new Error("Invalid finding fingerprint for fix branch");
+  }
+  const number = validateIssueNumber(issueNumber, "fix branch issue number");
+  if (typeof baseSha !== "string" || !/^[a-f0-9]{40}$/.test(baseSha)) {
+    throw new Error("Invalid base SHA for fix branch");
+  }
+  return `codex/upstream-review-${findingFingerprint.slice(0, 16)}-i${number}-b${baseSha.slice(0, 12)}`;
+}
+
+function renderIssueCycleMarker(findingFingerprint, remediationCycle) {
+  if (
+    typeof findingFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(findingFingerprint) ||
+    typeof remediationCycle !== "string" ||
+    !/^[a-f0-9]{64}$/.test(remediationCycle)
+  ) {
+    throw new Error("Invalid remediation cycle marker");
+  }
+  return `<!-- upstream-review-cycle:${ISSUE_MARKER_VERSION} fingerprint=${findingFingerprint} cycle=${remediationCycle} -->`;
+}
+
+function parseIssueCycleMarker(body) {
+  const match =
+    /^<!-- upstream-review-cycle:v1 fingerprint=([a-f0-9]{64}) cycle=([a-f0-9]{64}) -->\n/.exec(
+      String(body ?? "")
+    );
+  if (!match) return null;
+  return {
+    finding_fingerprint: match[1],
+    remediation_cycle: match[2],
+  };
+}
+
+function createRemediationCycleId(
+  repository,
+  runId,
+  runAttempt,
+  findingFingerprint
+) {
+  const trustedRepository = validateRepositorySlug(repository);
+  const normalizedRunId = String(runId ?? "").trim();
+  const normalizedRunAttempt = String(runAttempt ?? "").trim();
+  if (!/^[1-9]\d*$/.test(normalizedRunId)) {
+    throw new Error("Invalid GitHub run id for remediation cycle");
+  }
+  if (!/^[1-9]\d*$/.test(normalizedRunAttempt)) {
+    throw new Error("Invalid GitHub run attempt for remediation cycle");
+  }
+  if (
+    typeof findingFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(findingFingerprint)
+  ) {
+    throw new Error("Invalid finding fingerprint for remediation cycle");
+  }
+  return sha256(
+    JSON.stringify({
+      repository: trustedRepository,
+      run_id: normalizedRunId,
+      run_attempt: normalizedRunAttempt,
+      finding_fingerprint: findingFingerprint,
+    })
+  );
+}
+
 function compareFixFindings(a, b) {
   const gameOrder =
     DEFAULT_GAMES.indexOf(a.game) - DEFAULT_GAMES.indexOf(b.game);
@@ -1335,18 +1454,53 @@ function buildAgenticFixInput(rawReport) {
     };
   });
 
+  const findingFingerprint = getFindingFingerprint(findings);
+  const hasFindings = findings.length > 0;
+  const issueNumber = hasFindings
+    ? validateIssueNumber(
+        report.issue?.issue_number,
+        "remediation cycle issue number"
+      )
+    : 0;
+  const issueUrl = hasFindings
+    ? parseIssueUrl(report.issue?.issue_url).issue_url
+    : "";
+  const remediationCycle = hasFindings
+    ? String(report.issue?.remediation_cycle ?? "").trim()
+    : "";
+  const baseSha = hasFindings
+    ? String(report.base_sha ?? "").trim()
+    : "";
+  if (
+    hasFindings &&
+    (
+      parseIssueUrl(issueUrl).issue_number !== issueNumber ||
+      report.issue?.finding_fingerprint !== findingFingerprint ||
+      !/^[a-f0-9]{64}$/.test(remediationCycle) ||
+      !/^[a-f0-9]{40}$/.test(baseSha)
+    )
+  ) {
+    throw new Error(
+      "Agentic review report Issue does not match the finding fingerprint and remediation cycle"
+    );
+  }
+  const fixBranch = hasFindings
+    ? getFixBranch(findingFingerprint, issueNumber, baseSha)
+    : "";
+
   return {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_fix",
     source_report: {
       generated_at: normalizeWhitespace(report.generated_at || ""),
       finalized_at: normalizeWhitespace(report.finalized_at || ""),
-      issue_url: truncateText(
-        normalizeWhitespace(report.issue?.issue_url || ""),
-        MAX_AGENT_TITLE_LENGTH
-      ),
+      issue_number: issueNumber,
+      issue_url: issueUrl,
+      remediation_cycle: remediationCycle,
+      base_sha: baseSha,
     },
-    finding_fingerprint: getFindingFingerprint(findings),
+    finding_fingerprint: findingFingerprint,
+    fix_branch: fixBranch,
     target_games: targetGames,
     allowed_files: targetGames.map((game) => GAME_SOURCE_FILES[game]),
     findings,
@@ -1355,7 +1509,7 @@ function buildAgenticFixInput(rawReport) {
 }
 
 function validateAgenticFixInput(input) {
-  if (!isRecord(input) || input.mode !== "agentic_fix" || input.schema_version !== 1) {
+  if (!isRecord(input) || input.mode !== "agentic_fix" || input.schema_version !== 2) {
     throw new Error("Invalid agentic fix input");
   }
   if (
@@ -1369,9 +1523,13 @@ function validateAgenticFixInput(input) {
     !isRecord(input.source_report) ||
     typeof input.source_report.generated_at !== "string" ||
     typeof input.source_report.finalized_at !== "string" ||
+    !Number.isSafeInteger(input.source_report.issue_number) ||
     typeof input.source_report.issue_url !== "string" ||
+    typeof input.source_report.remediation_cycle !== "string" ||
+    typeof input.source_report.base_sha !== "string" ||
     typeof input.finding_fingerprint !== "string" ||
-    !/^[a-f0-9]{64}$/.test(input.finding_fingerprint)
+    !/^[a-f0-9]{64}$/.test(input.finding_fingerprint) ||
+    typeof input.fix_branch !== "string"
   ) {
     throw new Error("Invalid agentic fix input: source metadata is invalid");
   }
@@ -1439,6 +1597,40 @@ function validateAgenticFixInput(input) {
   }
   if (getFindingFingerprint(input.findings) !== input.finding_fingerprint) {
     throw new Error("Invalid agentic fix input: finding fingerprint mismatch");
+  }
+  if (input.findings.length === 0) {
+    if (
+      input.source_report.issue_number !== 0 ||
+      input.source_report.issue_url !== "" ||
+      input.source_report.remediation_cycle !== "" ||
+      input.source_report.base_sha !== "" ||
+      input.fix_branch !== ""
+    ) {
+      throw new Error(
+        "Invalid agentic fix input: a clean review cannot have a remediation cycle"
+      );
+    }
+  } else {
+    const issueNumber = validateIssueNumber(
+      input.source_report.issue_number,
+      "agentic fix issue number"
+    );
+    const parsedIssueUrl = parseIssueUrl(input.source_report.issue_url);
+    if (
+      parsedIssueUrl.issue_number !== issueNumber ||
+      !/^[a-f0-9]{64}$/.test(input.source_report.remediation_cycle) ||
+      !/^[a-f0-9]{40}$/.test(input.source_report.base_sha) ||
+      input.fix_branch !==
+        getFixBranch(
+          input.finding_fingerprint,
+          issueNumber,
+          input.source_report.base_sha
+        )
+    ) {
+      throw new Error(
+        "Invalid agentic fix input: remediation cycle metadata is inconsistent"
+      );
+    }
   }
 
   if (
@@ -1929,13 +2121,44 @@ function finalizeIssueLines(lines) {
   return lines.join("\n").trim() + "\n";
 }
 
-function renderIssueBody(report) {
+function renderIssueTitle(report, findingFingerprint) {
+  const count = report.review.findings.length;
+  return `${DEFAULT_ISSUE_TITLE} · ${count} finding${count === 1 ? "" : "s"} · ${findingFingerprint.slice(0, 8)}`;
+}
+
+function renderIssueBody(report, options = {}) {
+  const findingFingerprint = String(options.findingFingerprint ?? "").trim();
+  const remediationCycle = String(options.remediationCycle ?? "").trim();
+  const marker =
+    findingFingerprint || remediationCycle
+      ? renderIssueCycleMarker(findingFingerprint, remediationCycle)
+      : "";
+  const regressionOfIssueNumber =
+    options.regressionOfIssueNumber == null
+      ? null
+      : validateIssueNumber(
+          options.regressionOfIssueNumber,
+          "regression Issue number"
+        );
   const lines = [
+    ...(marker ? [marker, ""] : []),
     "# Upstream Review Alerts",
     "",
     `Last run: \`${escapeIssueCode(report.generated_at)}\``,
+    ...(report.base_sha
+      ? [`Base commit: \`${escapeIssueCode(report.base_sha)}\``]
+      : []),
     `API base: \`${escapeIssueCode(report.api_base_url)}\``,
     `Model: \`${escapeIssueCode(report.review.model)}\``,
+    ...(marker
+      ? [
+          `Finding fingerprint: \`${findingFingerprint}\``,
+          `Remediation cycle: \`${remediationCycle}\``,
+        ]
+      : []),
+    ...(regressionOfIssueNumber == null
+      ? []
+      : [`Regression of: #${regressionOfIssueNumber}`]),
     "",
     "## Summary",
     escapeIssueText(
@@ -2021,11 +2244,11 @@ async function githubRequest(pathname, init = {}) {
   });
 }
 
-async function listAllRepositoryIssues(owner, repo) {
+async function listAllRepositoryIssues(owner, repo, request = githubRequest) {
   const out = [];
 
   for (let page = 1; ; page += 1) {
-    const issues = await githubRequest(
+    const issues = await request(
       `/repos/${owner}/${repo}/issues?state=all&per_page=100&page=${page}`
     );
     const list = ensureArray(issues);
@@ -2037,97 +2260,305 @@ async function listAllRepositoryIssues(owner, repo) {
   return out;
 }
 
-function parseRepoSlug() {
-  const slug = process.env.GITHUB_REPOSITORY?.trim();
-  if (!slug || !slug.includes("/")) {
-    throw new Error("Missing GITHUB_REPOSITORY");
-  }
+function parseRepoSlug(value = process.env.GITHUB_REPOSITORY) {
+  const slug = validateRepositorySlug(value);
   const [owner, repo] = slug.split("/");
   return { owner, repo };
 }
 
-async function syncIssue(report) {
-  const dryRun = parseBoolean(process.env.UPSTREAM_REVIEW_DRY_RUN, false);
+function validateManagedIssueSnapshot(
+  issue,
+  {
+    repository,
+    issueNumber,
+    findingFingerprint,
+    remediationCycle,
+    expectedState = "open",
+  }
+) {
+  const number = validateIssueNumber(issueNumber);
+  const marker = parseIssueCycleMarker(issue?.body);
+  if (
+    !isRecord(issue) ||
+    issue.pull_request ||
+    issue.number !== number ||
+    issue.html_url !== `https://github.com/${repository}/issues/${number}` ||
+    issue.state !== expectedState ||
+    issue.user?.login !== GITHUB_ACTIONS_LOGIN ||
+    marker?.finding_fingerprint !== findingFingerprint ||
+    marker?.remediation_cycle !== remediationCycle
+  ) {
+    throw new Error(
+      `GitHub returned an unexpected managed Issue snapshot for #${number}`
+    );
+  }
+  return issue;
+}
+
+async function syncIssue(report, options = {}) {
+  const dryRun =
+    options.dryRun ??
+    parseBoolean(process.env.UPSTREAM_REVIEW_DRY_RUN, false);
   if (dryRun) {
     return { action: "dry_run" };
   }
 
-  const { owner, repo } = parseRepoSlug();
-  const title = process.env.UPSTREAM_REVIEW_ISSUE_TITLE?.trim() || DEFAULT_ISSUE_TITLE;
-  const configuredIssueNumberValue = process.env.UPSTREAM_REVIEW_ISSUE_NUMBER?.trim() || "";
-  const configuredIssueNumber = Number(configuredIssueNumberValue);
-  let existing;
-
-  if (configuredIssueNumberValue) {
-    if (!Number.isInteger(configuredIssueNumber) || configuredIssueNumber <= 0) {
-      throw new Error(
-        `Invalid UPSTREAM_REVIEW_ISSUE_NUMBER: ${configuredIssueNumberValue}`
-      );
-    }
-    existing = await githubRequest(
-      `/repos/${owner}/${repo}/issues/${configuredIssueNumber}`
-    );
-    if (existing?.pull_request) {
-      throw new Error(`Configured issue #${configuredIssueNumber} is a pull request`);
-    }
-    if (existing?.title !== title) {
-      throw new Error(
-        `Configured issue #${configuredIssueNumber} has unexpected title: ${existing?.title || "(empty)"}`
-      );
-    }
-  } else {
-    const issues = await listAllRepositoryIssues(owner, repo);
-    existing = ensureArray(issues).find(
-      (issue) => !issue?.pull_request && issue?.title === title
-    );
-  }
-
-  const openExisting = existing?.state === "open" ? existing : null;
-
   if (report.review.findings.length === 0) {
-    if (!openExisting) return { action: "noop" };
-
-    const updated = await githubRequest(`/repos/${owner}/${repo}/issues/${openExisting.number}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        title,
-        body: renderIssueBody(report),
-        state: "closed",
-        state_reason: "completed",
-      }),
-    });
     return {
-      action: "closed",
-      issue_number: updated.number,
-      issue_url: updated.html_url,
+      action: "noop",
+      issue_number: 0,
+      issue_url: "",
+      finding_fingerprint: getFindingFingerprint([]),
+      remediation_cycle: "",
     };
   }
 
-  const body = renderIssueBody(report);
+  const request = options.request ?? githubRequest;
+  const repository = validateRepositorySlug(
+    options.repository ?? process.env.GITHUB_REPOSITORY
+  );
+  const { owner, repo } = parseRepoSlug(repository);
+  const findingFingerprint = getFindingFingerprint(report.review.findings);
+  const issues = await listAllRepositoryIssues(owner, repo, request);
+  const matchingIssues = ensureArray(issues)
+    .filter(
+      (issue) =>
+        !issue?.pull_request &&
+        issue?.user?.login === GITHUB_ACTIONS_LOGIN &&
+        parseIssueCycleMarker(issue?.body)?.finding_fingerprint ===
+          findingFingerprint
+    )
+    .sort((a, b) => Number(b.number) - Number(a.number));
+  const openMatches = matchingIssues.filter((issue) => issue.state === "open");
+  if (openMatches.length > 1) {
+    throw new Error(
+      `More than one open managed Issue matches finding fingerprint ${findingFingerprint}`
+    );
+  }
+  const existing = openMatches[0] ?? null;
+  const regressionOfIssueNumber =
+    matchingIssues.find((issue) => issue.state === "closed")?.number ?? null;
+
   if (existing) {
-    const updated = await githubRequest(`/repos/${owner}/${repo}/issues/${existing.number}`, {
+    const existingMarker = parseIssueCycleMarker(existing.body);
+    const remediationCycle = existingMarker.remediation_cycle;
+    const title = renderIssueTitle(report, findingFingerprint);
+    const body = renderIssueBody(report, {
+      findingFingerprint,
+      remediationCycle,
+      regressionOfIssueNumber,
+    });
+    const updated = await request(`/repos/${owner}/${repo}/issues/${existing.number}`, {
       method: "PATCH",
       body: JSON.stringify({
         title,
         body,
-        state: "open",
       }),
     });
+    validateManagedIssueSnapshot(updated, {
+      repository,
+      issueNumber: existing.number,
+      findingFingerprint,
+      remediationCycle,
+    });
     return {
-      action: existing.state === "open" ? "updated" : "reopened",
+      action: "updated",
       issue_number: updated.number,
       issue_url: updated.html_url,
+      finding_fingerprint: findingFingerprint,
+      remediation_cycle: remediationCycle,
+      regression_of_issue_number: regressionOfIssueNumber,
     };
   }
 
-  const created = await githubRequest(`/repos/${owner}/${repo}/issues`, {
+  const remediationCycle = createRemediationCycleId(
+    repository,
+    options.runId ?? process.env.GITHUB_RUN_ID,
+    options.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? "1",
+    findingFingerprint
+  );
+  const title = renderIssueTitle(report, findingFingerprint);
+  const body = renderIssueBody(report, {
+    findingFingerprint,
+    remediationCycle,
+    regressionOfIssueNumber,
+  });
+  const created = await request(`/repos/${owner}/${repo}/issues`, {
     method: "POST",
     body: JSON.stringify({ title, body }),
+  });
+  validateManagedIssueSnapshot(created, {
+    repository,
+    issueNumber: created?.number,
+    findingFingerprint,
+    remediationCycle,
   });
   return {
     action: "created",
     issue_number: created.number,
     issue_url: created.html_url,
+    finding_fingerprint: findingFingerprint,
+    remediation_cycle: remediationCycle,
+    regression_of_issue_number: regressionOfIssueNumber,
+  };
+}
+
+async function finalizeRemediationIssue(options = {}) {
+  const request = options.request ?? githubRequest;
+  const repository = validateRepositorySlug(
+    options.repository ?? process.env.GITHUB_REPOSITORY
+  );
+  const { owner, repo } = parseRepoSlug(repository);
+  const issueNumber = validateIssueNumber(
+    options.issueNumber ??
+      process.env.UPSTREAM_REVIEW_ISSUE_NUMBER,
+    "remediation Issue number"
+  );
+  const issueUrl = validateIssueUrl(
+    options.issueUrl ??
+      process.env.UPSTREAM_REVIEW_ISSUE_URL,
+    repository,
+    issueNumber
+  );
+  const findingFingerprint = String(
+    options.findingFingerprint ??
+      process.env.UPSTREAM_REVIEW_FINDING_FINGERPRINT ??
+      ""
+  ).trim();
+  const remediationCycle = String(
+    options.remediationCycle ??
+      process.env.UPSTREAM_REVIEW_REMEDIATION_CYCLE ??
+      ""
+  ).trim();
+  const pullRequestNumber = validateIssueNumber(
+    options.pullRequestNumber ??
+      process.env.UPSTREAM_REVIEW_PR_NUMBER,
+    "automatic pull request number"
+  );
+  const pullRequestUrl = String(
+    options.pullRequestUrl ??
+      process.env.UPSTREAM_REVIEW_PR_URL ??
+      ""
+  ).trim();
+  const expectedPullRequestUrl =
+    `https://github.com/${repository}/pull/${pullRequestNumber}`;
+  const prBodySha256 = String(
+    options.prBodySha256 ??
+      process.env.UPSTREAM_REVIEW_PR_BODY_SHA256 ??
+      ""
+  ).trim();
+  const mergeSha = String(
+    options.mergeSha ??
+      process.env.UPSTREAM_REVIEW_MERGE_SHA ??
+      ""
+  ).trim();
+  const allFindingsAddressedValue =
+    options.allFindingsAddressed ??
+    process.env.UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED;
+  if (
+    !/^[a-f0-9]{64}$/.test(findingFingerprint) ||
+    !/^[a-f0-9]{64}$/.test(remediationCycle) ||
+    pullRequestUrl !== expectedPullRequestUrl ||
+    !/^[a-f0-9]{64}$/.test(prBodySha256) ||
+    !/^[a-f0-9]{40}$/.test(mergeSha) ||
+    ![true, false, "true", "false"].includes(allFindingsAddressedValue)
+  ) {
+    throw new Error("Invalid trusted remediation completion context");
+  }
+  const allFindingsAddressed =
+    allFindingsAddressedValue === true ||
+    allFindingsAddressedValue === "true";
+  const [issue, pullRequest] = await Promise.all([
+    request(`/repos/${owner}/${repo}/issues/${issueNumber}`),
+    request(`/repos/${owner}/${repo}/pulls/${pullRequestNumber}`),
+  ]);
+  if (
+    !isRecord(pullRequest) ||
+    pullRequest.number !== pullRequestNumber ||
+    pullRequest.html_url !== pullRequestUrl ||
+    pullRequest.state !== "closed" ||
+    pullRequest.merged !== true ||
+    pullRequest.merge_commit_sha !== mergeSha ||
+    pullRequest.user?.login !== GITHUB_ACTIONS_LOGIN ||
+    pullRequest.base?.repo?.full_name !== repository ||
+    typeof pullRequest.body !== "string" ||
+    sha256(Buffer.from(pullRequest.body, "utf8")) !== prBodySha256
+  ) {
+    throw new Error(
+      "Merged automatic PR does not match the trusted remediation snapshot"
+    );
+  }
+  const expectedPrMarker =
+    `<!-- upstream-review-pr:v1 issue=${issueNumber} fingerprint=${findingFingerprint} cycle=${remediationCycle} -->`;
+  const expectedReference = allFindingsAddressed
+    ? `Closes #${issueNumber}`
+    : `Refs #${issueNumber}`;
+  if (
+    !pullRequest.body.startsWith(`${expectedPrMarker}\n`) ||
+    !pullRequest.body.split("\n").includes(expectedReference)
+  ) {
+    throw new Error(
+      "Merged automatic PR body does not match the remediation cycle"
+    );
+  }
+
+  const expectedIssueState =
+    issue?.state === "closed" ? "closed" : "open";
+  validateManagedIssueSnapshot(issue, {
+    repository,
+    issueNumber,
+    findingFingerprint,
+    remediationCycle,
+    expectedState: expectedIssueState,
+  });
+  if (!allFindingsAddressed) {
+    if (issue.state !== "open") {
+      throw new Error(
+        `Partially addressed remediation Issue #${issueNumber} was closed unexpectedly`
+      );
+    }
+    return {
+      action: "left_open",
+      issue_number: issueNumber,
+      issue_url: issueUrl,
+    };
+  }
+  if (issue.state === "closed") {
+    if (issue.state_reason !== "completed") {
+      throw new Error(
+        `Remediation Issue #${issueNumber} was not closed as completed`
+      );
+    }
+    return {
+      action: "already_closed",
+      issue_number: issueNumber,
+      issue_url: issueUrl,
+    };
+  }
+
+  const updated = await request(`/repos/${owner}/${repo}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      state: "closed",
+      state_reason: "completed",
+    }),
+  });
+  validateManagedIssueSnapshot(updated, {
+    repository,
+    issueNumber,
+    findingFingerprint,
+    remediationCycle,
+    expectedState: "closed",
+  });
+  if (updated.state_reason !== "completed") {
+    throw new Error(
+      `Remediation Issue #${issueNumber} did not close as completed`
+    );
+  }
+  return {
+    action: "closed",
+    issue_number: issueNumber,
+    issue_url: issueUrl,
   };
 }
 
@@ -2176,15 +2607,15 @@ async function prepareAgenticFix(options = {}) {
   await writeReport(fixInput, outputPath, false);
 
   const hasFindings = fixInput.findings.length > 0;
-  const fixBranch = hasFindings
-    ? `codex/upstream-review-${fixInput.finding_fingerprint.slice(0, 16)}`
-    : "";
   await appendGitHubOutputs(
     {
       has_findings: hasFindings,
       finding_count: fixInput.findings.length,
       finding_fingerprint: fixInput.finding_fingerprint,
-      fix_branch: fixBranch,
+      fix_branch: fixInput.fix_branch,
+      issue_number: fixInput.source_report.issue_number || "",
+      issue_url: fixInput.source_report.issue_url,
+      remediation_cycle: fixInput.source_report.remediation_cycle,
     },
     options.githubOutputPath
   );
@@ -2267,11 +2698,18 @@ function parseModifiedFileStatus(text) {
 function validateFixManifest(manifest, fixInput, patch, expectedBaseSha = "") {
   if (
     !isRecord(manifest) ||
-    manifest.schema_version !== 1 ||
+    manifest.schema_version !== 2 ||
     manifest.mode !== "agentic_fix_manifest" ||
     typeof manifest.base_sha !== "string" ||
     !/^[a-f0-9]{40}$/.test(manifest.base_sha) ||
     typeof manifest.finding_fingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.finding_fingerprint) ||
+    !Number.isSafeInteger(manifest.issue_number) ||
+    manifest.issue_number <= 0 ||
+    manifest.issue_number > 2_147_483_647 ||
+    typeof manifest.remediation_cycle !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.remediation_cycle) ||
+    typeof manifest.fix_branch !== "string" ||
     typeof manifest.patch_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(manifest.patch_sha256) ||
     !Number.isInteger(manifest.patch_bytes) ||
@@ -2290,6 +2728,20 @@ function validateFixManifest(manifest, fixInput, patch, expectedBaseSha = "") {
   }
   if (manifest.finding_fingerprint !== fixInput.finding_fingerprint) {
     throw new Error("Agentic fix manifest finding fingerprint mismatch");
+  }
+  if (
+    manifest.base_sha !== fixInput.source_report.base_sha ||
+    manifest.issue_number !== fixInput.source_report.issue_number ||
+    manifest.remediation_cycle !== fixInput.source_report.remediation_cycle ||
+    manifest.fix_branch !== fixInput.fix_branch ||
+    manifest.fix_branch !==
+      getFixBranch(
+        manifest.finding_fingerprint,
+        manifest.issue_number,
+        manifest.base_sha
+      )
+  ) {
+    throw new Error("Agentic fix manifest remediation cycle mismatch");
   }
 
   const expectedFindingIds = fixInput.findings
@@ -2494,7 +2946,7 @@ async function verifyAgenticFixArtifact(options = {}) {
       process.env.GITHUB_WORKSPACE?.trim() ??
       process.cwd()
   );
-  const { manifest } = await readAndValidateFixArtifact(options);
+  const { fixInput, manifest } = await readAndValidateFixArtifact(options);
   const inspection = await inspectAgenticFixPatch(patchPath, cwd);
   if (inspection.head_sha !== manifest.base_sha) {
     throw new Error(
@@ -2506,10 +2958,9 @@ async function verifyAgenticFixArtifact(options = {}) {
     manifest.changed_files,
     "Agentic fix patch paths"
   );
-  const fixBranch = `codex/upstream-review-${manifest.finding_fingerprint.slice(0, 16)}`;
   await appendGitHubOutputs(
     {
-      fix_branch: fixBranch,
+      fix_branch: fixInput.fix_branch,
       patch_sha256: manifest.patch_sha256,
       patch_bytes: manifest.patch_bytes,
     },
@@ -2652,10 +3103,13 @@ async function finalizeAgenticFix(options = {}) {
   }
 
   const manifest = {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_fix_manifest",
     base_sha: baseSha,
     finding_fingerprint: fixInput.finding_fingerprint,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    fix_branch: fixInput.fix_branch,
     finding_ids: fixInput.findings.map((finding) => finding.finding_id),
     target_games: fixInput.target_games,
     changed_files: metadata.changed_files,
@@ -2677,6 +3131,9 @@ async function finalizeAgenticFix(options = {}) {
     );
     for (const field of [
       "finding_fingerprint",
+      "issue_number",
+      "remediation_cycle",
+      "fix_branch",
       "patch_sha256",
       "patch_bytes",
     ]) {
@@ -2732,15 +3189,52 @@ function renderFixPrBody(metadata, manifest, options = {}) {
   }
   if (
     manifest.patch_sha256 !== options.patchSha256 ||
-    manifest.changed_files.length === 0
+    manifest.changed_files.length === 0 ||
+    manifest.schema_version !== 2 ||
+    manifest.mode !== "agentic_fix_manifest"
   ) {
     throw new Error("Invalid verified patch context for PR rendering");
+  }
+  const issueNumber = validateIssueNumber(
+    manifest.issue_number,
+    "automatic fix Issue number"
+  );
+  const issueUrl = validateIssueUrl(
+    options.issueUrl,
+    repository,
+    issueNumber
+  );
+  if (
+    typeof manifest.finding_fingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.finding_fingerprint) ||
+    typeof manifest.remediation_cycle !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.remediation_cycle) ||
+    manifest.fix_branch !==
+      getFixBranch(
+        manifest.finding_fingerprint,
+        issueNumber,
+        manifest.base_sha
+      )
+  ) {
+    throw new Error("Invalid remediation cycle context for PR rendering");
   }
 
   const findingsById = new Map(
     metadata.findings.map((finding) => [finding.finding_id, finding])
   );
+  if (
+    metadata.outcomes.length !== findingsById.size ||
+    metadata.outcomes.length === 0
+  ) {
+    throw new Error("Invalid finding outcomes for PR rendering");
+  }
+  const allFindingsAddressed = metadata.outcomes.every(
+    (outcome) => outcome.status === "fixed"
+  );
+  const issueReference = allFindingsAddressed ? "Closes" : "Refs";
   const lines = [
+    `<!-- upstream-review-pr:v1 issue=${issueNumber} fingerprint=${manifest.finding_fingerprint} cycle=${manifest.remediation_cycle} -->`,
+    "",
     "## Summary",
     "",
     "Codex generated a candidate fix for the latest upstream-review findings. This PR remains draft while independent review and any bounded rework run.",
@@ -2772,14 +3266,16 @@ function renderFixPrBody(metadata, manifest, options = {}) {
     "- `pnpm typecheck`",
     "- `pnpm build`",
     "",
-    `Source: [workflow run](https://github.com/${repository}/actions/runs/${runId}) · [Upstream Review Alerts](https://github.com/${repository}/issues/1)`,
+    `Source: [workflow run](https://github.com/${repository}/actions/runs/${runId}) · [remediation Issue #${issueNumber}](${issueUrl})`,
+    "",
+    `${issueReference} #${issueNumber}`,
     "",
     `Verified patch SHA-256: \`${manifest.patch_sha256}\``,
     "",
     "_This PR is generated as a draft, then marked ready and squash-merged automatically only after an exact-head independent approval._",
     ""
   );
-  const body = lines.join("\n");
+  const body = lines.join("\n").trimEnd();
   if (Buffer.byteLength(body, "utf8") > MAX_ISSUE_BODY_BYTES) {
     throw new Error("Rendered automatic fix PR body exceeds the safety limit");
   }
@@ -2799,18 +3295,34 @@ async function renderAgenticFixPr(options = {}) {
   const outputPath =
     options.outputPath ??
     process.env.UPSTREAM_REVIEW_PR_BODY_PATH?.trim();
-  const { manifest } = await readAndValidateFixArtifact(options);
+  const { fixInput, manifest } = await readAndValidateFixArtifact(options);
   const metadataText = await readTextFile(
     metadataPath,
     "agentic fix metadata"
   );
-  const metadata = parseJsonDocument(metadataText, "agentic fix metadata");
+  const metadata = parseAgentFixOutput(
+    metadataText,
+    fixInput,
+    manifest.changed_files
+  );
   const body = renderFixPrBody(metadata, manifest, {
     repository,
     runId,
     patchSha256: manifest.patch_sha256,
+    issueUrl: fixInput.source_report.issue_url,
   });
   await writeTextFile(outputPath, body);
+  const allFindingsAddressed = metadata.outcomes.every(
+    (outcome) => outcome.status === "fixed"
+  );
+  await appendGitHubOutputs(
+    {
+      all_findings_addressed: allFindingsAddressed,
+      issue_reference: allFindingsAddressed ? "closes" : "refs",
+      pr_body_sha256: sha256(Buffer.from(body, "utf8")),
+    },
+    options.githubOutputPath
+  );
   console.log(
     JSON.stringify({
       output_path: path.resolve(outputPath),
@@ -2862,6 +3374,12 @@ function normalizePrReviewContext(rawContext) {
   const headSha = rawContext.head_sha;
   const patchSha256 = rawContext.patch_sha256;
   const findingFingerprint = rawContext.finding_fingerprint;
+  const issueNumber = validateIssueNumber(
+    rawContext.issue_number,
+    "agentic PR review Issue number"
+  );
+  const remediationCycle = rawContext.remediation_cycle;
+  const fixBranch = rawContext.fix_branch;
   if (
     typeof baseSha !== "string" ||
     typeof headSha !== "string" ||
@@ -2875,9 +3393,14 @@ function normalizePrReviewContext(rawContext) {
     typeof patchSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(patchSha256) ||
     typeof findingFingerprint !== "string" ||
-    !/^[a-f0-9]{64}$/.test(findingFingerprint)
+    !/^[a-f0-9]{64}$/.test(findingFingerprint) ||
+    typeof remediationCycle !== "string" ||
+    !/^[a-f0-9]{64}$/.test(remediationCycle) ||
+    fixBranch !== getFixBranch(findingFingerprint, issueNumber, baseSha)
   ) {
-    throw new Error("Invalid agentic PR review patch or finding digest");
+    throw new Error(
+      "Invalid agentic PR review patch, finding, or remediation cycle context"
+    );
   }
 
   const pullRequest = rawContext.pull_request;
@@ -2924,6 +3447,9 @@ function normalizePrReviewContext(rawContext) {
     head_sha: headSha,
     patch_sha256: patchSha256,
     finding_fingerprint: findingFingerprint,
+    issue_number: issueNumber,
+    remediation_cycle: remediationCycle,
+    fix_branch: fixBranch,
     pull_request: {
       number: pullRequest.number,
       url: pullRequestUrl,
@@ -2935,7 +3461,7 @@ function normalizePrReviewContext(rawContext) {
 function buildAgenticPrReviewInput(rawContext) {
   const context = normalizePrReviewContext(rawContext);
   return {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_pr_review",
     ...context,
     context_sha256: sha256(JSON.stringify(context)),
@@ -2952,6 +3478,9 @@ function validateAgenticPrReviewInput(input, expectedContext = null) {
       "head_sha",
       "patch_sha256",
       "finding_fingerprint",
+      "issue_number",
+      "remediation_cycle",
+      "fix_branch",
       "pull_request",
       "changed_files",
       "context_sha256",
@@ -2959,7 +3488,7 @@ function validateAgenticPrReviewInput(input, expectedContext = null) {
     "Agentic PR review input"
   );
   if (
-    input.schema_version !== 1 ||
+    input.schema_version !== 2 ||
     input.mode !== "agentic_pr_review"
   ) {
     throw new Error("Invalid agentic PR review input");
@@ -3258,6 +3787,9 @@ function renderPrReviewBody(review, rawInput) {
     `- Commit: \`${input.head_sha}\``,
     `- Patch SHA-256: \`${input.patch_sha256}\``,
     `- Finding fingerprint: \`${input.finding_fingerprint}\``,
+    `- Remediation Issue: \`#${input.issue_number}\``,
+    `- Remediation cycle: \`${input.remediation_cycle}\``,
+    `- Fix branch: \`${input.fix_branch}\``,
     `- Context SHA-256: \`${input.context_sha256}\``,
     "",
     "_This review was generated automatically from the exact commit and patch context above._",
@@ -3290,6 +3822,9 @@ function getPrReviewContextFromManifest(manifest, options = {}) {
       "",
     patch_sha256: manifest.patch_sha256,
     finding_fingerprint: manifest.finding_fingerprint,
+    issue_number: manifest.issue_number,
+    remediation_cycle: manifest.remediation_cycle,
+    fix_branch: manifest.fix_branch,
     pull_request: {
       number: Number(
         options.pullRequestNumber ??
@@ -3459,10 +3994,6 @@ function parsePrReworkRound(value, label = "PR rework round") {
   return number;
 }
 
-function getFixBranch(findingFingerprint) {
-  return `codex/upstream-review-${findingFingerprint.slice(0, 16)}`;
-}
-
 function getAgenticPrReworkContext(input) {
   return {
     round: input.round,
@@ -3470,6 +4001,8 @@ function getAgenticPrReworkContext(input) {
     base_sha: input.base_sha,
     reviewed_head_sha: input.reviewed_head_sha,
     finding_fingerprint: input.finding_fingerprint,
+    issue_number: input.issue_number,
+    remediation_cycle: input.remediation_cycle,
     fix_branch: input.fix_branch,
     pull_request: input.pull_request,
     fix_input_sha256: input.fix_input_sha256,
@@ -3499,6 +4032,11 @@ function normalizeAgenticPrReworkContext(rawContext) {
     [
       "finding_fingerprint",
       rawContext.finding_fingerprint,
+      /^[a-f0-9]{64}$/,
+    ],
+    [
+      "remediation_cycle",
+      rawContext.remediation_cycle,
       /^[a-f0-9]{64}$/,
     ],
     ["fix_input_sha256", rawContext.fix_input_sha256, /^[a-f0-9]{64}$/],
@@ -3531,7 +4069,15 @@ function normalizeAgenticPrReworkContext(rawContext) {
     throw new Error("Agentic PR rework base and reviewed head must differ");
   }
 
-  const expectedFixBranch = getFixBranch(rawContext.finding_fingerprint);
+  const issueNumber = validateIssueNumber(
+    rawContext.issue_number,
+    "agentic PR rework Issue number"
+  );
+  const expectedFixBranch = getFixBranch(
+    rawContext.finding_fingerprint,
+    issueNumber,
+    rawContext.base_sha
+  );
   if (rawContext.fix_branch !== expectedFixBranch) {
     throw new Error("Agentic PR rework branch does not match the fingerprint");
   }
@@ -3668,6 +4214,8 @@ function normalizeAgenticPrReworkContext(rawContext) {
     base_sha: rawContext.base_sha,
     reviewed_head_sha: rawContext.reviewed_head_sha,
     finding_fingerprint: rawContext.finding_fingerprint,
+    issue_number: issueNumber,
+    remediation_cycle: rawContext.remediation_cycle,
     fix_branch: expectedFixBranch,
     pull_request: {
       number: rawContext.pull_request.number,
@@ -3687,7 +4235,7 @@ function normalizeAgenticPrReworkContext(rawContext) {
 function buildAgenticPrReworkInput(rawContext) {
   const context = normalizeAgenticPrReworkContext(rawContext);
   return {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_pr_rework",
     ...context,
     context_sha256: sha256(JSON.stringify(context)),
@@ -3705,6 +4253,8 @@ function validateAgenticPrReworkInput(input, expectedContext = null) {
       "base_sha",
       "reviewed_head_sha",
       "finding_fingerprint",
+      "issue_number",
+      "remediation_cycle",
       "fix_branch",
       "pull_request",
       "fix_input_sha256",
@@ -3720,7 +4270,7 @@ function validateAgenticPrReworkInput(input, expectedContext = null) {
     "Agentic PR rework input"
   );
   if (
-    input.schema_version !== 1 ||
+    input.schema_version !== 2 ||
     input.mode !== "agentic_pr_rework"
   ) {
     throw new Error("Invalid agentic PR rework input");
@@ -3849,7 +4399,11 @@ async function prepareAgenticPrRework(options = {}) {
     throw new Error("PR rework requires at least one blocking finding");
   }
 
-  const expectedFixBranch = getFixBranch(fixInput.finding_fingerprint);
+  const expectedFixBranch = getFixBranch(
+    fixInput.finding_fingerprint,
+    fixInput.source_report.issue_number,
+    fixInput.source_report.base_sha
+  );
   const configuredFixBranch =
     options.fixBranch ??
     process.env.UPSTREAM_REVIEW_FIX_BRANCH?.trim() ??
@@ -3863,6 +4417,8 @@ async function prepareAgenticPrRework(options = {}) {
     base_sha: baseSha,
     reviewed_head_sha: reviewedHeadSha,
     finding_fingerprint: fixInput.finding_fingerprint,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
     fix_branch: expectedFixBranch,
     pull_request: {
       number: pullRequestNumber,
@@ -4094,7 +4650,11 @@ async function readAndValidatePrReworkSources(options = {}) {
   const reworkInput = validateAgenticPrReworkInput(
     parseJsonDocument(reworkInputText, "agentic PR rework input")
   );
-  const expectedFixBranch = getFixBranch(fixInput.finding_fingerprint);
+  const expectedFixBranch = getFixBranch(
+    fixInput.finding_fingerprint,
+    fixInput.source_report.issue_number,
+    fixInput.source_report.base_sha
+  );
   const configuredFixBranch =
     options.fixBranch ??
     process.env.UPSTREAM_REVIEW_FIX_BRANCH?.trim() ??
@@ -4115,6 +4675,8 @@ async function readAndValidatePrReworkSources(options = {}) {
     base_sha: baseSha,
     reviewed_head_sha: reviewedHeadSha,
     finding_fingerprint: fixInput.finding_fingerprint,
+    issue_number: fixInput.source_report.issue_number,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
     fix_branch: configuredFixBranch,
     pull_request: {
       number: pullRequestNumber,
@@ -4188,6 +4750,8 @@ function validatePrReworkManifest(
       "base_sha",
       "parent_sha",
       "finding_fingerprint",
+      "issue_number",
+      "remediation_cycle",
       "fix_branch",
       "rework_context_sha256",
       "review_context_sha256",
@@ -4211,13 +4775,15 @@ function validatePrReworkManifest(
     input.base_sha
   );
   if (
-    manifest.schema_version !== 1 ||
+    manifest.schema_version !== 2 ||
     manifest.mode !== "agentic_pr_rework_manifest" ||
     manifest.round !== input.round ||
     manifest.max_rounds !== input.max_rounds ||
     manifest.base_sha !== input.base_sha ||
     manifest.parent_sha !== input.reviewed_head_sha ||
     manifest.finding_fingerprint !== input.finding_fingerprint ||
+    manifest.issue_number !== input.issue_number ||
+    manifest.remediation_cycle !== input.remediation_cycle ||
     manifest.fix_branch !== input.fix_branch ||
     manifest.rework_context_sha256 !== input.context_sha256 ||
     manifest.review_context_sha256 !== input.review_context_sha256 ||
@@ -4551,10 +5117,13 @@ async function finalizeAgenticPrRework(options = {}) {
   }
 
   const cumulativeManifest = {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_fix_manifest",
     base_sha: sources.baseSha,
     finding_fingerprint: sources.fixInput.finding_fingerprint,
+    issue_number: sources.fixInput.source_report.issue_number,
+    remediation_cycle: sources.fixInput.source_report.remediation_cycle,
+    fix_branch: sources.fixInput.fix_branch,
     finding_ids: sources.fixInput.findings.map(
       (finding) => finding.finding_id
     ),
@@ -4570,13 +5139,15 @@ async function finalizeAgenticPrRework(options = {}) {
     sources.baseSha
   );
   const reworkManifest = {
-    schema_version: 1,
+    schema_version: 2,
     mode: "agentic_pr_rework_manifest",
     round: sources.round,
     max_rounds: MAX_PR_REWORK_ROUNDS,
     base_sha: sources.baseSha,
     parent_sha: sources.reviewedHeadSha,
     finding_fingerprint: sources.fixInput.finding_fingerprint,
+    issue_number: sources.fixInput.source_report.issue_number,
+    remediation_cycle: sources.fixInput.source_report.remediation_cycle,
     fix_branch: sources.fixBranch,
     rework_context_sha256: sources.reworkInput.context_sha256,
     review_context_sha256: sources.reworkInput.review_context_sha256,
@@ -4887,12 +5458,24 @@ async function finalizeAgenticReview() {
       raw_finding_count: review.findings.length,
     };
   });
+  const baseSha = (
+    process.env.UPSTREAM_REVIEW_BASE_SHA ??
+    process.env.GITHUB_SHA ??
+    ""
+  ).trim();
+  if (
+    filteredFindings.length > 0 &&
+    !/^[a-f0-9]{40}$/.test(baseSha)
+  ) {
+    throw new Error("Missing or invalid remediation base SHA");
+  }
 
   const report = {
     schema_version: 2,
     mode: "agentic_review",
     generated_at: input.generated_at,
     finalized_at: new Date().toISOString(),
+    base_sha: baseSha,
     api_base_url: input.api_base_url,
     datasets: input.datasets,
     review_datasets: input.review_datasets,
@@ -4971,6 +5554,12 @@ async function main() {
       process.env.UPSTREAM_REVIEW_VERIFY_PR_REWORK_ARTIFACT,
       false
     );
+  const finalizeRemediation =
+    process.argv.includes("--finalize-remediation-issue") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_FINALIZE_REMEDIATION_ISSUE,
+      false
+    );
 
   if (
     [
@@ -4986,6 +5575,7 @@ async function main() {
       preparePrRework,
       finalizePrRework,
       verifyPrReworkArtifact,
+      finalizeRemediation,
     ].filter(Boolean).length > 1
   ) {
     throw new Error("Upstream review command modes are mutually exclusive");
@@ -5032,6 +5622,11 @@ async function main() {
   }
   if (verifyPrReworkArtifact) {
     await verifyAgenticPrReworkArtifact();
+    return;
+  }
+  if (finalizeRemediation) {
+    const result = await finalizeRemediationIssue();
+    console.log(JSON.stringify(result));
     return;
   }
 
@@ -5121,6 +5716,8 @@ export {
   finalizeAgenticPrReview,
   finalizeAgenticPrRework,
   finalizeAgenticReview,
+  finalizeRemediationIssue,
+  getFixBranch,
   parseAgentReview,
   parseAgentFixOutput,
   parseAgentPrReviewOutput,
@@ -5132,6 +5729,7 @@ export {
   renderIssueBody,
   renderPrReviewBody,
   renderPrReviewRequest,
+  syncIssue,
   validateAgenticPrReviewInput,
   validateAgenticPrReviewResult,
   validateAgenticPrReworkInput,

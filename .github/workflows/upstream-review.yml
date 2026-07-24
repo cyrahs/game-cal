@@ -201,6 +201,9 @@ jobs:
       finding_count: ${{ steps.prepare_fix.outputs.finding_count }}
       finding_fingerprint: ${{ steps.prepare_fix.outputs.finding_fingerprint }}
       fix_branch: ${{ steps.prepare_fix.outputs.fix_branch }}
+      issue_number: ${{ steps.prepare_fix.outputs.issue_number }}
+      issue_url: ${{ steps.prepare_fix.outputs.issue_url }}
+      remediation_cycle: ${{ steps.prepare_fix.outputs.remediation_cycle }}
     permissions:
       contents: read
       issues: write
@@ -234,8 +237,9 @@ jobs:
           UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
           UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
           UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
-          UPSTREAM_REVIEW_ISSUE_NUMBER: "1"
-          UPSTREAM_REVIEW_ISSUE_TITLE: Upstream Review Alerts
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: node scripts/review-upstream.mjs --finalize
 
       - name: Prepare automatic fix request
@@ -279,7 +283,7 @@ jobs:
           existing_url="$(
             gh pr list \
               --repo "$GH_REPO" \
-              --state all \
+              --state open \
               --base "$DEFAULT_BRANCH" \
               --head "$FIX_BRANCH" \
               --limit 100 \
@@ -289,7 +293,8 @@ jobs:
           if [ -n "$existing_url" ]; then
             echo "should_repair=false" >> "$GITHUB_OUTPUT"
             echo "existing_pr_url=$existing_url" >> "$GITHUB_OUTPUT"
-            echo "An automatic PR already exists for this finding fingerprint: $existing_url" >> "$GITHUB_STEP_SUMMARY"
+            echo "An open automatic PR already exists for this remediation attempt: $existing_url" >> "$GITHUB_STEP_SUMMARY"
+            echo "This run stops before starting another fix agent; continue that draft PR manually or close it before retrying the same base." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "should_repair=true" >> "$GITHUB_OUTPUT"
             echo "existing_pr_url=" >> "$GITHUB_OUTPUT"
@@ -595,6 +600,9 @@ jobs:
       pr_number: ${{ steps.create_pr.outputs.pr_number }}
       pr_url: ${{ steps.create_pr.outputs.pr_url }}
       head_sha: ${{ steps.commit_fix.outputs.head_sha }}
+      all_findings_addressed: ${{ steps.render_pr.outputs.all_findings_addressed }}
+      issue_reference: ${{ steps.render_pr.outputs.issue_reference }}
+      pr_body_sha256: ${{ steps.render_pr.outputs.pr_body_sha256 }}
     permissions:
       contents: write
       pull-requests: write
@@ -659,6 +667,7 @@ jobs:
           node scripts/review-upstream.mjs --finalize-fix
 
       - name: Render deterministic PR body
+        id: render_pr
         env:
           UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
@@ -714,12 +723,21 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.sha }}
           HEAD_SHA: ${{ steps.commit_fix.outputs.head_sha }}
+          EXPECTED_PR_BODY_SHA256: ${{ steps.render_pr.outputs.pr_body_sha256 }}
         run: |
+          actual_local_body_sha256="$(
+            /usr/bin/sha256sum "$RUNNER_TEMP/upstream-review-pr-body.md" |
+              /usr/bin/cut -d ' ' -f 1
+          )"
+          if [ "$actual_local_body_sha256" != "$EXPECTED_PR_BODY_SHA256" ]; then
+            echo "The deterministic PR body changed before PR creation." >&2
+            exit 1
+          fi
           repo_owner="${GH_REPO%%/*}"
           gh api \
             --method GET \
             "repos/$GH_REPO/pulls" \
-            -f state=all \
+            -f state=open \
             -f head="$repo_owner:$FIX_BRANCH" \
             -f base="$DEFAULT_BRANCH" \
             -f per_page=100 \
@@ -747,7 +765,7 @@ jobs:
             )"
             echo "Reusing the exact draft PR after a prior post-creation failure."
           else
-            echo "More than one pull request uses the automatic fingerprint branch." >&2
+            echo "More than one open pull request uses the automatic remediation branch." >&2
             exit 1
           fi
           if ! [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
@@ -755,6 +773,15 @@ jobs:
             exit 1
           fi
           gh api "repos/$GH_REPO/pulls/$pr_number" > "$RUNNER_TEMP/upstream-review-pr.json"
+          actual_api_body_sha256="$(
+            jq -j '.body // ""' "$RUNNER_TEMP/upstream-review-pr.json" |
+              /usr/bin/sha256sum |
+              /usr/bin/cut -d ' ' -f 1
+          )"
+          if [ "$actual_api_body_sha256" != "$EXPECTED_PR_BODY_SHA256" ]; then
+            echo "The automatic PR body does not match the deterministic rendering." >&2
+            exit 1
+          fi
           if ! jq -e \
             --argjson number "$pr_number" \
             --arg url "$pr_url" \
@@ -1416,6 +1443,9 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
     permissions:
       contents: write
       pull-requests: write
@@ -1430,6 +1460,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
           BASE_SHA: ${{ github.sha }}
+          PR_BODY_SHA256: ${{ needs.open_pr.outputs.pr_body_sha256 }}
           INITIAL_VALIDATE_RESULT: ${{ needs.validate_pr_review.result }}
           INITIAL_SUBMIT_RESULT: ${{ needs.submit_pr_review.result }}
           INITIAL_EVENT: ${{ needs.validate_pr_review.outputs.review_event }}
@@ -1506,7 +1537,8 @@ jobs:
           if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] ||
              ! [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
              ! [[ "$approved_head_sha" =~ ^[a-f0-9]{40}$ ]] ||
-             ! [[ "$FIX_BRANCH" =~ ^codex/upstream-review-[a-f0-9]{16}$ ]]
+             ! [[ "$FIX_BRANCH" =~ ^codex/upstream-review-[a-f0-9]{16}-i[1-9][0-9]*-b[a-f0-9]{12}$ ]] ||
+             ! [[ "$PR_BODY_SHA256" =~ ^[a-f0-9]{64}$ ]]
           then
             echo "Invalid trusted automatic PR identity." >&2
             exit 1
@@ -1550,6 +1582,15 @@ jobs:
 
           pr_path="$RUNNER_TEMP/upstream-review-approved-pr.json"
           gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$pr_path"
+          actual_pr_body_sha256="$(
+            jq -j '.body // ""' "$pr_path" |
+              /usr/bin/sha256sum |
+              /usr/bin/cut -d ' ' -f 1
+          )"
+          if [ "$actual_pr_body_sha256" != "$PR_BODY_SHA256" ]; then
+            echo "The approved automatic PR body no longer matches its trusted rendering." >&2
+            exit 1
+          fi
           if ! jq -e \
             --argjson number "$PR_NUMBER" \
             --arg url "$PR_URL" \
@@ -1607,6 +1648,7 @@ jobs:
           echo "reviewer_login=$reviewer_login" >> "$GITHUB_OUTPUT"
 
       - name: Mark ready and squash-merge the approved head
+        id: merge
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -1618,6 +1660,7 @@ jobs:
           HEAD_SHA: ${{ steps.approved.outputs.head_sha }}
           APPROVED_STAGE: ${{ steps.approved.outputs.approved_stage }}
           REVIEWER_LOGIN: ${{ steps.approved.outputs.reviewer_login }}
+          PR_BODY_SHA256: ${{ needs.open_pr.outputs.pr_body_sha256 }}
         run: |
           verify_default_tip() {
             current_tip="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
@@ -1657,7 +1700,7 @@ jobs:
             pr_path="$1"
             expected_draft="$2"
             gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$pr_path"
-            jq -e \
+            if ! jq -e \
               --argjson number "$PR_NUMBER" \
               --arg url "$PR_URL" \
               --arg repo "$GH_REPO" \
@@ -1681,6 +1724,19 @@ jobs:
                 .head.sha == $head_sha
               ' \
               "$pr_path" >/dev/null
+            then
+              echo "The automatic PR no longer matches its trusted snapshot." >&2
+              exit 1
+            fi
+            actual_pr_body_sha256="$(
+              jq -j '.body // ""' "$pr_path" |
+                /usr/bin/sha256sum |
+                /usr/bin/cut -d ' ' -f 1
+            )"
+            if [ "$actual_pr_body_sha256" != "$PR_BODY_SHA256" ]; then
+              echo "The automatic PR body changed before merge." >&2
+              exit 1
+            fi
           }
 
           verify_default_tip
@@ -1770,6 +1826,8 @@ jobs:
 
           ready_transitioned=false
           trap - EXIT
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
           {
             echo "## Approved PR merged"
             echo
@@ -1778,3 +1836,49 @@ jobs:
             echo "- Reviewed head: \`$HEAD_SHA\`"
             echo "- Squash commit: \`$merge_sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  finalize_remediation_issue:
+    needs:
+      - publish
+      - open_pr
+      - finalize_approved_pr
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.finalize_approved_pr.result == 'success' &&
+      needs.finalize_approved_pr.outputs.merged == 'true' &&
+      needs.finalize_approved_pr.outputs.merge_sha != '' &&
+      needs.publish.outputs.issue_number != '' &&
+      needs.publish.outputs.remediation_cycle != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Finalize the merged remediation Issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REVIEW_ISSUE_NUMBER: ${{ needs.publish.outputs.issue_number }}
+          UPSTREAM_REVIEW_ISSUE_URL: ${{ needs.publish.outputs.issue_url }}
+          UPSTREAM_REVIEW_FINDING_FINGERPRINT: ${{ needs.publish.outputs.finding_fingerprint }}
+          UPSTREAM_REVIEW_REMEDIATION_CYCLE: ${{ needs.publish.outputs.remediation_cycle }}
+          UPSTREAM_REVIEW_PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          UPSTREAM_REVIEW_PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          UPSTREAM_REVIEW_PR_BODY_SHA256: ${{ needs.open_pr.outputs.pr_body_sha256 }}
+          UPSTREAM_REVIEW_MERGE_SHA: ${{ needs.finalize_approved_pr.outputs.merge_sha }}
+          UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED: ${{ needs.open_pr.outputs.all_findings_addressed }}
+        run: node scripts/review-upstream.mjs --finalize-remediation-issue
