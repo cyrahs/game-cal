@@ -3084,3 +3084,33 @@ test("final merge verifies reviewer role and squash configuration with separate 
     ]
   );
 });
+
+test("final remediation Issue job survives intentionally skipped rework branches", async () => {
+  const workflow = await fs.readFile(
+    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    "utf8"
+  );
+  const jobStart = workflow.indexOf("\n  finalize_remediation_issue:\n");
+
+  assert.notEqual(jobStart, -1);
+  const finalizationJob = workflow.slice(jobStart);
+  const conditionStart = finalizationJob.indexOf("    if: >-\n");
+  const conditionEnd = finalizationJob.indexOf(
+    "    runs-on:",
+    conditionStart
+  );
+
+  assert.notEqual(conditionStart, -1);
+  assert.notEqual(conditionEnd, -1);
+  const condition = finalizationJob.slice(conditionStart, conditionEnd);
+
+  assert.match(condition, /^    if: >-\n      always\(\) &&\n/);
+  assert.match(
+    condition,
+    /needs\.finalize_approved_pr\.result == 'success'/
+  );
+  assert.match(
+    condition,
+    /needs\.finalize_approved_pr\.outputs\.merged == 'true'/
+  );
+});
