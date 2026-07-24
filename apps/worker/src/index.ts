@@ -1,5 +1,10 @@
 import { SimpleTtlCache } from "../../api/src/lib/cache.js";
 import type { RuntimeEnv } from "../../api/src/lib/runtimeEnv.js";
+import {
+  classifyZzzSnapshotRelayError,
+  getOfficialZzzSnapshotBundle,
+  ZZZ_SNAPSHOT_CACHE_TTL_MS,
+} from "../../api/src/lib/zzzSnapshot.js";
 import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "../../api/src/games/index.js";
 import type { ApiResponse, CalendarEvent, GameId, GameVersionInfo } from "../../api/src/types.js";
 
@@ -1375,8 +1380,57 @@ function isGameId(x: unknown): x is GameId {
   return typeof x === "string" && GAMES.some((g) => g.id === x);
 }
 
+async function handleZzzSnapshotRelay(): Promise<Response> {
+  try {
+    const snapshot = await getOfficialZzzSnapshotBundle();
+    return json(snapshot, {
+      headers: {
+        "cache-control": `public, max-age=${Math.floor(
+          ZZZ_SNAPSHOT_CACHE_TTL_MS / 1000
+        )}`,
+      },
+    });
+  } catch (error) {
+    const status = classifyZzzSnapshotRelayError(error);
+    console.error("ZZZ snapshot relay fetch failed", {
+      error: error instanceof Error ? error.name : "UnknownError",
+    });
+    return json(
+      {
+        code: status,
+        msg: "ZZZ upstream snapshot unavailable",
+        data: null,
+      } satisfies ApiResponse<null>,
+      {
+        status,
+        headers: { "cache-control": "no-store" },
+      }
+    );
+  }
+}
+
 async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/api/upstream/zzz/snapshot") {
+    if (request.method !== "GET") {
+      return json(
+        { code: 405, msg: "Method not allowed", data: null } satisfies ApiResponse<null>,
+        { status: 405, headers: { allow: "GET" } }
+      );
+    }
+    if (url.search !== "") {
+      return json(
+        {
+          code: 400,
+          msg: "Query parameters are not supported",
+          data: null,
+        } satisfies ApiResponse<null>,
+        { status: 400 }
+      );
+    }
+    return await handleZzzSnapshotRelay();
+  }
 
   if (request.method === "OPTIONS") {
     return corsPreflight(request, env);

@@ -116,6 +116,7 @@ pnpm --filter @game-cal/api start
   - `GENSHIN_CONTENT_API_URL`
   - `STARRAIL_API_URL`
   - `STARRAIL_CONTENT_API_URL`
+  - `ZZZ_SNAPSHOT_API_URL`（可选完整原始快照；设置后优先于下面三条独立地址）
   - `ZZZ_API_URL`
   - `ZZZ_ACTIVITY_API_URL`
   - `ZZZ_CONTENT_API_URL`
@@ -162,6 +163,7 @@ pnpm --filter @game-cal/api start
 - `GET /api/events/:game`（`genshin|starrail|ww|zzz|snowbreak|endfield`）
 - `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/version/:game`（`genshin|starrail|ww|zzz|snowbreak|endfield`；当前原神 / 星铁 / 鸣潮 / 绝区零 / 尘白禁区 / 终末地返回版本数据，其它游戏返回 `null`）
+- `GET /api/upstream/zzz/snapshot`（固定目标的绝区零官方原始快照 relay；Node API 与 Worker 均不接受任意目标 URL，初始巡检用 Node 进程缓存把 raw 证据和 parser 输入绑定到同一快照）
 - `GET /api/sync/:uuid`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 - `PUT /api/sync/:uuid`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
 - `POST /api/sync/:uuid/rotate`（仅 Worker + D1；Node 返回 `501`；需 `x-gc-password`）
@@ -180,9 +182,12 @@ workflow 由相互隔离的发现、确认、修复、复审、终态重放和�
   `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支保护会让新
   commit 上的旧批准失效。
 - `collect` / `review`：采集六个游戏的原始公告和当前 `/api/events/:game` 输出，
-  过滤已过期项及 reviewer-input suppression；随后用六游戏 matrix 在隔离 runner
-  中发起六个只读 Responses agent 会话。每个会话只看到对应游戏的紧凑 shard，
-  单游戏最多返回 8 条候选 finding。
+  过滤已过期项及 reviewer-input suppression；随后按可信采集结果生成 matrix，在
+  隔离 runner 中发起逐游戏只读 Responses agent 会话。正常运行仍为六游戏；若恰好
+  一个游戏的 raw upstream 出现可分类的连接、超时、限流或 5xx 故障，本轮标记为
+  `degraded` 并跳过该游戏，不把网络故障生成 finding。两个游戏不可用、raw 响应
+  结构异常，或 raw 已成功但本地 API 失败时仍 fail closed。每个会话只看到对应游戏
+  的紧凑 shard，单游戏最多返回 8 条候选 finding。
 - `confirmation_plan` / `confirm`：初审 finding 只视为候选。可信脚本为有候选的
   游戏生成 digest-bound 输入；候选在这个可信 plan 阶段再次应用 suppression，再由
   新的只读 Codex 会话独立确认。没有候选的游戏不调用确认模型。只有初审和确认结果
@@ -227,7 +232,12 @@ workflow 由相互隔离的发现、确认、修复、复审、终态重放和�
    mount 复制代码到临时文件系统，以 `pnpm install --frozen-lockfile` 安装依赖并同时
    运行 trusted 与 agent-owned parser 回归测试，随后销毁；第二个全新 runtime 容器
    再以 frozen lockfile 安装依赖、启动 API，并冻结只含本次 finding 目标的 runtime
-   replay。测试和 API 不共享可写工作树。
+   replay。测试和 API 不共享可写工作树。绝区零先由可信 base checkout 上的独立
+   snapshot server 从 Worker 固定白名单 relay 冻结一次完整 raw bundle；host raw
+   collector 和 approved-head runtime 容器只读同一份 canonical bytes。最终比较的
+   仍是 exact approved-head 本地 parser 输出，而不是生产 `/api/events/zzz`。该服务
+   不执行 approved-head 代码，既避免上游在两次请求间切换产生边界假阳性，也防止
+   可修 parser 同时改写原始证据。
 3. `verify_approved_runtime_input` checkout 可信默认分支代码，先把冻结输入与
    base/head/累计 manifest/patch digest 重新绑定，再用只读 Codex verifier 对比
    原始已确认证据和获批 head 的实际 API 输出；它拥有 OpenAI Secret，但不会执行
@@ -261,8 +271,10 @@ dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，�
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
-采集数据、任一 Codex 输出不完整、确认未覆盖全部候选、六个游戏未全部初审或 JSON
-不符合约束时都会 fail closed。
+采集数据、任一 Codex 输出不完整、确认未覆盖全部候选、可用游戏未全部初审、可信
+`collection` 覆盖元数据不完整或 JSON 不符合约束时都会 fail closed。降级运行会把
+未审查游戏明确保存在 artifact 和 job summary 中，且不会为网络故障创建或更新
+Issue。
 
 采集 schema v3 为每条证据同时生成两个引用：
 
@@ -296,7 +308,8 @@ fingerprint 和 coverage digest 全部精确相等时，才会复用原 Issue/cy
 `apps/api/src/games/parser-regressions.agent.test.ts`；只要修改 parser，就必须同步
 增加或更新这个 agent-owned 确定性回归测试。
 `apps/api/src/games/parser-regressions.trusted.test.ts` 是仓库维护的不可变核心测试，
-永远不会进入 agent allowlist。`pnpm test:game-parsers` 会同时运行两者。若 agent
+`apps/api/src/lib/zzzSnapshot.ts` 与 `scripts/serve-zzz-snapshot.mjs` 也是可信边界，
+永远不会进入 agent allowlist。`pnpm test:game-parsers` 会同时运行两类 parser 测试。若 agent
 越过白名单、遗漏所需测试、创建/删除/重命名文件、改变文件模式、只改空白、生成
 二进制、超过 patch 上限或测试失败，补丁都不会进入提 PR 阶段；返工累计 patch 还
 不得丢失前一轮已验证修改。
@@ -314,8 +327,9 @@ base 上已有当前 cycle 的 Open PR 时停止重复创建；默认分支因�
 “新提交使旧批准失效”时，也会在调用模型前失败。不含人工重新运行 job 的单次初始
 运行按实际分支计费：
 
-- 干净运行固定 6 次：只有六游戏初审。
-- 出现候选、但确认后没有可发布 finding 时，为 `6 + 有候选的游戏数`，最多 12 次；
+- 完整干净运行固定 6 次；单游戏网络降级且其余游戏干净时为 5 次。
+- 出现候选、但确认后没有可发布 finding 时，为 `本轮可用游戏数 + 有候选的游戏数`，
+  完整采集时最多 12 次；
   确认按游戏而不是按 finding 调用。
 - 成功到达对应阶段时，初始 fix、初始 PR review 和终态 verifier 各增加 1 次；每次
   实际执行的返工再增加 1 次 rework 和 1 次完整 PR review。无有效 patch、没有获批
@@ -382,7 +396,7 @@ required checks、未解决会话、ruleset 或其他合并限制仍由 GitHub �
 - `UPSTREAM_REVIEW_INPUT_PATH`（采集模式写出的 JSON）
 - `UPSTREAM_REVIEW_GAME`（extract-game 模式提取的游戏 ID）
 - `UPSTREAM_REVIEW_GAME_INPUT_PATH`（可选的单游戏 shard 输出路径；默认原位替换输入）
-- `UPSTREAM_REVIEW_AGENT_OUTPUT_DIR`（finalize 模式读取六份 Codex JSON 的目录）
+- `UPSTREAM_REVIEW_AGENT_OUTPUT_DIR`（finalize 模式读取本轮 review matrix 对应的 Codex JSON 目录）
 - `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（兼容旧版单文件 Codex JSON）
 - `UPSTREAM_REVIEW_REPORT_PATH`（finalize 模式写出的完整 JSON 报告）
 - `UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH` /

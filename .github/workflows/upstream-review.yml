@@ -10,6 +10,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # GitHub-hosted runners cannot consistently reach the mainland ZZZ
+  # announcement CDN. This fixed, read-only Worker route returns one complete
+  # official raw snapshot; it is never used as a parsed /api/events fallback.
+  ZZZ_SNAPSHOT_API_URL: https://gamecal.nv5.me/api/upstream/zzz/snapshot
+
 jobs:
   preflight:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -90,6 +96,11 @@ jobs:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      collection_status: ${{ steps.collect_review.outputs.collection_status }}
+      review_matrix: ${{ steps.collect_review.outputs.review_matrix }}
+      reviewable_game_count: ${{ steps.collect_review.outputs.reviewable_game_count }}
+      unavailable_games: ${{ steps.collect_review.outputs.unavailable_games }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -124,10 +135,31 @@ jobs:
           exit 1
 
       - name: Collect review input
+        id: collect_review
         env:
+          ZZZ_SNAPSHOT_API_URL: http://127.0.0.1:8787/api/upstream/zzz/snapshot
           UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
           UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
         run: pnpm review:upstream:collect
+
+      - name: Summarize collection coverage
+        env:
+          COLLECTION_STATUS: ${{ steps.collect_review.outputs.collection_status }}
+          REVIEW_MATRIX: ${{ steps.collect_review.outputs.review_matrix }}
+          UNAVAILABLE_GAMES: ${{ steps.collect_review.outputs.unavailable_games }}
+        run: |
+          {
+            echo "### Upstream collection"
+            echo
+            echo "- Status: \`$COLLECTION_STATUS\`"
+            echo "- Review matrix: \`$REVIEW_MATRIX\`"
+            if [ "$COLLECTION_STATUS" = "degraded" ]; then
+              echo "- Unavailable games: \`$UNAVAILABLE_GAMES\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$COLLECTION_STATUS" = "degraded" ]; then
+            echo "::warning title=Degraded upstream review::Skipped unavailable game(s): $UNAVAILABLE_GAMES"
+          fi
 
       - name: Upload review input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -154,13 +186,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        game:
-          - genshin
-          - starrail
-          - ww
-          - zzz
-          - snowbreak
-          - endfield
+        game: ${{ fromJSON(needs.collect.outputs.review_matrix) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -1953,6 +1979,41 @@ jobs:
             });
           '
 
+      - name: Start and verify the trusted ZZZ snapshot server
+        id: trusted_snapshot
+        env:
+          ZZZ_SNAPSHOT_SOURCE_URL: ${{ env.ZZZ_SNAPSHOT_API_URL }}
+          ZZZ_SNAPSHOT_SERVER_HOST: 0.0.0.0
+          ZZZ_SNAPSHOT_SERVER_PORT: 8790
+        run: |
+          snapshot_log="$RUNNER_TEMP/trusted-zzz-snapshot.log"
+          snapshot_file="$RUNNER_TEMP/trusted-zzz-snapshot.json"
+          nohup node scripts/serve-zzz-snapshot.mjs > "$snapshot_log" 2>&1 &
+          snapshot_pid="$!"
+          echo "pid=$snapshot_pid" >> "$GITHUB_OUTPUT"
+
+          for i in $(seq 1 45); do
+            if ! kill -0 "$snapshot_pid" 2>/dev/null; then
+              cat "$snapshot_log"
+              echo "The trusted ZZZ snapshot server exited during bootstrap." >&2
+              exit 1
+            fi
+            if \
+              curl --fail --silent --show-error --max-time 2 \
+                http://127.0.0.1:8790/api/health >/dev/null &&
+              curl --fail --silent --show-error --max-time 2 \
+                http://127.0.0.1:8790/api/upstream/zzz/snapshot \
+                --output "$snapshot_file"
+            then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat "$snapshot_log"
+          echo "The trusted ZZZ snapshot server did not become healthy." >&2
+          exit 1
+
       - name: Test the approved head in a disposable locked-down container
         env:
           APPROVED_TEST_CONTAINER: upstream-review-approved-tests
@@ -2003,6 +2064,7 @@ jobs:
             --memory 2g \
             --memory-swap 2g \
             --cpus 2 \
+            --add-host host.docker.internal:host-gateway \
             --tmpfs /work:rw,nosuid,nodev,size=1536m,uid=1000,gid=1000,mode=0700 \
             --tmpfs /tmp:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=1777 \
             --mount "type=bind,src=$APPROVED_WORKSPACE,dst=/approved,readonly" \
@@ -2014,6 +2076,7 @@ jobs:
             --env XDG_DATA_HOME=/work/data \
             --env HOST=0.0.0.0 \
             --env PORT=8787 \
+            --env ZZZ_SNAPSHOT_API_URL=http://host.docker.internal:8790/api/upstream/zzz/snapshot \
             node:25-alpine \
             sh -euc '
               mkdir -p /work/repo "$HOME"
@@ -2052,6 +2115,7 @@ jobs:
           UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
           UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
           UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          ZZZ_SNAPSHOT_API_URL: http://127.0.0.1:8790/api/upstream/zzz/snapshot
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
@@ -2065,12 +2129,36 @@ jobs:
             });
           '
 
-      - name: Stop and remove the approved runtime container
+      - name: Stop the approved runtime and trusted snapshot server
         if: always()
         env:
           APPROVED_RUNTIME_CONTAINER: upstream-review-approved-runtime
+          TRUSTED_SNAPSHOT_PID: ${{ steps.trusted_snapshot.outputs.pid }}
         run: |
           docker rm --force "$APPROVED_RUNTIME_CONTAINER" >/dev/null 2>&1 || true
+
+          is_trusted_snapshot_process() {
+            local pid="$1"
+            [ -n "$pid" ] &&
+              [[ "$pid" =~ ^[1-9][0-9]*$ ]] &&
+              kill -0 "$pid" 2>/dev/null &&
+              [ -r "/proc/$pid/cmdline" ] &&
+              tr '\0' ' ' < "/proc/$pid/cmdline" |
+                grep -Fq "scripts/serve-zzz-snapshot.mjs"
+          }
+
+          if is_trusted_snapshot_process "$TRUSTED_SNAPSHOT_PID"; then
+            kill -TERM "$TRUSTED_SNAPSHOT_PID"
+            for i in $(seq 1 10); do
+              if ! is_trusted_snapshot_process "$TRUSTED_SNAPSHOT_PID"; then
+                break
+              fi
+              sleep 1
+            done
+            if is_trusted_snapshot_process "$TRUSTED_SNAPSHOT_PID"; then
+              kill -KILL "$TRUSTED_SNAPSHOT_PID"
+            fi
+          fi
 
       - name: Upload frozen exact-head remediation input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

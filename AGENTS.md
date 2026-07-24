@@ -50,6 +50,7 @@ Implemented in `apps/api/src/index.ts`:
 - `GET /api/events/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`)
 - `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/version/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`; `genshin`/`starrail`/`ww`/`zzz`/`snowbreak` return non-null data)
+- `GET /api/upstream/zzz/snapshot` (fixed-target relay for one complete official ZZZ raw snapshot; initial collection shares the Node cache, while exact-head verification uses a separate trusted-base snapshot server)
 - `GET /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `PUT /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `POST /api/sync/:uuid/rotate` (always `501` in Node API; supported in Worker + D1 binding)
@@ -71,6 +72,7 @@ Upstream override URLs (optional):
 - `GENSHIN_CONTENT_API_URL`
 - `STARRAIL_API_URL`
 - `STARRAIL_CONTENT_API_URL`
+- `ZZZ_SNAPSHOT_API_URL` (optional complete raw snapshot; takes precedence over the individual ZZZ URLs)
 - `ZZZ_API_URL`
 - `ZZZ_ACTIVITY_API_URL`
 - `ZZZ_CONTENT_API_URL`
@@ -96,6 +98,7 @@ Backend (`apps/api`):
 - Shared utilities:
   - Fetch with timeout + UA: `apps/api/src/lib/fetch.ts`
   - In-memory TTL cache + in-flight dedupe: `apps/api/src/lib/cache.ts`
+  - Trusted ZZZ snapshot schema, sources, and isolated cache: `apps/api/src/lib/zzzSnapshot.ts`
 - Types:
   - `apps/api/src/types.ts`
 
