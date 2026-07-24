@@ -671,7 +671,7 @@ jobs:
         env:
           UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
-          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-recheck/metadata.json
+          UPSTREAM_REVIEW_FIX_METADATA_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-agent.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
           UPSTREAM_REVIEW_PR_BODY_PATH: ${{ runner.temp }}/upstream-review-pr-body.md
@@ -1446,6 +1446,7 @@ jobs:
     outputs:
       merged: ${{ steps.merge.outputs.merged }}
       merge_sha: ${{ steps.merge.outputs.merge_sha }}
+      approved_stage: ${{ steps.approved.outputs.approved_stage }}
     permissions:
       contents: write
       pull-requests: write
@@ -1868,10 +1869,28 @@ jobs:
         with:
           node-version: 25
 
+      - name: Download finalized review
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review
+          path: ${{ runner.temp }}/upstream-review
+
+      - name: Download verified fix artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-fix-verified
+          path: ${{ runner.temp }}/upstream-review-fix-verified
+
       - name: Finalize the merged remediation Issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_REPORT_PATH: ${{ runner.temp }}/upstream-review/upstream-review.json
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-agent.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
           UPSTREAM_REVIEW_ISSUE_NUMBER: ${{ needs.publish.outputs.issue_number }}
           UPSTREAM_REVIEW_ISSUE_URL: ${{ needs.publish.outputs.issue_url }}
           UPSTREAM_REVIEW_FINDING_FINGERPRINT: ${{ needs.publish.outputs.finding_fingerprint }}
@@ -1880,5 +1899,6 @@ jobs:
           UPSTREAM_REVIEW_PR_URL: ${{ needs.open_pr.outputs.pr_url }}
           UPSTREAM_REVIEW_PR_BODY_SHA256: ${{ needs.open_pr.outputs.pr_body_sha256 }}
           UPSTREAM_REVIEW_MERGE_SHA: ${{ needs.finalize_approved_pr.outputs.merge_sha }}
+          UPSTREAM_REVIEW_APPROVED_STAGE: ${{ needs.finalize_approved_pr.outputs.approved_stage }}
           UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED: ${{ needs.open_pr.outputs.all_findings_addressed }}
         run: node scripts/review-upstream.mjs --finalize-remediation-issue
