@@ -3002,6 +3002,141 @@ test("runs trusted and agent-owned parser regression suites", async () => {
   }
 });
 
+test("keeps every Codex output schema strict-compatible", async () => {
+  const schemaDirectory = new URL("../.github/schemas/", import.meta.url);
+  const schemaFiles = (await fs.readdir(schemaDirectory))
+    .filter((name) => name.endsWith(".schema.json"))
+    .sort();
+
+  assert.ok(schemaFiles.length > 0);
+
+  function validateSchemaNode(node, pointer, fileName) {
+    if (Array.isArray(node)) {
+      node.forEach((item, index) =>
+        validateSchemaNode(item, `${pointer}/${index}`, fileName)
+      );
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+
+    const isObjectSchema =
+      node.type === "object" ||
+      Object.prototype.hasOwnProperty.call(node, "properties");
+    if (isObjectSchema) {
+      assert.equal(
+        node.additionalProperties,
+        false,
+        `${fileName}${pointer} must set additionalProperties to false`
+      );
+      const propertyNames = Object.keys(node.properties ?? {}).sort();
+      if (propertyNames.length > 0) {
+        assert.deepEqual(
+          [...(node.required ?? [])].sort(),
+          propertyNames,
+          `${fileName}${pointer} must require every declared property`
+        );
+      }
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      validateSchemaNode(value, `${pointer}/${key}`, fileName);
+    }
+  }
+
+  for (const schemaFile of schemaFiles) {
+    const schema = JSON.parse(
+      await fs.readFile(new URL(schemaFile, schemaDirectory), "utf8")
+    );
+    validateSchemaNode(schema, "", schemaFile);
+  }
+});
+
+test("keeps kind-specific evidence minimums fail-closed after schema output", async () => {
+  const cases = [
+    ({ apiRef }) =>
+      finding("genshin", {
+        kind: "missing_event",
+        raw_refs: [],
+        api_refs: [apiRef],
+      }),
+    ({ rawRef }) =>
+      finding("genshin", {
+        kind: "non_event_included",
+        raw_refs: [rawRef],
+        api_refs: [],
+      }),
+    ({ apiRef }) =>
+      finding("genshin", {
+        kind: "duplicate_event",
+        raw_refs: [],
+        api_refs: [apiRef],
+      }),
+    ({ rawRef }) =>
+      finding("genshin", {
+        kind: "wrong_time_window",
+        raw_refs: [rawRef],
+        api_refs: [],
+      }),
+    () =>
+      finding("genshin", {
+        kind: "other",
+        raw_refs: [],
+        api_refs: [],
+      }),
+  ];
+
+  for (const [index, createInvalidFinding] of cases.entries()) {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "game-cal-upstream-evidence-minimums-")
+    );
+    const inputPath = path.join(tempDir, "input.json");
+    const agentDir = path.join(tempDir, "agent-reviews");
+    const planPath = path.join(tempDir, "confirmation-plan.json");
+    try {
+      const input = collectedInputV3();
+      const dataset = input.review_datasets[games.indexOf("genshin")];
+      const invalidFinding = createInvalidFinding({
+        rawRef: dataset.raw_notices[0].review_ref,
+        apiRef: dataset.api_events[0].review_ref,
+      });
+      await fs.mkdir(agentDir, { recursive: true });
+      await fs.writeFile(inputPath, JSON.stringify(input), "utf8");
+      await Promise.all(
+        games.map((game) =>
+          fs.writeFile(
+            path.join(agentDir, `upstream-review-agent-${game}.json`),
+            JSON.stringify(
+              gameReview(game, {
+                findings: game === "genshin" ? [invalidFinding] : [],
+              })
+            ),
+            "utf8"
+          )
+        )
+      );
+
+      await assert.rejects(
+        () =>
+          prepareFindingConfirmation({
+            inputPath,
+            agentOutputDir: agentDir,
+            planPath,
+            outputDir: tempDir,
+            suppressionsPath: path.join(
+              tempDir,
+              "missing-suppressions.json"
+            ),
+            baseSha: reviewBaseSha,
+          }),
+        /does not cite the required evidence/,
+        `case ${index + 1} must fail before confirmation`
+      );
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("deduplicates semantic findings before fingerprinting and repair", () => {
   const original = finding("starrail");
   const duplicate = {
