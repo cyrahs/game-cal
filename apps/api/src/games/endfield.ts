@@ -212,10 +212,6 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   };
 }
 
-function extractTimeRangeFromHtml(html: string): EndfieldParsedWindow {
-  return parseEndfieldWindowText(stripHtml(html));
-}
-
 function tokenizeHtmlLines(input: string | undefined): string[] {
   return (input ?? "")
     .replace(/<br\s*\/?>/gi, "\n")
@@ -227,6 +223,49 @@ function tokenizeHtmlLines(input: string | undefined): string[] {
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+}
+
+function isEndfieldTimeSectionLabel(line: string): boolean {
+  return (
+    /^(?:▼\/\/|■)\s*(?:活动时间|开放时间|开启时间|开始时间)(?:\s*[:：]\s*.*)?$/.test(
+      line
+    ) ||
+    /^(?:活动时间|开放时间|开启时间|开始时间)(?:\s*[:：]\s*.*)?$/.test(line)
+  );
+}
+
+function isEndfieldTimeSectionBoundary(line: string): boolean {
+  return (
+    /^(?:▼\/\/|■)\s*\S/.test(line) ||
+    /^※\s*(?:例|例如|示例)(?:\s*[:：]|$)/.test(line) ||
+    /^(?:例|例如|示例)\s*[:：]/.test(line) ||
+    /^(?:参与条件|开放条件|活动说明|活动内容|活动奖励|活动规则|注意事项|玩法说明)\s*[:：]?$/.test(
+      line
+    )
+  );
+}
+
+function extractTimeRangeFromHtml(html: string): EndfieldParsedWindow {
+  const lines = tokenizeHtmlLines(html);
+  let foundTimeSection = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isEndfieldTimeSectionLabel(lines[i]!)) continue;
+    foundTimeSection = true;
+
+    const sectionLines = [lines[i]!];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j]!;
+      if (isEndfieldTimeSectionBoundary(line)) break;
+      sectionLines.push(line);
+    }
+
+    const window = parseEndfieldWindowText(sectionLines.join(" "));
+    if (window.start || window.end || window.endText) return window;
+  }
+
+  if (foundTimeSection) return { start: null, end: null };
+  return parseEndfieldWindowText(stripHtml(html));
 }
 
 function parseExplicitDateRanges(input: string): Array<{ start: string; end: string }> {
