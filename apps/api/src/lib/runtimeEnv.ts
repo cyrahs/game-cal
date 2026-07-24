@@ -4,6 +4,9 @@ export interface RuntimeEnv {
   GENSHIN_CONTENT_API_URL?: string;
   STARRAIL_API_URL?: string;
   STARRAIL_CONTENT_API_URL?: string;
+  // Complete ZZZ raw snapshot. When configured, this takes precedence over the
+  // three individual ZZZ endpoint overrides below.
+  ZZZ_SNAPSHOT_API_URL?: string;
   ZZZ_API_URL?: string;
   ZZZ_ACTIVITY_API_URL?: string;
   ZZZ_CONTENT_API_URL?: string;

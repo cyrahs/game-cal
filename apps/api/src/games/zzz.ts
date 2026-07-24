@@ -1,76 +1,21 @@
 import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
+import {
+  getZzzSnapshotBundle,
+  ZZZ_DEFAULT_ACTIVITY_API,
+  ZZZ_DEFAULT_CONTENT_API,
+  ZZZ_DEFAULT_LIST_API,
+  type MihoyoNapActivityListResponse,
+  type MihoyoNapAnnCategory,
+  type MihoyoNapAnnContentItem,
+  type MihoyoNapAnnContentResponse,
+  type MihoyoNapAnnItem,
+  type MihoyoNapAnnListResponse,
+} from "../lib/zzzSnapshot.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
 import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gacha.js";
 
-type MihoyoNapActivity = {
-  activity_id?: string;
-  name?: string;
-  start_time?: string;
-  end_time?: string;
-};
-
-type MihoyoNapActivityListResponse = {
-  retcode: number;
-  message: string;
-  data?: {
-    activity_list?: MihoyoNapActivity[];
-  };
-};
-
-type MihoyoNapAnnItem = {
-  ann_id?: number;
-  title?: string;
-  subtitle?: string;
-  start_time?: string;
-  end_time?: string;
-};
-
-type MihoyoNapAnnCategory = {
-  type_id: number;
-  type_label: string;
-  list: MihoyoNapAnnItem[];
-};
-
-type MihoyoNapAnnListResponse = {
-  retcode: number;
-  message: string;
-  data?: {
-    list?: MihoyoNapAnnCategory[];
-  };
-};
-
-type MihoyoNapAnnContentItem = {
-  ann_id?: number;
-  title?: string;
-  subtitle?: string;
-  banner?: string;
-  img?: string; // pic_list uses img
-  content?: string;
-  lang?: string;
-  remind_text?: string;
-  href?: string;
-  href_type?: number;
-};
-
-type MihoyoNapAnnContentResponse = {
-  retcode: number;
-  message: string;
-  data?: {
-    list?: MihoyoNapAnnContentItem[];
-    pic_list?: MihoyoNapAnnContentItem[];
-  };
-};
-
-const ZZZ_DEFAULT_ACTIVITY_API =
-  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getActivityList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
-
-const ZZZ_DEFAULT_LIST_API =
-  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getAnnList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
-
-const ZZZ_DEFAULT_CONTENT_API =
-  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getAnnContent?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 const ZZZ_SOURCE_TZ_OFFSET = "+08:00";
 const ZZZ_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const ZZZ_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -554,6 +499,11 @@ function buildVersionMaintenanceEndByLabel(
 }
 
 async function fetchZzzAnnouncementCategories(env: RuntimeEnv): Promise<MihoyoNapAnnCategory[]> {
+  if (env.ZZZ_SNAPSHOT_API_URL?.trim()) {
+    const snapshot = await getZzzSnapshotBundle(env);
+    return snapshot.list.data!.list!;
+  }
+
   const listApiUrl = env.ZZZ_API_URL ?? ZZZ_DEFAULT_LIST_API;
   const listRes = await fetchJson<MihoyoNapAnnListResponse>(listApiUrl, {
     timeoutMs: 12_000,
@@ -562,22 +512,31 @@ async function fetchZzzAnnouncementCategories(env: RuntimeEnv): Promise<MihoyoNa
 }
 
 export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
-  const activityApiUrl =
-    env.ZZZ_ACTIVITY_API_URL ?? ZZZ_DEFAULT_ACTIVITY_API;
-  const contentApiUrl = env.ZZZ_CONTENT_API_URL ?? ZZZ_DEFAULT_CONTENT_API;
-  const listApiUrl = env.ZZZ_API_URL ?? ZZZ_DEFAULT_LIST_API;
-
-  const [activityRes, contentRes, listRes] = await Promise.all([
-    fetchJson<MihoyoNapActivityListResponse>(activityApiUrl, {
-      timeoutMs: 12_000,
-    }),
-    fetchJson<MihoyoNapAnnContentResponse>(contentApiUrl, {
-      timeoutMs: 12_000,
-    }).catch(() => null),
-    fetchJson<MihoyoNapAnnListResponse>(listApiUrl, {
-      timeoutMs: 12_000,
-    }).catch(() => null),
-  ]);
+  const snapshot = env.ZZZ_SNAPSHOT_API_URL?.trim()
+    ? await getZzzSnapshotBundle(env)
+    : null;
+  const [activityRes, contentRes, listRes] = snapshot
+    ? [snapshot.activity, snapshot.content, snapshot.list]
+    : await Promise.all([
+        fetchJson<MihoyoNapActivityListResponse>(
+          env.ZZZ_ACTIVITY_API_URL ?? ZZZ_DEFAULT_ACTIVITY_API,
+          {
+            timeoutMs: 12_000,
+          }
+        ),
+        fetchJson<MihoyoNapAnnContentResponse>(
+          env.ZZZ_CONTENT_API_URL ?? ZZZ_DEFAULT_CONTENT_API,
+          {
+            timeoutMs: 12_000,
+          }
+        ).catch(() => null),
+        fetchJson<MihoyoNapAnnListResponse>(
+          env.ZZZ_API_URL ?? ZZZ_DEFAULT_LIST_API,
+          {
+            timeoutMs: 12_000,
+          }
+        ).catch(() => null),
+      ]);
 
   const categories = listRes?.data?.list ?? [];
   const noticeCategory =

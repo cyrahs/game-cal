@@ -7,6 +7,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SimpleTtlCache } from "./lib/cache.js";
 import type { RuntimeEnv } from "./lib/runtimeEnv.js";
+import {
+  classifyZzzSnapshotRelayError,
+  getZzzSnapshotBundle,
+  ZZZ_SNAPSHOT_CACHE_TTL_MS,
+  type ZzzSnapshotBundle,
+} from "./lib/zzzSnapshot.js";
 import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "./games/index.js";
 import type { ApiResponse, GameId } from "./types.js";
 
@@ -47,6 +53,56 @@ server.get("/api/health", async () => ({ ok: true }));
 server.get("/api/games", async (): Promise<ApiResponse<typeof GAMES>> => {
   return { code: 200, data: GAMES };
 });
+
+server.all<{
+  Querystring: Record<string, unknown>;
+}>(
+  "/api/upstream/zzz/snapshot",
+  { config: { cors: false } },
+  async (req, reply): Promise<ZzzSnapshotBundle | ApiResponse<null>> => {
+    if (req.method !== "GET") {
+      reply.code(405);
+      reply.header("Allow", "GET");
+      reply.header("Cache-Control", "no-store");
+      return { code: 405, msg: "Method not allowed", data: null };
+    }
+    if (Object.keys(req.query).length > 0) {
+      reply.code(400);
+      reply.header("Cache-Control", "no-store");
+      return {
+        code: 400,
+        msg: "Query parameters are not supported",
+        data: null,
+      };
+    }
+
+    try {
+      const snapshot = await getZzzSnapshotBundle(
+        process.env as unknown as RuntimeEnv
+      );
+      reply.header(
+        "Cache-Control",
+        `public, max-age=${Math.floor(ZZZ_SNAPSHOT_CACHE_TTL_MS / 1000)}`
+      );
+      return snapshot;
+    } catch (error) {
+      const status = classifyZzzSnapshotRelayError(error);
+      req.log.error(
+        {
+          error_name: error instanceof Error ? error.name : "UnknownError",
+        },
+        "ZZZ snapshot relay fetch failed"
+      );
+      reply.code(status);
+      reply.header("Cache-Control", "no-store");
+      return {
+        code: status,
+        msg: "ZZZ upstream snapshot unavailable",
+        data: null,
+      };
+    }
+  }
+);
 
 server.get<{ Params: { uuid: string } }>("/api/sync/:uuid", async (_req, reply): Promise<ApiResponse<null>> => {
   return syncUnavailable(reply);

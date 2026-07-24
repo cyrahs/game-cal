@@ -22,13 +22,13 @@ const WW_NOTICE_API =
   "https://aki-gm-resources-back.aki-game.com/gamenotice/G152/76402e5b20be2c39f095a152090afddc/zh-Hans.json";
 
 const ZZZ_ACTIVITY_API =
-  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getActivityList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getActivityList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 
 const ZZZ_LIST_API =
-  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getAnnList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getAnnList?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 
 const ZZZ_CONTENT_API =
-  "https://announcement-api.mihoyo.com/common/nap_cn/announcement/api/getAnnContent?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
+  "https://announcement-static.mihoyo.com/common/nap_cn/announcement/api/getAnnContent?uid=11111111&game=nap&game_biz=nap_cn&lang=zh-cn&bundle_id=nap_cn&channel_id=1&level=60&platform=pc&region=prod_gf_cn";
 
 const SNOWBREAK_ANNOUNCE_API =
   "https://cbjq-content.xoyocdn.com/ob202307/webfile/mainland/announce/config/pc_jinshan-pc_jinshan.json";
@@ -63,6 +63,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const CHINA_TZ_OFFSET = "+08:00";
 const RETRY_COUNT = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
+const COLLECTION_POLICY_VERSION = 1;
+const COLLECTION_REASON_CODES = new Set([
+  "transport",
+  "http_429",
+  "http_5xx",
+]);
 const MAX_AGENT_FINDINGS = 50;
 const MAX_AGENT_FINDINGS_PER_GAME = 8;
 const MAX_AGENT_ERROR_LENGTH = 1_000;
@@ -147,6 +153,14 @@ function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+class UpstreamRequestError extends Error {
+  constructor(message, reasonCode, options = {}) {
+    super(message, options);
+    this.name = "UpstreamRequestError";
+    this.reason_code = reasonCode;
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -160,7 +174,8 @@ async function withRetry(label, fn, retryCount = RETRY_COUNT) {
     } catch (error) {
       if (attempt === totalAttempts) {
         throw new Error(
-          `${label} failed after ${totalAttempts} attempt(s): ${getErrorMessage(error)}`
+          `${label} failed after ${totalAttempts} attempt(s): ${getErrorMessage(error)}`,
+          { cause: error }
         );
       }
 
@@ -173,6 +188,25 @@ async function withRetry(label, fn, retryCount = RETRY_COUNT) {
   }
 
   throw new Error(`${label} failed unexpectedly`);
+}
+
+function classifyRawCollectionFailure(error) {
+  const seen = new Set();
+  let current = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (
+      current instanceof UpstreamRequestError &&
+      COLLECTION_REASON_CODES.has(current.reason_code)
+    ) {
+      return current.reason_code;
+    }
+    current =
+      typeof current === "object" && current !== null
+        ? current.cause
+        : undefined;
+  }
+  return null;
 }
 
 function isRecord(value) {
@@ -311,14 +345,38 @@ function extractTimeCandidates(input) {
 }
 
 async function request(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const res = await fetch(url, {
-    ...init,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  let displayUrl;
+  try {
+    const parsedUrl = new URL(url);
+    displayUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
+  } catch {
+    displayUrl = "(invalid URL)";
+  }
+  let res;
+  try {
+    res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new UpstreamRequestError(
+      `Request transport failed for ${displayUrl}`,
+      "transport",
+      { cause: error }
+    );
+  }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Request failed: ${res.status} ${res.statusText} for ${url}\n${text}`.trim());
+    const reasonCode =
+      res.status === 429
+        ? "http_429"
+        : res.status >= 500 && res.status <= 599
+          ? "http_5xx"
+          : "http_other";
+    throw new UpstreamRequestError(
+      `Request failed: ${res.status} ${res.statusText} for ${displayUrl}`.trim(),
+      reasonCode
+    );
   }
 
   return res;
@@ -574,16 +632,36 @@ async function fetchWwRawNotices() {
   return [...byKey.values()];
 }
 
-async function fetchZzzRawNotices() {
-  const activityUrl = process.env.ZZZ_ACTIVITY_API_URL?.trim() || ZZZ_ACTIVITY_API;
-  const listUrl = process.env.ZZZ_API_URL?.trim() || ZZZ_LIST_API;
-  const contentUrl = process.env.ZZZ_CONTENT_API_URL?.trim() || ZZZ_CONTENT_API;
-  const [activityJson, listJson, contentJson] = await Promise.all([
-    requestJson(activityUrl),
-    requestJson(listUrl).catch(() => null),
-    requestJson(contentUrl).catch(() => null),
-  ]);
+function validateZzzRawPayloads(activityJson, listJson, contentJson) {
+  if (
+    !isRecord(activityJson) ||
+    activityJson.retcode !== 0 ||
+    !isRecord(activityJson.data) ||
+    !Array.isArray(activityJson.data.activity_list)
+  ) {
+    throw new Error("Invalid ZZZ activity payload");
+  }
+  if (
+    !isRecord(listJson) ||
+    listJson.retcode !== 0 ||
+    !isRecord(listJson.data) ||
+    !Array.isArray(listJson.data.list)
+  ) {
+    throw new Error("Invalid ZZZ announcement list payload");
+  }
+  if (
+    !isRecord(contentJson) ||
+    contentJson.retcode !== 0 ||
+    !isRecord(contentJson.data) ||
+    !Array.isArray(contentJson.data.list) ||
+    !Array.isArray(contentJson.data.pic_list)
+  ) {
+    throw new Error("Invalid ZZZ announcement content payload");
+  }
+}
 
+function parseZzzRawNotices(activityJson, listJson, contentJson) {
+  validateZzzRawPayloads(activityJson, listJson, contentJson);
   const out = [];
   for (const item of ensureArray(activityJson?.data?.activity_list)) {
     const title = normalizeWhitespace(item?.name ?? "");
@@ -639,6 +717,40 @@ async function fetchZzzRawNotices() {
   addContentItems("ann_content_pic_list", contentJson?.data?.pic_list);
 
   return out;
+}
+
+async function fetchZzzRawNotices() {
+  const snapshotUrl = process.env.ZZZ_SNAPSHOT_API_URL?.trim() || "";
+  let activityJson;
+  let listJson;
+  let contentJson;
+  if (snapshotUrl) {
+    const bundle = await requestJson(snapshotUrl);
+    assertExactObjectFields(
+      bundle,
+      ["schema_version", "game", "activity", "list", "content"],
+      "ZZZ snapshot bundle"
+    );
+    if (bundle.schema_version !== 1 || bundle.game !== "zzz") {
+      throw new Error("Invalid ZZZ snapshot bundle identity");
+    }
+    activityJson = bundle.activity;
+    listJson = bundle.list;
+    contentJson = bundle.content;
+  } else {
+    const activityUrl =
+      process.env.ZZZ_ACTIVITY_API_URL?.trim() || ZZZ_ACTIVITY_API;
+    const listUrl =
+      process.env.ZZZ_API_URL?.trim() || ZZZ_LIST_API;
+    const contentUrl =
+      process.env.ZZZ_CONTENT_API_URL?.trim() || ZZZ_CONTENT_API;
+    [activityJson, listJson, contentJson] = await Promise.all([
+      requestJson(activityUrl),
+      requestJson(listUrl),
+      requestJson(contentUrl),
+    ]);
+  }
+  return parseZzzRawNotices(activityJson, listJson, contentJson);
 }
 
 async function fetchSnowbreakRawNotices() {
@@ -1236,6 +1348,104 @@ function parseAgentReview(
   };
 }
 
+function validateCollectionMetadata(collection, label = "collection") {
+  assertExactObjectFields(
+    collection,
+    [
+      "policy_version",
+      "status",
+      "available_games",
+      "unavailable_games",
+    ],
+    label
+  );
+  if (collection.policy_version !== COLLECTION_POLICY_VERSION) {
+    throw new Error(`${label}.policy_version is unsupported`);
+  }
+  if (!["complete", "degraded"].includes(collection.status)) {
+    throw new Error(`${label}.status is invalid`);
+  }
+  if (
+    !Array.isArray(collection.available_games) ||
+    collection.available_games.some(
+      (game) => typeof game !== "string" || !SUPPORTED_GAMES.has(game)
+    ) ||
+    new Set(collection.available_games).size !==
+      collection.available_games.length
+  ) {
+    throw new Error(`${label}.available_games is invalid`);
+  }
+  if (!Array.isArray(collection.unavailable_games)) {
+    throw new Error(`${label}.unavailable_games is invalid`);
+  }
+  const unavailableGames = collection.unavailable_games.map(
+    (entry, index) => {
+      assertExactObjectFields(
+        entry,
+        ["game", "reason_code"],
+        `${label}.unavailable_games[${index}]`
+      );
+      if (
+        !SUPPORTED_GAMES.has(entry.game) ||
+        !COLLECTION_REASON_CODES.has(entry.reason_code)
+      ) {
+        throw new Error(
+          `${label}.unavailable_games[${index}] is invalid`
+        );
+      }
+      return entry.game;
+    }
+  );
+  if (new Set(unavailableGames).size !== unavailableGames.length) {
+    throw new Error(`${label}.unavailable_games contains duplicates`);
+  }
+
+  const expectedAvailableGames = DEFAULT_GAMES.filter(
+    (game) => !unavailableGames.includes(game)
+  );
+  const expectedUnavailableGames = DEFAULT_GAMES.filter((game) =>
+    unavailableGames.includes(game)
+  );
+  if (
+    !isDeepStrictEqual(
+      collection.available_games,
+      expectedAvailableGames
+    ) ||
+    !isDeepStrictEqual(unavailableGames, expectedUnavailableGames)
+  ) {
+    throw new Error(
+      `${label} must partition the configured games in canonical order`
+    );
+  }
+  if (
+    (collection.status === "complete" &&
+      (unavailableGames.length !== 0 ||
+        collection.available_games.length !== DEFAULT_GAMES.length)) ||
+    (collection.status === "degraded" &&
+      (unavailableGames.length !== 1 ||
+        collection.available_games.length !== DEFAULT_GAMES.length - 1))
+  ) {
+    throw new Error(
+      `${label}.status does not match its available game partition`
+    );
+  }
+  return collection;
+}
+
+function getReviewableGamesForSchema(input, label) {
+  if (input.schema_version !== 3) return [...DEFAULT_GAMES];
+  return [
+    ...validateCollectionMetadata(input.collection, `${label}.collection`)
+      .available_games,
+  ];
+}
+
+function assertCanonicalGameCoverage(actualGames, expectedGames, label) {
+  if (!isDeepStrictEqual(actualGames, expectedGames)) {
+    throw new Error(`${label} must cover the available games exactly`);
+  }
+}
+
 function validateCollectedDataset(
   dataset,
   index,
@@ -1330,6 +1540,10 @@ function validateCollectedReviewInput(input) {
   if (!Array.isArray(input.datasets) || !Array.isArray(input.review_datasets)) {
     throw new Error("Invalid collected review input: missing datasets");
   }
+  const expectedGames = getReviewableGamesForSchema(
+    input,
+    "collected review input"
+  );
 
   const snapshotGames = input.datasets.map((dataset, index) =>
     validateCollectedDataset(dataset, index, "datasets", input.max_items, {
@@ -1345,21 +1559,22 @@ function validateCollectedReviewInput(input) {
   if (new Set(games).size !== games.length) {
     throw new Error("Invalid collected review input: duplicate game datasets");
   }
-  const expectedGames = [...DEFAULT_GAMES].sort();
   if (
-    games.length !== DEFAULT_GAMES.length ||
-    games.slice().sort().some((game, index) => game !== expectedGames[index])
+    input.schema_version === 2 &&
+    !isDeepStrictEqual(games, expectedGames)
   ) {
     throw new Error("Invalid collected review input: expected all six game datasets");
   }
-
-  if (
-    snapshotGames.length !== DEFAULT_GAMES.length ||
-    new Set(snapshotGames).size !== DEFAULT_GAMES.length ||
-    snapshotGames.slice().sort().some((game, index) => game !== expectedGames[index])
-  ) {
-    throw new Error("Invalid collected review input: snapshots must cover all six games");
-  }
+  assertCanonicalGameCoverage(
+    games,
+    expectedGames,
+    "Invalid collected review input: review_datasets"
+  );
+  assertCanonicalGameCoverage(
+    snapshotGames,
+    expectedGames,
+    "Invalid collected review input: datasets"
+  );
 
   if (
     !isRecord(input.suppressions) ||
@@ -1394,6 +1609,8 @@ function validateCollectedReviewInput(input) {
       const snapshot = snapshotsByGame.get(exclusion.game);
       const reviewDataset = reviewDatasetsByGame.get(exclusion.game);
       if (
+        !snapshot ||
+        !reviewDataset ||
         snapshot.raw_notice_count - reviewDataset.raw_notice_count !==
           exclusion.raw_notices ||
         snapshot.api_event_count - reviewDataset.api_event_count !== exclusion.api_events
@@ -1405,15 +1622,11 @@ function validateCollectedReviewInput(input) {
       return exclusion.game;
     }
   );
-  if (
-    exclusionGames.length !== DEFAULT_GAMES.length ||
-    new Set(exclusionGames).size !== DEFAULT_GAMES.length ||
-    exclusionGames.slice().sort().some((game, index) => game !== expectedGames[index])
-  ) {
-    throw new Error(
-      "Invalid collected review input: exclusion metadata must cover all six games"
-    );
-  }
+  assertCanonicalGameCoverage(
+    exclusionGames,
+    expectedGames,
+    "Invalid collected review input: exclusion metadata"
+  );
 
   return input;
 }
@@ -1450,15 +1663,21 @@ function validateAgenticReviewReport(report) {
   }
 
   const requireEvidenceRefs = report.schema_version === 3;
+  const expectedGames = getReviewableGamesForSchema(
+    report,
+    "agentic review report"
+  );
   const normalizedFindings = report.review.findings.map((finding, index) =>
     validateAgentFinding(finding, index, { requireEvidenceRefs })
   );
+  const snapshotDatasets = report.datasets;
   const reviewDatasets = report.review_datasets;
-  if (!Array.isArray(reviewDatasets)) {
-    throw new Error("Invalid agentic review report: missing review_datasets");
+  if (!Array.isArray(snapshotDatasets) || !Array.isArray(reviewDatasets)) {
+    throw new Error("Invalid agentic review report: missing datasets");
   }
 
-  const datasetGames = reviewDatasets.map((dataset, index) => {
+  const validateReportDatasets = (datasets, label) =>
+    datasets.map((dataset, index) => {
     if (
       !isRecord(dataset) ||
       !SUPPORTED_GAMES.has(dataset.game) ||
@@ -1469,22 +1688,34 @@ function validateAgenticReviewReport(report) {
       dataset.api_events.some((item) => !isRecord(item))
     ) {
       throw new Error(
-        `Invalid agentic review report: review_datasets[${index}] is invalid`
+          `Invalid agentic review report: ${label}[${index}] is invalid`
       );
     }
     return dataset.game;
-  });
-
-  if (
-    datasetGames.length !== DEFAULT_GAMES.length ||
-    new Set(datasetGames).size !== DEFAULT_GAMES.length ||
-    datasetGames
-      .slice()
-      .sort()
-      .some((game, index) => game !== [...DEFAULT_GAMES].sort()[index])
-  ) {
-    throw new Error(
-      "Invalid agentic review report: review_datasets must cover all six games"
+    });
+  const snapshotDatasetGames = validateReportDatasets(
+    snapshotDatasets,
+    "datasets"
+  );
+  const datasetGames = validateReportDatasets(
+    reviewDatasets,
+    "review_datasets"
+  );
+  assertCanonicalGameCoverage(
+    snapshotDatasetGames,
+    expectedGames,
+    "Invalid agentic review report: datasets"
+  );
+  assertCanonicalGameCoverage(
+    datasetGames,
+    expectedGames,
+    "Invalid agentic review report: review_datasets"
+  );
+  if (Array.isArray(report.review.game_reviews)) {
+    assertCanonicalGameCoverage(
+      report.review.game_reviews.map((entry) => entry?.game),
+      expectedGames,
+      "Invalid agentic review report: review.game_reviews"
     );
   }
 
@@ -2879,6 +3110,13 @@ function renderIssueTitle(report, findingFingerprint) {
 }
 
 function renderIssueBody(report, options = {}) {
+  const collection =
+    report.schema_version === 3
+      ? validateCollectionMetadata(
+          report.collection,
+          "agentic review report.collection"
+        )
+      : null;
   const findingFingerprint = String(options.findingFingerprint ?? "").trim();
   const remediationCycle = String(options.remediationCycle ?? "").trim();
   const coverageFingerprint = String(
@@ -2925,6 +3163,17 @@ function renderIssueBody(report, options = {}) {
       : []),
     `API base: \`${escapeIssueCode(report.api_base_url)}\``,
     `Model: \`${escapeIssueCode(report.review.model)}\``,
+    ...(collection?.status === "degraded"
+      ? [
+          `Review coverage: ${collection.available_games.length}/${DEFAULT_GAMES.length} games (degraded)`,
+          `Unavailable: ${collection.unavailable_games
+            .map(
+              ({ game, reason_code: reasonCode }) =>
+                `${escapeIssueText(GAME_LABELS[game] ?? game)} (\`${game}\`, \`${reasonCode}\`)`
+            )
+            .join(", ")}`,
+        ]
+      : []),
     ...(marker
       ? [
           `Cycle fingerprint: \`${findingFingerprint}\``,
@@ -7386,9 +7635,18 @@ async function readAgentGameReviews(
   legacyAgentOutputPath,
   options = {}
 ) {
+  const expectedGames = options.expectedGames ?? DEFAULT_GAMES;
+  if (
+    !Array.isArray(expectedGames) ||
+    expectedGames.length === 0 ||
+    new Set(expectedGames).size !== expectedGames.length ||
+    expectedGames.some((game) => !SUPPORTED_GAMES.has(game))
+  ) {
+    throw new Error("Invalid expected agent review games");
+  }
   if (agentOutputDir) {
     return await Promise.all(
-      DEFAULT_GAMES.map(async (game) => {
+      expectedGames.map(async (game) => {
         const outputPath = path.join(
           path.resolve(agentOutputDir),
           `upstream-review-agent-${game}.json`
@@ -7414,11 +7672,11 @@ async function readAgentGameReviews(
   );
   const review = parseAgentReview(
     outputText,
-    DEFAULT_GAMES,
+    expectedGames,
     MAX_AGENT_FINDINGS,
     options
   );
-  return DEFAULT_GAMES.map((game) => ({
+  return expectedGames.map((game) => ({
     game,
     summary: review.summary,
     findings: review.findings.filter((finding) => finding.game === game),
@@ -7432,6 +7690,15 @@ function buildReviewDraft(
   suppressionsPath,
   baseSha
 ) {
+  const availableGames = getReviewableGamesForSchema(
+    input,
+    "collected review input"
+  );
+  assertCanonicalGameCoverage(
+    agentGameReviews.map((review) => review.game),
+    availableGames,
+    "Agent game reviews"
+  );
   const agentFindings = agentGameReviews.flatMap((review) => review.findings);
   if (agentFindings.length > MAX_AGENT_FINDINGS) {
     throw new Error(
@@ -7476,6 +7743,7 @@ function buildReviewDraft(
     finalized_at: "",
     base_sha: baseSha,
     api_base_url: input.api_base_url,
+    collection: input.collection,
     datasets: input.datasets,
     review_datasets: input.review_datasets,
     suppressions: {
@@ -7548,7 +7816,11 @@ function buildFindingConfirmationCandidates(draftReport) {
 }
 
 function buildFindingConfirmationGamePlans(candidates, draftReport) {
-  return DEFAULT_GAMES.filter((game) =>
+  const availableGames = getReviewableGamesForSchema(
+    draftReport,
+    "agentic review report"
+  );
+  return availableGames.filter((game) =>
     candidates.some((candidate) => candidate.finding.game === game)
   ).map((game) => {
     const gameCandidates = candidates.filter(
@@ -7708,7 +7980,10 @@ async function prepareFindingConfirmation(options = {}) {
   const agentGameReviews = await readAgentGameReviews(
     agentOutputDir,
     agentOutputPath,
-    { requireEvidenceRefs: true }
+    {
+      requireEvidenceRefs: true,
+      expectedGames: input.collection.available_games,
+    }
   );
   const suppressionsPath =
     options.suppressionsPath ??
@@ -8785,6 +9060,178 @@ async function finalizeAgenticReview() {
   }
 }
 
+async function collectUpstreamReview(options = {}) {
+  const apiBaseUrl = trimTrailingSlash(
+    String(
+      options.apiBaseUrl ??
+        process.env.UPSTREAM_REVIEW_API_BASE_URL ??
+        DEFAULT_API_BASE_URL
+    ).trim() || DEFAULT_API_BASE_URL
+  );
+  const suppressionsPath =
+    String(
+      options.suppressionsPath ??
+        process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH ??
+        DEFAULT_SUPPRESSIONS_PATH
+    ).trim() || DEFAULT_SUPPRESSIONS_PATH;
+  const maxItems =
+    options.maxItems ??
+    parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
+  const generatedAt = options.generatedAt ?? new Date().toISOString();
+  const retryCount = options.retryCount ?? RETRY_COUNT;
+  if (!Number.isInteger(maxItems) || maxItems <= 0) {
+    throw new Error("Invalid collection max_items");
+  }
+  if (!Number.isFinite(Date.parse(generatedAt))) {
+    throw new Error("Invalid collection generated_at");
+  }
+  if (!Number.isInteger(retryCount) || retryCount < 0) {
+    throw new Error("Invalid collection retry count");
+  }
+
+  const loadCollectionSuppressions =
+    options.loadSuppressions ?? loadSuppressions;
+  const collectRawNotices =
+    options.fetchRawNotices ?? fetchRawNotices;
+  const collectApiEvents =
+    options.fetchApiEvents ?? fetchApiEvents;
+  const suppressions =
+    options.suppressions ??
+    (await loadCollectionSuppressions(suppressionsPath));
+  if (!Array.isArray(suppressions)) {
+    throw new Error("Invalid collection suppressions");
+  }
+
+  const settledResults = await Promise.allSettled(
+    DEFAULT_GAMES.map(async (game) => {
+      let rawNotices;
+      try {
+        rawNotices = await withRetry(
+          `raw upstream collection for ${game}`,
+          () => collectRawNotices(game),
+          retryCount
+        );
+      } catch (error) {
+        const reasonCode = classifyRawCollectionFailure(error);
+        if (!reasonCode) throw error;
+        return {
+          game,
+          unavailable: {
+            game,
+            reason_code: reasonCode,
+          },
+        };
+      }
+
+      const apiEvents = await withRetry(
+        `local API collection for ${game}`,
+        () => collectApiEvents(apiBaseUrl, game),
+        retryCount
+      );
+      return { game, rawNotices, apiEvents };
+    })
+  );
+  const failedResult = settledResults.find(
+    (result) => result.status === "rejected"
+  );
+  if (failedResult) throw failedResult.reason;
+  const results = settledResults.map((result) => result.value);
+
+  const unavailableGames = results
+    .filter((result) => result.unavailable)
+    .map((result) => result.unavailable);
+  if (unavailableGames.length > 1) {
+    throw new Error(
+      "Initial collection cannot degrade more than one raw upstream game"
+    );
+  }
+  const availableResults = results.filter(
+    (result) => !result.unavailable
+  );
+  const availableGames = availableResults.map((result) => result.game);
+  const collection = {
+    policy_version: COLLECTION_POLICY_VERSION,
+    status: unavailableGames.length === 0 ? "complete" : "degraded",
+    available_games: availableGames,
+    unavailable_games: unavailableGames,
+  };
+  validateCollectionMetadata(collection);
+
+  const datasets = availableResults.map(
+    ({ game, rawNotices, apiEvents }) =>
+      buildGameDataset(game, rawNotices, apiEvents, maxItems)
+  );
+  const reviewInputs = availableResults.map(
+    ({ game, rawNotices, apiEvents }) => {
+      const reviewRawNotices = filterRawNoticesForReviewer(
+        game,
+        rawNotices,
+        suppressions
+      );
+      const reviewApiEvents = filterApiEventsForReviewer(
+        game,
+        apiEvents,
+        suppressions,
+        generatedAt
+      );
+      return {
+        game,
+        rawNotices: reviewRawNotices,
+        apiEvents: reviewApiEvents,
+        excluded_raw_notice_count:
+          rawNotices.length - reviewRawNotices.length,
+        excluded_api_event_count:
+          apiEvents.length - reviewApiEvents.length,
+      };
+    }
+  );
+  const reviewDatasets = reviewInputs.map(
+    ({ game, rawNotices, apiEvents }) =>
+      buildGameDataset(game, rawNotices, apiEvents, maxItems)
+  );
+
+  const collectedReport = {
+    schema_version: 3,
+    mode: "collect_only",
+    generated_at: generatedAt,
+    api_base_url: apiBaseUrl,
+    max_items: maxItems,
+    collection,
+    datasets,
+    review_datasets: reviewDatasets,
+    suppressions: {
+      path: suppressionsPath,
+      count: suppressions.length,
+      review_input_exclusions: reviewInputs.map((input) => ({
+        game: input.game,
+        raw_notices: input.excluded_raw_notice_count,
+        api_events: input.excluded_api_event_count,
+      })),
+    },
+  };
+  validateCollectedReviewInput(collectedReport);
+
+  const inputPath =
+    options.inputPath ??
+    (process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim() ||
+      process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() ||
+      "");
+  await writeReport(collectedReport, inputPath);
+  await appendGitHubOutputs(
+    {
+      collection_status: collection.status,
+      review_matrix: JSON.stringify(availableGames),
+      reviewable_game_count: availableGames.length,
+      unavailable_games: JSON.stringify(
+        unavailableGames.map((entry) => entry.game)
+      ),
+    },
+    options.githubOutputPath
+  );
+  console.log(JSON.stringify(collectedReport, null, 2));
+  return collectedReport;
+}
+
 async function main() {
   const collectOnly =
     process.argv.includes("--collect-only") ||
@@ -8967,70 +9414,7 @@ async function main() {
     return;
   }
 
-  const apiBaseUrl = trimTrailingSlash(
-    process.env.UPSTREAM_REVIEW_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL
-  );
-  const suppressionsPath =
-    process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() || DEFAULT_SUPPRESSIONS_PATH;
-  const games = [...DEFAULT_GAMES];
-  const maxItems = parseMaxItems(process.env.UPSTREAM_REVIEW_MAX_ITEMS, 60);
-  const generatedAt = new Date().toISOString();
-  const suppressions = await loadSuppressions(suppressionsPath);
-
-  const collectedDatasets = await Promise.all(
-    games.map((game) =>
-      withRetry(`dataset collection for ${game}`, async () => {
-        const [rawNotices, apiEvents] = await Promise.all([
-          fetchRawNotices(game),
-          fetchApiEvents(apiBaseUrl, game),
-        ]);
-        return { game, rawNotices, apiEvents };
-      })
-    )
-  );
-
-  const datasets = collectedDatasets.map(({ game, rawNotices, apiEvents }) =>
-    buildGameDataset(game, rawNotices, apiEvents, maxItems)
-  );
-  const reviewInputs = collectedDatasets.map(({ game, rawNotices, apiEvents }) => {
-    const reviewRawNotices = filterRawNoticesForReviewer(game, rawNotices, suppressions);
-    const reviewApiEvents = filterApiEventsForReviewer(game, apiEvents, suppressions, generatedAt);
-    return {
-      game,
-      rawNotices: reviewRawNotices,
-      apiEvents: reviewApiEvents,
-      excluded_raw_notice_count: rawNotices.length - reviewRawNotices.length,
-      excluded_api_event_count: apiEvents.length - reviewApiEvents.length,
-    };
-  });
-  const reviewDatasets = reviewInputs.map(({ game, rawNotices, apiEvents }) =>
-    buildGameDataset(game, rawNotices, apiEvents, maxItems)
-  );
-
-  const collectedReport = {
-    schema_version: 3,
-    mode: "collect_only",
-    generated_at: generatedAt,
-    api_base_url: apiBaseUrl,
-    max_items: maxItems,
-    datasets,
-    review_datasets: reviewDatasets,
-    suppressions: {
-      path: suppressionsPath,
-      count: suppressions.length,
-      review_input_exclusions: reviewInputs.map((input) => ({
-        game: input.game,
-        raw_notices: input.excluded_raw_notice_count,
-        api_events: input.excluded_api_event_count,
-      })),
-    },
-  };
-  const inputPath =
-    process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim() ||
-    process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() ||
-    "";
-  await writeReport(collectedReport, inputPath);
-  console.log(JSON.stringify(collectedReport, null, 2));
+  await collectUpstreamReview();
 }
 
 const isMainModule =
@@ -9045,11 +9429,14 @@ if (isMainModule) {
 }
 
 export {
+  UpstreamRequestError,
   buildAgenticFixInput,
   buildAgenticPrReviewInput,
   buildAgenticPrReworkInput,
   buildGameDataset,
   buildRemediationVerificationInput,
+  classifyRawCollectionFailure,
+  collectUpstreamReview,
   extractGameReviewInput,
   finalizeAgenticFix,
   finalizeAgenticPrReview,
@@ -9058,6 +9445,7 @@ export {
   finalizeFindingConfirmation,
   finalizeRemediationIssue,
   finalizeRemediationVerification,
+  fetchZzzRawNotices,
   getFixBranch,
   getFindingFingerprint,
   getFindingKey,

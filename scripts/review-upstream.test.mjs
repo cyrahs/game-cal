@@ -8,12 +8,15 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
+  UpstreamRequestError,
   buildAgenticFixInput,
   buildAgenticPrReviewInput,
   buildAgenticPrReworkInput,
   buildGameDataset,
   buildRemediationVerificationInput,
+  collectUpstreamReview,
   extractGameReviewInput,
+  fetchZzzRawNotices,
   finalizeFindingConfirmation,
   finalizeRemediationIssue,
   finalizeAgenticFix,
@@ -51,6 +54,11 @@ import {
   verifyAgenticFixArtifactAtHead,
   verifyAgenticPrReworkArtifact,
 } from "./review-upstream.mjs";
+import {
+  canonicalZzzSnapshotBytes,
+  validateSnapshotSourceUrl,
+  validateZzzSnapshotBundle,
+} from "./serve-zzz-snapshot.mjs";
 
 const execFileAsync = promisify(execFile);
 const games = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
@@ -452,8 +460,157 @@ function collectedInputV3() {
   return {
     ...input,
     schema_version: 3,
+    collection: {
+      policy_version: 1,
+      status: "complete",
+      available_games: [...games],
+      unavailable_games: [],
+    },
     datasets: games.map(buildDataset),
     review_datasets: games.map(buildDataset),
+  };
+}
+
+function degradedCollectedInputV3(
+  unavailableGame = "zzz",
+  reasonCode = "transport"
+) {
+  const input = collectedInputV3();
+  const availableGames = games.filter((game) => game !== unavailableGame);
+  return {
+    ...input,
+    collection: {
+      policy_version: 1,
+      status: "degraded",
+      available_games: availableGames,
+      unavailable_games: [
+        {
+          game: unavailableGame,
+          reason_code: reasonCode,
+        },
+      ],
+    },
+    datasets: input.datasets.filter(
+      (dataset) => dataset.game !== unavailableGame
+    ),
+    review_datasets: input.review_datasets.filter(
+      (dataset) => dataset.game !== unavailableGame
+    ),
+    suppressions: {
+      ...input.suppressions,
+      review_input_exclusions:
+        input.suppressions.review_input_exclusions.filter(
+          (entry) => entry.game !== unavailableGame
+        ),
+    },
+  };
+}
+
+function zzzRawPayloads() {
+  return {
+    activity: {
+      retcode: 0,
+      data: {
+        activity_list: [
+          {
+            activity_id: 101,
+            name: "ZZZ Activity",
+            start_time: 1_774_560_000,
+            end_time: 1_775_078_400,
+          },
+        ],
+      },
+    },
+    list: {
+      retcode: 0,
+      data: {
+        list: [
+          {
+            type_id: 1,
+            type_label: "活动",
+            list: [
+              {
+                ann_id: 202,
+                title: "ZZZ Announcement",
+                subtitle: "",
+                start_time: "2026-03-25 10:00:00",
+                end_time: "2026-03-31 10:00:00",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    content: {
+      retcode: 0,
+      data: {
+        list: [
+          {
+            ann_id: 202,
+            title: "ZZZ Announcement",
+            subtitle: "",
+            content: "<p>2026/03/25 10:00</p>",
+          },
+        ],
+        pic_list: [],
+      },
+    },
+  };
+}
+
+function trustedZzzSnapshotBundle() {
+  return {
+    schema_version: 1,
+    game: "zzz",
+    activity: {
+      retcode: 0,
+      message: "OK",
+      data: {
+        activity_list: [
+          {
+            activity_id: "101",
+            name: "ZZZ Activity",
+            start_time: "2026-03-25 10:00:00",
+            end_time: "2026-03-31 10:00:00",
+          },
+        ],
+      },
+    },
+    list: {
+      retcode: 0,
+      message: "OK",
+      data: {
+        list: [
+          {
+            type_id: 1,
+            type_label: "活动",
+            list: [
+              {
+                ann_id: 202,
+                title: "ZZZ Announcement",
+                subtitle: "",
+                start_time: "2026-03-25 10:00:00",
+                end_time: "2026-03-31 10:00:00",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    content: {
+      retcode: 0,
+      message: "OK",
+      data: {
+        list: [
+          {
+            ann_id: 202,
+            title: "ZZZ Announcement",
+            content: "<p>2026/03/25 10:00</p>",
+          },
+        ],
+        pic_list: [],
+      },
+    },
   };
 }
 
@@ -845,11 +1002,20 @@ function agenticReviewReportV3(game = "starrail") {
     finalized_at: "2026-07-23T12:05:00.000Z",
     base_sha: reviewBaseSha,
     api_base_url: input.api_base_url,
+    collection: input.collection,
     datasets: input.datasets,
     review_datasets: input.review_datasets,
     review: {
       model: "Codex via Responses API",
       summary: `${reportFindings.length} finding(s) detected.`,
+      game_reviews: games.map((targetGame) => ({
+        game: targetGame,
+        model: "Codex via Responses API",
+        raw_summary: `Reviewed ${targetGame}.`,
+        raw_finding_count: reportFindings.filter(
+          (finding) => finding.game === targetGame
+        ).length,
+      })),
       findings: reportFindings,
     },
     issue: {
@@ -1248,6 +1414,396 @@ test("rejects a hollow collector dataset", () => {
   );
 });
 
+test("accepts one unavailable raw upstream and binds every collection array to the dynamic matrix", () => {
+  const input = degradedCollectedInputV3("zzz", "transport");
+  const validated = validateCollectedReviewInput(input);
+  const expectedGames = games.filter((game) => game !== "zzz");
+  assert.equal(validated.collection.status, "degraded");
+  assert.deepEqual(validated.collection.available_games, expectedGames);
+  assert.deepEqual(
+    validated.datasets.map((entry) => entry.game),
+    expectedGames
+  );
+  assert.deepEqual(
+    validated.review_datasets.map((entry) => entry.game),
+    expectedGames
+  );
+  assert.deepEqual(
+    validated.suppressions.review_input_exclusions.map(
+      (entry) => entry.game
+    ),
+    expectedGames
+  );
+});
+
+test("rejects untrusted or inconsistent degraded collection metadata", () => {
+  const leakedError = degradedCollectedInputV3();
+  leakedError.collection.unavailable_games[0].error =
+    "connect timeout at https://example.test/?token=secret";
+  assert.throws(
+    () => validateCollectedReviewInput(leakedError),
+    /unexpected or missing fields/
+  );
+
+  const unknownReason = degradedCollectedInputV3();
+  unknownReason.collection.unavailable_games[0].reason_code =
+    "parser_error";
+  assert.throws(
+    () => validateCollectedReviewInput(unknownReason),
+    /unavailable_games\[0\] is invalid/
+  );
+
+  const includedUnavailable = degradedCollectedInputV3();
+  includedUnavailable.datasets.push(
+    collectedInputV3().datasets.find((entry) => entry.game === "zzz")
+  );
+  assert.throws(
+    () => validateCollectedReviewInput(includedUnavailable),
+    /datasets must cover the available games exactly/
+  );
+
+  const twoUnavailable = degradedCollectedInputV3();
+  twoUnavailable.collection.available_games = games.slice(0, -2);
+  twoUnavailable.collection.unavailable_games = [
+    { game: "snowbreak", reason_code: "http_429" },
+    { game: "endfield", reason_code: "http_5xx" },
+  ];
+  twoUnavailable.datasets = twoUnavailable.datasets.slice(0, -1);
+  twoUnavailable.review_datasets =
+    twoUnavailable.review_datasets.slice(0, -1);
+  twoUnavailable.suppressions.review_input_exclusions =
+    twoUnavailable.suppressions.review_input_exclusions.slice(0, -1);
+  assert.throws(
+    () => validateCollectedReviewInput(twoUnavailable),
+    /status does not match/
+  );
+});
+
+test("initial collection degrades one classified raw failure and emits a five-game matrix", async () => {
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-upstream-degraded-")
+  );
+  const inputPath = path.join(tempDir, "input.json");
+  const outputPath = path.join(tempDir, "github-output");
+  const apiCalls = [];
+  const previousLog = console.log;
+  try {
+    console.log = () => {};
+    const report = await collectUpstreamReview({
+      apiBaseUrl: "http://127.0.0.1:8787",
+      generatedAt: "2026-07-23T12:00:00.000Z",
+      maxItems: 60,
+      retryCount: 0,
+      suppressions: [],
+      inputPath,
+      githubOutputPath: outputPath,
+      fetchRawNotices: async (game) => {
+        if (game === "zzz") {
+          throw new UpstreamRequestError(
+            "secret transport detail",
+            "transport"
+          );
+        }
+        return [{ ann_id: 1, title: `${game} raw` }];
+      },
+      fetchApiEvents: async (_apiBaseUrl, game) => {
+        apiCalls.push(game);
+        return [{ title: `${game} API` }];
+      },
+    });
+    assert.equal(report.collection.status, "degraded");
+    assert.deepEqual(report.collection.unavailable_games, [
+      { game: "zzz", reason_code: "transport" },
+    ]);
+    assert.deepEqual(
+      report.datasets.map((entry) => entry.game),
+      games.filter((game) => game !== "zzz")
+    );
+    assert.equal(apiCalls.includes("zzz"), false);
+    const artifactText = await fs.readFile(inputPath, "utf8");
+    assert.doesNotMatch(artifactText, /secret transport detail/);
+    const outputs = await fs.readFile(outputPath, "utf8");
+    assert.match(outputs, /^collection_status=degraded$/m);
+    assert.match(
+      outputs,
+      new RegExp(
+        `^review_matrix=${JSON.stringify(
+          games.filter((game) => game !== "zzz")
+        ).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        "m"
+      )
+    );
+    assert.match(outputs, /^reviewable_game_count=5$/m);
+    assert.match(outputs, /^unavailable_games=\["zzz"\]$/m);
+  } finally {
+    console.log = previousLog;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("initial collection fails closed for API errors, unclassified raw errors, or two raw outages", async () => {
+  const rawOk = async (game) => [
+    { ann_id: 1, title: `${game} raw` },
+  ];
+  const baseOptions = {
+    generatedAt: "2026-07-23T12:00:00.000Z",
+    retryCount: 0,
+    suppressions: [],
+  };
+
+  await assert.rejects(
+    collectUpstreamReview({
+      ...baseOptions,
+      fetchRawNotices: rawOk,
+      fetchApiEvents: async (_base, game) => {
+        if (game === "zzz") {
+          throw new UpstreamRequestError("API down", "http_5xx");
+        }
+        return [];
+      },
+    }),
+    /local API collection for zzz failed/
+  );
+  await assert.rejects(
+    collectUpstreamReview({
+      ...baseOptions,
+      fetchRawNotices: async (game) => {
+        if (game === "zzz") throw new Error("invalid JSON shape");
+        return rawOk(game);
+      },
+      fetchApiEvents: async () => [],
+    }),
+    /raw upstream collection for zzz failed/
+  );
+  await assert.rejects(
+    collectUpstreamReview({
+      ...baseOptions,
+      fetchRawNotices: async (game) => {
+        if (["zzz", "ww"].includes(game)) {
+          throw new UpstreamRequestError("raw down", "http_429");
+        }
+        return rawOk(game);
+      },
+      fetchApiEvents: async () => [],
+    }),
+    /cannot degrade more than one/
+  );
+});
+
+test("does not extract or read an unavailable game from a degraded collector artifact", async () => {
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-upstream-unavailable-shard-")
+  );
+  const inputPath = path.join(tempDir, "input.json");
+  try {
+    await fs.writeFile(
+      inputPath,
+      JSON.stringify(degradedCollectedInputV3()),
+      "utf8"
+    );
+    await assert.rejects(
+      extractGameReviewInput("zzz", {
+        inputPath,
+        outputPath: path.join(tempDir, "zzz.json"),
+      }),
+      /missing zzz/
+    );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("validates and canonicalizes the trusted ZZZ snapshot without mutation", () => {
+  const snapshot = trustedZzzSnapshotBundle();
+  const original = structuredClone(snapshot);
+
+  assert.strictEqual(validateZzzSnapshotBundle(snapshot), snapshot);
+  assert.deepEqual(snapshot, original);
+
+  const reordered = {
+    content: snapshot.content,
+    list: snapshot.list,
+    activity: snapshot.activity,
+    game: snapshot.game,
+    schema_version: snapshot.schema_version,
+  };
+  assert.deepEqual(
+    canonicalZzzSnapshotBytes(reordered),
+    canonicalZzzSnapshotBytes(snapshot)
+  );
+});
+
+test("rejects incomplete or unsuccessful trusted ZZZ snapshot bundles", () => {
+  const extraRootField = {
+    ...trustedZzzSnapshotBundle(),
+    source_url: "https://snapshot.example.test/?token=secret",
+  };
+  assert.throws(
+    () => validateZzzSnapshotBundle(extraRootField),
+    /root fields must exactly match/
+  );
+
+  const unsuccessful = trustedZzzSnapshotBundle();
+  unsuccessful.content.retcode = -1;
+  assert.throws(
+    () => validateZzzSnapshotBundle(unsuccessful),
+    /content\.retcode must be 0/
+  );
+
+  const incomplete = trustedZzzSnapshotBundle();
+  delete incomplete.activity.data.activity_list;
+  assert.throws(
+    () => validateZzzSnapshotBundle(incomplete),
+    /activity\.data\.activity_list must be an array/
+  );
+});
+
+test("validates trusted snapshot source URLs without exposing query values", () => {
+  const source = validateSnapshotSourceUrl(
+    "https://snapshot.example.test/fixed/path?token=super-secret"
+  );
+  assert.equal(source.protocol, "https:");
+  assert.equal(source.pathname, "/fixed/path");
+  assert.equal(source.searchParams.get("token"), "super-secret");
+  for (const invalid of [
+    "file:///tmp/snapshot.json",
+    "https://user:password@snapshot.example.test/bundle",
+    "https://snapshot.example.test/bundle#fragment",
+    "not a URL",
+  ]) {
+    assert.throws(() => validateSnapshotSourceUrl(invalid));
+  }
+});
+
+test("uses one strict ZZZ snapshot request without falling back to individual endpoints", async () => {
+  const payloads = zzzRawPayloads();
+  const previousFetch = globalThis.fetch;
+  const previousSnapshotUrl = process.env.ZZZ_SNAPSHOT_API_URL;
+  const calls = [];
+  try {
+    process.env.ZZZ_SNAPSHOT_API_URL =
+      "https://snapshot.example.test/zzz?token=hidden";
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return new Response(
+        JSON.stringify({
+          schema_version: 1,
+          game: "zzz",
+          ...payloads,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    };
+    const notices = await fetchZzzRawNotices();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], process.env.ZZZ_SNAPSHOT_API_URL);
+    assert.deepEqual(
+      new Set(notices.map((notice) => notice.source)),
+      new Set(["activity_list", "ann_list", "ann_content_list"])
+    );
+
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return new Response(
+        JSON.stringify({
+          schema_version: 1,
+          game: "zzz",
+          ...payloads,
+          content: { retcode: -1, data: { list: [], pic_list: [] } },
+        }),
+        { status: 200 }
+      );
+    };
+    await assert.rejects(fetchZzzRawNotices(), /Invalid ZZZ.*content payload/);
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousSnapshotUrl == null) {
+      delete process.env.ZZZ_SNAPSHOT_API_URL;
+    } else {
+      process.env.ZZZ_SNAPSHOT_API_URL = previousSnapshotUrl;
+    }
+  }
+});
+
+test("uses all three announcement-static ZZZ endpoints by default", async () => {
+  const payloads = zzzRawPayloads();
+  const previousFetch = globalThis.fetch;
+  const previousEnv = Object.fromEntries(
+    [
+      "ZZZ_SNAPSHOT_API_URL",
+      "ZZZ_ACTIVITY_API_URL",
+      "ZZZ_API_URL",
+      "ZZZ_CONTENT_API_URL",
+    ].map((key) => [key, process.env[key]])
+  );
+  const calls = [];
+  try {
+    for (const key of Object.keys(previousEnv)) delete process.env[key];
+    globalThis.fetch = async (url) => {
+      const parsed = new URL(url);
+      calls.push(parsed);
+      const body = parsed.pathname.endsWith("/getActivityList")
+        ? payloads.activity
+        : parsed.pathname.endsWith("/getAnnList")
+          ? payloads.list
+          : payloads.content;
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    await fetchZzzRawNotices();
+    assert.equal(calls.length, 3);
+    assert.deepEqual(
+      calls.map((url) => url.origin),
+      Array(3).fill("https://announcement-static.mihoyo.com")
+    );
+    assert.deepEqual(
+      calls.map((url) => path.basename(url.pathname)).sort(),
+      ["getActivityList", "getAnnContent", "getAnnList"].sort()
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("redacts override query strings from request failures", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousSnapshotUrl = process.env.ZZZ_SNAPSHOT_API_URL;
+  try {
+    process.env.ZZZ_SNAPSHOT_API_URL =
+      "https://snapshot.example.test/private/bundle?token=super-secret";
+    globalThis.fetch = async () =>
+      new Response("upstream failure", {
+        status: 503,
+        statusText: "Unavailable",
+      });
+    await assert.rejects(
+      fetchZzzRawNotices(),
+      (error) => {
+        assert.match(
+          error.message,
+          /https:\/\/snapshot\.example\.test\/private\/bundle/
+        );
+        assert.doesNotMatch(error.message, /token|super-secret|\?/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousSnapshotUrl == null) {
+      delete process.env.ZZZ_SNAPSHOT_API_URL;
+    } else {
+      process.env.ZZZ_SNAPSHOT_API_URL = previousSnapshotUrl;
+    }
+  }
+});
+
 test("accepts a complete structured Codex result", () => {
   const result = parseAgentReview(
     JSON.stringify({
@@ -1571,6 +2127,72 @@ test("rejects a confirmation candidate that cites a fabricated evidence ref", ()
     () => validateFindingConfirmationInput(rehashed),
     /evidence mismatch/
   );
+});
+
+test("reads review and confirmation inputs only for available games", async () => {
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-upstream-dynamic-review-")
+  );
+  const inputPath = path.join(tempDir, "input.json");
+  const agentDir = path.join(tempDir, "agents");
+  const confirmationDir = path.join(tempDir, "confirmation");
+  const planPath = path.join(confirmationDir, "plan.json");
+  const input = degradedCollectedInputV3("zzz", "http_5xx");
+  const evidence = input.review_datasets[0].raw_notices[0];
+  const previousLog = console.log;
+  try {
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.writeFile(inputPath, JSON.stringify(input), "utf8");
+    await Promise.all(
+      input.collection.available_games.map((game) =>
+        fs.writeFile(
+          path.join(agentDir, `upstream-review-agent-${game}.json`),
+          JSON.stringify(
+            gameReview(game, {
+              findings:
+                game === "genshin"
+                  ? [
+                      finding(game, {
+                        raw_refs: [evidence.review_ref],
+                        api_refs: [],
+                      }),
+                    ]
+                  : [],
+            })
+          ),
+          "utf8"
+        )
+      )
+    );
+    console.log = () => {};
+    const plan = await prepareFindingConfirmation({
+      inputPath,
+      agentOutputDir: agentDir,
+      planPath,
+      outputDir: confirmationDir,
+      suppressionsPath: path.join(tempDir, "missing.json"),
+      baseSha: reviewBaseSha,
+    });
+    assert.deepEqual(
+      plan.draft_report.review.game_reviews.map((entry) => entry.game),
+      input.collection.available_games
+    );
+    assert.deepEqual(
+      plan.draft_report.collection,
+      input.collection
+    );
+    assert.equal(
+      await fs
+        .access(path.join(agentDir, "upstream-review-agent-zzz.json"))
+        .then(() => true, () => false),
+      false
+    );
+    assert.deepEqual(plan.games.map((entry) => entry.game), ["genshin"]);
+    assert.equal(validateFindingConfirmationPlan(plan), plan);
+  } finally {
+    console.log = previousLog;
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("binds confirmation plan candidates and game metadata to the draft report", async () => {
@@ -2225,12 +2847,16 @@ test("keeps trusted parser regressions outside fix and rework allowlists", () =>
     "apps/api/src/games/parser-regressions.agent.test.ts";
   const trustedTestFile =
     "apps/api/src/games/parser-regressions.trusted.test.ts";
+  const trustedSnapshotLibrary = "apps/api/src/lib/zzzSnapshot.ts";
+  const trustedSnapshotServer = "scripts/serve-zzz-snapshot.mjs";
   const parserFile = "apps/api/src/games/starrail.ts";
   const fixInput = buildAgenticFixInput(agenticReviewReportV3());
 
   assert.deepEqual(fixInput.allowed_files, [parserFile, agentTestFile]);
   assert.deepEqual(fixInput.required_test_files, [agentTestFile]);
   assert.equal(fixInput.allowed_files.includes(trustedTestFile), false);
+  assert.equal(fixInput.allowed_files.includes(trustedSnapshotLibrary), false);
+  assert.equal(fixInput.allowed_files.includes(trustedSnapshotServer), false);
   assert.throws(
     () =>
       parseAgentFixOutput(
@@ -2262,6 +2888,15 @@ test("keeps trusted parser regressions outside fix and rework allowlists", () =>
         ...validReworkContext,
         allowed_files: [parserFile, trustedTestFile],
         changed_files: [trustedTestFile, parserFile],
+      }),
+    /allowed_files/
+  );
+  assert.throws(
+    () =>
+      buildAgenticPrReworkInput({
+        ...validReworkContext,
+        allowed_files: [parserFile, trustedSnapshotLibrary],
+        changed_files: [trustedSnapshotLibrary, parserFile],
       }),
     /allowed_files/
   );
@@ -4371,6 +5006,51 @@ test("does not query or mutate GitHub when a review has no findings", async () =
   assert.equal(requestCount, 0);
 });
 
+test("renders degraded coverage without turning collection failure into a finding", async () => {
+  const report = agenticReviewReportV3("starrail");
+  report.collection = {
+    policy_version: 1,
+    status: "degraded",
+    available_games: games.filter((game) => game !== "zzz"),
+    unavailable_games: [
+      { game: "zzz", reason_code: "transport" },
+    ],
+  };
+  report.datasets = report.datasets.filter(
+    (dataset) => dataset.game !== "zzz"
+  );
+  report.review_datasets = report.review_datasets.filter(
+    (dataset) => dataset.game !== "zzz"
+  );
+  report.review.game_reviews = report.review.game_reviews.filter(
+    (review) => review.game !== "zzz"
+  );
+  const fingerprintBefore = getFindingFingerprint(report.review.findings);
+  const body = renderIssueBody(report);
+  assert.match(body, /Review coverage: 5\/6 games \(degraded\)/);
+  assert.match(body, /Unavailable: 绝区零 \(`zzz`, `transport`\)/);
+  assert.equal(
+    getFindingFingerprint(report.review.findings),
+    fingerprintBefore
+  );
+
+  report.review.findings = [];
+  let requestCount = 0;
+  const result = await syncIssue(report, {
+    dryRun: false,
+    request: async () => {
+      requestCount += 1;
+      throw new Error("must not request GitHub");
+    },
+  });
+  assert.equal(result.action, "noop");
+  assert.equal(requestCount, 0);
+  assert.equal(
+    result.finding_fingerprint,
+    getFindingFingerprint([])
+  );
+});
+
 test("closes an exact all-addressed remediation Issue after its PR merges", async () => {
   const fixture = remediationFinalizationFixture();
 
@@ -4986,6 +5666,90 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
   }
 });
 
+test("workflow consumes the trusted dynamic matrix while terminal collection remains fail-closed", async () => {
+  const workflow = await fs.readFile(
+    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    "utf8"
+  );
+  const collectStart = workflow.indexOf("\n  collect:\n");
+  const reviewStart = workflow.indexOf("\n  review:\n", collectStart);
+  const confirmationStart = workflow.indexOf(
+    "\n  confirmation_plan:\n",
+    reviewStart
+  );
+  const collectJob = workflow.slice(collectStart, reviewStart);
+  const reviewJob = workflow.slice(reviewStart, confirmationStart);
+  assert.match(collectJob, /id: collect_review/);
+  assert.match(
+    workflow,
+    /^env:\n(?:  .*\n)*  ZZZ_SNAPSHOT_API_URL: https:\/\/gamecal\.nv5\.me\/api\/upstream\/zzz\/snapshot$/m
+  );
+  const startApiStepStart = collectJob.indexOf(
+    "      - name: Start local API"
+  );
+  const collectReviewStepStart = collectJob.indexOf(
+    "      - name: Collect review input"
+  );
+  const summarizeCoverageStepStart = collectJob.indexOf(
+    "      - name: Summarize collection coverage"
+  );
+  assert.notEqual(startApiStepStart, -1);
+  assert.notEqual(collectReviewStepStart, -1);
+  assert.notEqual(summarizeCoverageStepStart, -1);
+  const startApiStep = collectJob.slice(
+    startApiStepStart,
+    collectReviewStepStart
+  );
+  const collectReviewStep = collectJob.slice(
+    collectReviewStepStart,
+    summarizeCoverageStepStart
+  );
+  assert.doesNotMatch(startApiStep, /ZZZ_SNAPSHOT_API_URL:/);
+  assert.match(
+    collectReviewStep,
+    /ZZZ_SNAPSHOT_API_URL: http:\/\/127\.0\.0\.1:8787\/api\/upstream\/zzz\/snapshot/
+  );
+  for (const output of [
+    "collection_status",
+    "review_matrix",
+    "reviewable_game_count",
+    "unavailable_games",
+  ]) {
+    assert.match(
+      collectJob,
+      new RegExp(`${output}: \\$\\{\\{ steps\\.collect_review\\.outputs\\.${output} \\}\\}`)
+    );
+  }
+  assert.match(
+    reviewJob,
+    /game: \$\{\{ fromJSON\(needs\.collect\.outputs\.review_matrix\) \}\}/
+  );
+  assert.doesNotMatch(reviewJob, /game:\s*\n\s*-\s*genshin/);
+
+  const script = await fs.readFile(
+    new URL("./review-upstream.mjs", import.meta.url),
+    "utf8"
+  );
+  const terminalStart = script.indexOf(
+    "async function prepareRemediationVerification("
+  );
+  const terminalEnd = script.indexOf(
+    "\nasync function validateRemediationVerificationArtifactInput(",
+    terminalStart
+  );
+  const terminalCollector = script.slice(terminalStart, terminalEnd);
+  assert.match(
+    terminalCollector,
+    /const currentDatasets = await Promise\.all\(/
+  );
+  assert.match(terminalCollector, /fetchRawNotices\(game\)/);
+  assert.match(terminalCollector, /fetchApiEvents\(apiBaseUrl, game\)/);
+  assert.doesNotMatch(
+    terminalCollector,
+    /allSettled|classifyRawCollectionFailure|unavailable|degraded/
+  );
+});
+
 test("final merge isolates approved-head runtime and commits merge outputs before finalization", async () => {
   const workflow = await fs.readFile(
     new URL("../.github/workflows/upstream-review.yml", import.meta.url),
@@ -5092,6 +5856,9 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   const testContainerStart = collectJob.indexOf(
     "      - name: Test the approved head in a disposable locked-down container"
   );
+  const trustedSnapshotStart = collectJob.indexOf(
+    "      - name: Start and verify the trusted ZZZ snapshot server"
+  );
   const runtimeContainerStart = collectJob.indexOf(
     "      - name: Start the approved API from a fresh locked-down container"
   );
@@ -5099,8 +5866,14 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
     "      - name: Wait for approved API health"
   );
   assert.notEqual(testContainerStart, -1);
+  assert.notEqual(trustedSnapshotStart, -1);
   assert.notEqual(runtimeContainerStart, -1);
   assert.notEqual(healthStepStart, -1);
+  assert.ok(trustedSnapshotStart < testContainerStart);
+  const trustedSnapshotStep = collectJob.slice(
+    trustedSnapshotStart,
+    testContainerStart
+  );
   const testContainerStep = collectJob.slice(
     testContainerStart,
     runtimeContainerStart
@@ -5108,6 +5881,44 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   const runtimeContainerStep = collectJob.slice(
     runtimeContainerStart,
     healthStepStart
+  );
+  const freezeReplayStart = collectJob.indexOf(
+    "      - name: Freeze target-only remediation replay",
+    healthStepStart
+  );
+  const stopRuntimeStart = collectJob.indexOf(
+    "      - name: Stop the approved runtime and trusted snapshot server",
+    freezeReplayStart
+  );
+  assert.notEqual(freezeReplayStart, -1);
+  assert.notEqual(stopRuntimeStart, -1);
+  const freezeReplayStep = collectJob.slice(
+    freezeReplayStart,
+    stopRuntimeStart
+  );
+  assert.match(
+    trustedSnapshotStep,
+    /ZZZ_SNAPSHOT_SOURCE_URL: \$\{\{ env\.ZZZ_SNAPSHOT_API_URL \}\}/
+  );
+  assert.match(
+    trustedSnapshotStep,
+    /ZZZ_SNAPSHOT_SERVER_HOST: 0\.0\.0\.0[\s\S]*?ZZZ_SNAPSHOT_SERVER_PORT: 8790/
+  );
+  assert.match(
+    trustedSnapshotStep,
+    /nohup node scripts\/serve-zzz-snapshot\.mjs/
+  );
+  assert.match(
+    trustedSnapshotStep,
+    /http:\/\/127\.0\.0\.1:8790\/api\/health/
+  );
+  assert.match(
+    trustedSnapshotStep,
+    /http:\/\/127\.0\.0\.1:8790\/api\/upstream\/zzz\/snapshot/
+  );
+  assert.doesNotMatch(
+    trustedSnapshotStep,
+    /approved-head\/scripts\/serve-zzz-snapshot|\$APPROVED_WORKSPACE\/scripts\/serve-zzz-snapshot|\/approved\/scripts\/serve-zzz-snapshot/
   );
   assert.match(testContainerStep, /docker run \\\n            --rm/);
   assert.match(
@@ -5124,6 +5935,26 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
     /exec \/work\/pnpm\/bin\/pnpm --filter @game-cal\/api exec tsx src\/index\.ts/
   );
   assert.doesNotMatch(runtimeContainerStep, /test:game-parsers/);
+  assert.match(
+    runtimeContainerStep,
+    /--add-host host\.docker\.internal:host-gateway/
+  );
+  assert.match(
+    runtimeContainerStep,
+    /--env ZZZ_SNAPSHOT_API_URL=http:\/\/host\.docker\.internal:8790\/api\/upstream\/zzz\/snapshot/
+  );
+  assert.doesNotMatch(
+    runtimeContainerStep,
+    /^\s+--env ZZZ_SNAPSHOT_API_URL \\$/m
+  );
+  assert.match(
+    freezeReplayStep,
+    /ZZZ_SNAPSHOT_API_URL: http:\/\/127\.0\.0\.1:8790\/api\/upstream\/zzz\/snapshot/
+  );
+  assert.doesNotMatch(
+    freezeReplayStep,
+    /ZZZ_SNAPSHOT_API_URL: http:\/\/127\.0\.0\.1:8787/
+  );
   assert.equal(testContainerStep.match(/^\s+--mount /gm)?.length, 1);
   assert.equal(runtimeContainerStep.match(/^\s+--mount /gm)?.length, 1);
   assert.match(
@@ -5136,7 +5967,11 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   );
   assert.match(
     collectJob,
-    /- name: Stop and remove the approved runtime container\n        if: always\(\)[\s\S]*?docker rm --force/
+    /- name: Stop the approved runtime and trusted snapshot server\n        if: always\(\)[\s\S]*?docker rm --force/
+  );
+  assert.match(
+    collectJob,
+    /kill -0 "\$pid"[\s\S]*?\/proc\/\$pid\/cmdline[\s\S]*?scripts\/serve-zzz-snapshot\.mjs[\s\S]*?kill -TERM "\$TRUSTED_SNAPSHOT_PID"/
   );
   assert.doesNotMatch(
     collectJob,
