@@ -3007,6 +3007,19 @@ test("keeps every Codex output schema strict-compatible", async () => {
   const schemaFiles = (await fs.readdir(schemaDirectory))
     .filter((name) => name.endsWith(".schema.json"))
     .sort();
+  const unsupportedKeywords = new Set([
+    "allOf",
+    "not",
+    "dependentRequired",
+    "dependentSchemas",
+    "if",
+    "then",
+    "else",
+    "patternProperties",
+    "uniqueItems",
+    "minLength",
+    "maxLength",
+  ]);
 
   assert.ok(schemaFiles.length > 0);
 
@@ -3038,7 +3051,16 @@ test("keeps every Codex output schema strict-compatible", async () => {
       }
     }
 
+    const isNamedSchemaMap =
+      pointer.endsWith("/properties") || pointer.endsWith("/$defs");
     for (const [key, value] of Object.entries(node)) {
+      if (!isNamedSchemaMap) {
+        assert.equal(
+          unsupportedKeywords.has(key),
+          false,
+          `${fileName}${pointer}/${key} is not supported by strict Structured Outputs`
+        );
+      }
       validateSchemaNode(value, `${pointer}/${key}`, fileName);
     }
   }
@@ -3053,39 +3075,72 @@ test("keeps every Codex output schema strict-compatible", async () => {
 
 test("keeps kind-specific evidence minimums fail-closed after schema output", async () => {
   const cases = [
-    ({ apiRef }) =>
-      finding("genshin", {
-        kind: "missing_event",
-        raw_refs: [],
-        api_refs: [apiRef],
-      }),
-    ({ rawRef }) =>
-      finding("genshin", {
-        kind: "non_event_included",
-        raw_refs: [rawRef],
-        api_refs: [],
-      }),
-    ({ apiRef }) =>
-      finding("genshin", {
-        kind: "duplicate_event",
-        raw_refs: [],
-        api_refs: [apiRef],
-      }),
-    ({ rawRef }) =>
-      finding("genshin", {
-        kind: "wrong_time_window",
-        raw_refs: [rawRef],
-        api_refs: [],
-      }),
-    () =>
-      finding("genshin", {
-        kind: "other",
-        raw_refs: [],
-        api_refs: [],
-      }),
+    {
+      create: ({ apiRef }) =>
+        finding("genshin", {
+          kind: "missing_event",
+          raw_refs: [],
+          api_refs: [apiRef],
+        }),
+      error: /does not cite the required evidence/,
+    },
+    {
+      create: ({ rawRef }) =>
+        finding("genshin", {
+          kind: "non_event_included",
+          raw_refs: [rawRef],
+          api_refs: [],
+        }),
+      error: /does not cite the required evidence/,
+    },
+    {
+      create: ({ apiRef }) =>
+        finding("genshin", {
+          kind: "duplicate_event",
+          raw_refs: [],
+          api_refs: [apiRef],
+        }),
+      error: /does not cite the required evidence/,
+    },
+    {
+      create: ({ rawRef }) =>
+        finding("genshin", {
+          kind: "wrong_time_window",
+          raw_refs: [rawRef],
+          api_refs: [],
+        }),
+      error: /does not cite the required evidence/,
+    },
+    {
+      create: () =>
+        finding("genshin", {
+          kind: "other",
+          raw_refs: [],
+          api_refs: [],
+        }),
+      error: /does not cite the required evidence/,
+    },
+    {
+      create: ({ rawRef }) =>
+        finding("genshin", {
+          kind: "missing_event",
+          raw_refs: [rawRef, rawRef],
+          api_refs: [],
+        }),
+      error: /evidence refs must be unique/,
+    },
+    {
+      create: () =>
+        finding("genshin", {
+          kind: "missing_event",
+          raw_refs: [""],
+          api_refs: [],
+        }),
+      error: /expected at most 4 evidence refs/,
+    },
   ];
 
-  for (const [index, createInvalidFinding] of cases.entries()) {
+  for (const [index, testCase] of cases.entries()) {
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), "game-cal-upstream-evidence-minimums-")
     );
@@ -3095,7 +3150,7 @@ test("keeps kind-specific evidence minimums fail-closed after schema output", as
     try {
       const input = collectedInputV3();
       const dataset = input.review_datasets[games.indexOf("genshin")];
-      const invalidFinding = createInvalidFinding({
+      const invalidFinding = testCase.create({
         rawRef: dataset.raw_notices[0].review_ref,
         apiRef: dataset.api_events[0].review_ref,
       });
@@ -3128,7 +3183,7 @@ test("keeps kind-specific evidence minimums fail-closed after schema output", as
             ),
             baseSha: reviewBaseSha,
           }),
-        /does not cite the required evidence/,
+        testCase.error,
         `case ${index + 1} must fail before confirmation`
       );
     } finally {

@@ -84,19 +84,15 @@
           "raw_refs": {
             "type": "array",
             "maxItems": 4,
-            "uniqueItems": true,
             "items": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           "api_refs": {
             "type": "array",
             "maxItems": 4,
-            "uniqueItems": true,
             "items": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           "start_time": {
