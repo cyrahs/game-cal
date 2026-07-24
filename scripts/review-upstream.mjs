@@ -43,7 +43,10 @@ const ENDFIELD_CODE_FALLBACK = "endfield_5SD9TN";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8787";
 const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
 const GITHUB_ACTIONS_LOGIN = "github-actions[bot]";
-const ISSUE_MARKER_VERSION = "v1";
+const ISSUE_MARKER_VERSION = "v2";
+const LEGACY_ISSUE_MARKER_VERSION = "v1";
+const FINDING_KEY_VERSION = "v1";
+const FINDING_COVERAGE_VERSION = "v1";
 const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
 const DEFAULT_GAMES = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
@@ -1270,18 +1273,94 @@ function compareCodePoints(a, b) {
   return 0;
 }
 
+function canonicalizeFindingIdentity(finding) {
+  return {
+    game: finding.game,
+    kind: finding.kind,
+    raw_title: normalizeWhitespace(finding.raw_title),
+    api_title: normalizeWhitespace(finding.api_title),
+    start_time: normalizeWhitespace(finding.start_time),
+    end_time: normalizeWhitespace(finding.end_time),
+  };
+}
+
+function getFindingKey(finding) {
+  return sha256(
+    `upstream-review-finding:${FINDING_KEY_VERSION}\n${JSON.stringify(
+      canonicalizeFindingIdentity(finding)
+    )}`
+  );
+}
+
+function getUniqueFindingEntries(findings) {
+  const entriesByKey = new Map();
+  for (const finding of findings) {
+    const findingKey = getFindingKey(finding);
+    const existing = entriesByKey.get(findingKey);
+    if (
+      !existing ||
+      compareCodePoints(JSON.stringify(finding), JSON.stringify(existing)) < 0
+    ) {
+      entriesByKey.set(findingKey, finding);
+    }
+  }
+  return [...entriesByKey.entries()]
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([findingKey, finding]) => ({ finding_key: findingKey, finding }));
+}
+
+function getFindingKeys(findings) {
+  return getUniqueFindingEntries(findings).map((entry) => entry.finding_key);
+}
+
 function getFindingFingerprint(findings) {
-  const canonicalFindings = findings
-    .map((finding) => ({
-      game: finding.game,
-      kind: finding.kind,
-      raw_title: normalizeWhitespace(finding.raw_title),
-      api_title: normalizeWhitespace(finding.api_title),
-      start_time: normalizeWhitespace(finding.start_time),
-      end_time: normalizeWhitespace(finding.end_time),
-    }))
-    .sort((a, b) => compareCodePoints(JSON.stringify(a), JSON.stringify(b)));
+  const canonicalFindings = [
+    ...new Map(
+      findings.map((finding) => {
+        const canonical = canonicalizeFindingIdentity(finding);
+        return [JSON.stringify(canonical), canonical];
+      })
+    ).values(),
+  ].sort((a, b) => compareCodePoints(JSON.stringify(a), JSON.stringify(b)));
   return sha256(JSON.stringify(canonicalFindings));
+}
+
+function validateFindingKeys(
+  value,
+  { allowEmpty = false, label = "finding keys" } = {}
+) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_AGENT_FINDINGS ||
+    (!allowEmpty && value.length === 0) ||
+    value.some((findingKey) => !/^[a-f0-9]{64}$/.test(findingKey))
+  ) {
+    throw new Error(`Invalid ${label}`);
+  }
+  const sorted = [...value].sort(compareCodePoints);
+  if (
+    new Set(value).size !== value.length ||
+    value.some((findingKey, index) => findingKey !== sorted[index])
+  ) {
+    throw new Error(`${label} must be sorted and unique`);
+  }
+  return value;
+}
+
+function getFindingCoverageFingerprintFromKeys(findingKeys) {
+  const keys = validateFindingKeys(findingKeys, {
+    allowEmpty: true,
+    label: "coverage finding keys",
+  });
+  return sha256(
+    `upstream-review-coverage:${FINDING_COVERAGE_VERSION}\n${JSON.stringify(
+      keys
+    )}`
+  );
+}
+
+function getFindingCoverageFingerprint(findings) {
+  return getFindingCoverageFingerprintFromKeys(getFindingKeys(findings));
 }
 
 function validateIssueNumber(value, label = "issue number") {
@@ -1346,27 +1425,75 @@ function getFixBranch(findingFingerprint, issueNumber, baseSha) {
   return `codex/upstream-review-${findingFingerprint.slice(0, 16)}-i${number}-b${baseSha.slice(0, 12)}`;
 }
 
-function renderIssueCycleMarker(findingFingerprint, remediationCycle) {
+function renderIssueCycleMarker(
+  findingFingerprint,
+  remediationCycle,
+  coverageFingerprint,
+  findingKeys
+) {
   if (
     typeof findingFingerprint !== "string" ||
     !/^[a-f0-9]{64}$/.test(findingFingerprint) ||
     typeof remediationCycle !== "string" ||
-    !/^[a-f0-9]{64}$/.test(remediationCycle)
+    !/^[a-f0-9]{64}$/.test(remediationCycle) ||
+    typeof coverageFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(coverageFingerprint)
   ) {
     throw new Error("Invalid remediation cycle marker");
   }
-  return `<!-- upstream-review-cycle:${ISSUE_MARKER_VERSION} fingerprint=${findingFingerprint} cycle=${remediationCycle} -->`;
+  const keys = validateFindingKeys(findingKeys);
+  if (
+    coverageFingerprint !==
+    getFindingCoverageFingerprintFromKeys(keys)
+  ) {
+    throw new Error(
+      "Remediation cycle coverage fingerprint does not match its finding keys"
+    );
+  }
+  return `<!-- upstream-review-cycle:${ISSUE_MARKER_VERSION} fingerprint=${findingFingerprint} cycle=${remediationCycle} coverage=${coverageFingerprint} keys=${keys.join(",")} -->`;
 }
 
 function parseIssueCycleMarker(body) {
-  const match =
-    /^<!-- upstream-review-cycle:v1 fingerprint=([a-f0-9]{64}) cycle=([a-f0-9]{64}) -->\n/.exec(
-      String(body ?? "")
+  const text = String(body ?? "");
+  const currentMatch =
+    /^<!-- upstream-review-cycle:v2 fingerprint=([a-f0-9]{64}) cycle=([a-f0-9]{64}) coverage=([a-f0-9]{64}) keys=([a-f0-9]{64}(?:,[a-f0-9]{64})*) -->\n/.exec(
+      text
     );
-  if (!match) return null;
+  if (currentMatch) {
+    const findingKeys = currentMatch[4].split(",");
+    validateFindingKeys(findingKeys, {
+      label: "managed Issue finding keys",
+    });
+    const coverageFingerprint =
+      getFindingCoverageFingerprintFromKeys(findingKeys);
+    if (currentMatch[3] !== coverageFingerprint) {
+      throw new Error(
+        "Managed Issue coverage fingerprint does not match its finding keys"
+      );
+    }
+    return {
+      version: ISSUE_MARKER_VERSION,
+      finding_fingerprint: currentMatch[1],
+      remediation_cycle: currentMatch[2],
+      coverage_fingerprint: coverageFingerprint,
+      finding_keys: findingKeys,
+    };
+  }
+  if (text.startsWith(`<!-- upstream-review-cycle:${ISSUE_MARKER_VERSION}`)) {
+    throw new Error("Invalid v2 managed Issue cycle marker");
+  }
+
+  const legacyMatch =
+    /^<!-- upstream-review-cycle:v1 fingerprint=([a-f0-9]{64}) cycle=([a-f0-9]{64}) -->\n/.exec(
+      text
+    );
+  if (!legacyMatch) return null;
   return {
-    finding_fingerprint: match[1],
-    remediation_cycle: match[2],
+    version: LEGACY_ISSUE_MARKER_VERSION,
+    finding_fingerprint: legacyMatch[1],
+    remediation_cycle: legacyMatch[2],
+    coverage_fingerprint: legacyMatch[1],
+    finding_keys: null,
   };
 }
 
@@ -1423,7 +1550,26 @@ function compareFixFindings(a, b) {
 
 function buildAgenticFixInput(rawReport) {
   const report = validateAgenticReviewReport(rawReport);
-  const findings = [...report.review.findings]
+  const uniqueFindingEntries = getUniqueFindingEntries(report.review.findings);
+  const uniqueFindingsByKey = new Map(
+    uniqueFindingEntries.map((entry) => [entry.finding_key, entry.finding])
+  );
+  const remediationFindingKeys = Array.isArray(report.issue?.finding_keys)
+    ? validateFindingKeys(report.issue.finding_keys, {
+        allowEmpty: true,
+        label: "agentic review report remediation finding keys",
+      })
+    : uniqueFindingEntries.map((entry) => entry.finding_key);
+  const unknownFindingKey = remediationFindingKeys.find(
+    (findingKey) => !uniqueFindingsByKey.has(findingKey)
+  );
+  if (unknownFindingKey) {
+    throw new Error(
+      "Agentic review report remediation scope is not present in the detected findings"
+    );
+  }
+  const findings = remediationFindingKeys
+    .map((findingKey) => uniqueFindingsByKey.get(findingKey))
     .sort(compareFixFindings)
     .map((finding, index) => ({
       finding_id: `finding-${String(index + 1).padStart(3, "0")}`,
@@ -1476,6 +1622,11 @@ function buildAgenticFixInput(rawReport) {
     (
       parseIssueUrl(issueUrl).issue_number !== issueNumber ||
       report.issue?.finding_fingerprint !== findingFingerprint ||
+      (
+        report.issue?.coverage_fingerprint != null &&
+        report.issue.coverage_fingerprint !==
+          getFindingCoverageFingerprintFromKeys(remediationFindingKeys)
+      ) ||
       !/^[a-f0-9]{64}$/.test(remediationCycle) ||
       !/^[a-f0-9]{40}$/.test(baseSha)
     )
@@ -1558,6 +1709,7 @@ function validateAgenticFixInput(input) {
   }
 
   const findingIds = new Set();
+  const findingKeys = new Set();
   for (const [index, finding] of input.findings.entries()) {
     if (
       !isRecord(finding) ||
@@ -1569,6 +1721,13 @@ function validateAgenticFixInput(input) {
     }
     findingIds.add(finding.finding_id);
     const validatedFinding = validateAgentFinding(finding, index);
+    const findingKey = getFindingKey(validatedFinding);
+    if (findingKeys.has(findingKey)) {
+      throw new Error(
+        `Invalid agentic fix input: duplicate semantic finding at index ${index}`
+      );
+    }
+    findingKeys.add(findingKey);
     if (!input.target_games.includes(validatedFinding.game)) {
       throw new Error(
         `Invalid agentic fix input: finding ${finding.finding_id} is outside target_games`
@@ -2129,9 +2288,18 @@ function renderIssueTitle(report, findingFingerprint) {
 function renderIssueBody(report, options = {}) {
   const findingFingerprint = String(options.findingFingerprint ?? "").trim();
   const remediationCycle = String(options.remediationCycle ?? "").trim();
+  const coverageFingerprint = String(
+    options.coverageFingerprint ?? findingFingerprint
+  ).trim();
+  const findingKeys = options.findingKeys;
   const marker =
     findingFingerprint || remediationCycle
-      ? renderIssueCycleMarker(findingFingerprint, remediationCycle)
+      ? renderIssueCycleMarker(
+          findingFingerprint,
+          remediationCycle,
+          coverageFingerprint,
+          findingKeys
+        )
       : "";
   const regressionOfIssueNumber =
     options.regressionOfIssueNumber == null
@@ -2140,6 +2308,14 @@ function renderIssueBody(report, options = {}) {
           options.regressionOfIssueNumber,
           "regression Issue number"
         );
+  const coveredByIssueNumbers = ensureArray(options.coveredByIssueNumbers)
+    .map((issueNumber) =>
+      validateIssueNumber(issueNumber, "covering Issue number")
+    )
+    .sort((left, right) => left - right);
+  if (new Set(coveredByIssueNumbers).size !== coveredByIssueNumbers.length) {
+    throw new Error("Covering Issue numbers must be unique");
+  }
   const lines = [
     ...(marker ? [marker, ""] : []),
     "# Upstream Review Alerts",
@@ -2152,13 +2328,21 @@ function renderIssueBody(report, options = {}) {
     `Model: \`${escapeIssueCode(report.review.model)}\``,
     ...(marker
       ? [
-          `Finding fingerprint: \`${findingFingerprint}\``,
+          `Cycle fingerprint: \`${findingFingerprint}\``,
+          `Open coverage fingerprint: \`${coverageFingerprint}\``,
           `Remediation cycle: \`${remediationCycle}\``,
         ]
       : []),
     ...(regressionOfIssueNumber == null
       ? []
       : [`Regression of: #${regressionOfIssueNumber}`]),
+    ...(coveredByIssueNumbers.length === 0
+      ? []
+      : [
+          `Excluded as already tracked by Open Issue(s): ${coveredByIssueNumbers
+            .map((issueNumber) => `#${issueNumber}`)
+            .join(", ")}`,
+        ]),
     "",
     "## Summary",
     escapeIssueText(
@@ -2273,11 +2457,20 @@ function validateManagedIssueSnapshot(
     issueNumber,
     findingFingerprint,
     remediationCycle,
+    coverageFingerprint,
+    findingKeys,
+    markerVersion,
     expectedState = "open",
   }
 ) {
   const number = validateIssueNumber(issueNumber);
   const marker = parseIssueCycleMarker(issue?.body);
+  const normalizedFindingKeys =
+    findingKeys == null
+      ? null
+      : validateFindingKeys(findingKeys, {
+          label: "expected managed Issue finding keys",
+        });
   if (
     !isRecord(issue) ||
     issue.pull_request ||
@@ -2286,7 +2479,22 @@ function validateManagedIssueSnapshot(
     issue.state !== expectedState ||
     issue.user?.login !== GITHUB_ACTIONS_LOGIN ||
     marker?.finding_fingerprint !== findingFingerprint ||
-    marker?.remediation_cycle !== remediationCycle
+    marker?.remediation_cycle !== remediationCycle ||
+    (
+      coverageFingerprint != null &&
+      marker?.coverage_fingerprint !== coverageFingerprint
+    ) ||
+    (markerVersion != null && marker?.version !== markerVersion) ||
+    (
+      normalizedFindingKeys != null &&
+      marker?.version === ISSUE_MARKER_VERSION &&
+      (
+        marker.finding_keys.length !== normalizedFindingKeys.length ||
+        marker.finding_keys.some(
+          (findingKey, index) => findingKey !== normalizedFindingKeys[index]
+        )
+      )
+    )
   ) {
     throw new Error(
       `GitHub returned an unexpected managed Issue snapshot for #${number}`
@@ -2295,12 +2503,98 @@ function validateManagedIssueSnapshot(
   return issue;
 }
 
+function getManagedIssueSnapshot(issue, repository) {
+  if (
+    !isRecord(issue) ||
+    issue.pull_request ||
+    issue.user?.login !== GITHUB_ACTIONS_LOGIN
+  ) {
+    return null;
+  }
+  const issueNumber = validateIssueNumber(
+    issue.number,
+    "managed Issue number"
+  );
+  if (
+    issue.html_url !==
+      `https://github.com/${repository}/issues/${issueNumber}` ||
+    !["open", "closed"].includes(issue.state)
+  ) {
+    throw new Error(
+      `GitHub returned an invalid managed Issue snapshot for #${issueNumber}`
+    );
+  }
+  let marker;
+  try {
+    marker = parseIssueCycleMarker(issue.body);
+  } catch (error) {
+    if (issue.state === "closed") return null;
+    throw error;
+  }
+  if (!marker) return null;
+  return { issue, marker };
+}
+
+function buildScopedIssueReport(
+  report,
+  findings,
+  { coveredFindingCount = 0, coveredByIssueNumbers = [], status = "" } = {}
+) {
+  const detectedFindingCount = getUniqueFindingEntries(
+    report.review.findings
+  ).length;
+  const scopedFindingCount = getUniqueFindingEntries(findings).length;
+  const reconciliationSummary =
+    coveredFindingCount > 0
+      ? ` Reconciliation: ${coveredFindingCount} finding(s) are already tracked by Open managed Issue(s) ${coveredByIssueNumbers
+          .map((issueNumber) => `#${issueNumber}`)
+          .join(", ")}; ${scopedFindingCount} new finding(s) remain in this cycle.`
+      : "";
+  const statusSummary = status ? ` ${normalizeWhitespace(status)}` : "";
+  return {
+    ...report,
+    review: {
+      ...report.review,
+      summary: truncateText(
+        `${report.review.summary || `${detectedFindingCount} finding(s) detected.`}${reconciliationSummary}${statusSummary}`,
+        MAX_AGENT_SUMMARY_LENGTH
+      ),
+      findings,
+    },
+  };
+}
+
+async function revalidateCoveringIssues(
+  coveringSnapshots,
+  { owner, repo, repository, request }
+) {
+  await Promise.all(
+    coveringSnapshots.map(async ({ issue, marker }) => {
+      const fresh = await request(
+        `/repos/${owner}/${repo}/issues/${issue.number}`
+      );
+      validateManagedIssueSnapshot(fresh, {
+        repository,
+        issueNumber: issue.number,
+        findingFingerprint: marker.finding_fingerprint,
+        remediationCycle: marker.remediation_cycle,
+        coverageFingerprint: marker.coverage_fingerprint,
+        findingKeys: marker.finding_keys,
+        markerVersion: marker.version,
+      });
+    })
+  );
+}
+
 async function syncIssue(report, options = {}) {
   const dryRun =
     options.dryRun ??
     parseBoolean(process.env.UPSTREAM_REVIEW_DRY_RUN, false);
   if (dryRun) {
-    return { action: "dry_run" };
+    return {
+      action: "dry_run",
+      finding_keys: getFindingKeys(report.review.findings),
+    };
   }
 
   if (report.review.findings.length === 0) {
@@ -2309,7 +2603,14 @@ async function syncIssue(report, options = {}) {
       issue_number: 0,
       issue_url: "",
       finding_fingerprint: getFindingFingerprint([]),
+      coverage_fingerprint: getFindingCoverageFingerprint([]),
+      finding_keys: [],
       remediation_cycle: "",
+      detected_finding_count: 0,
+      covered_finding_count: 0,
+      new_finding_count: 0,
+      covered_by_issue_numbers: [],
+      coverage: [],
     };
   }
 
@@ -2318,70 +2619,178 @@ async function syncIssue(report, options = {}) {
     options.repository ?? process.env.GITHUB_REPOSITORY
   );
   const { owner, repo } = parseRepoSlug(repository);
-  const findingFingerprint = getFindingFingerprint(report.review.findings);
+  const detectedEntries = getUniqueFindingEntries(report.review.findings);
+  const detectedFindings = detectedEntries.map((entry) => entry.finding);
+  const detectedFindingFingerprint = getFindingFingerprint(detectedFindings);
   const issues = await listAllRepositoryIssues(owner, repo, request);
-  const matchingIssues = ensureArray(issues)
-    .filter(
-      (issue) =>
-        !issue?.pull_request &&
-        issue?.user?.login === GITHUB_ACTIONS_LOGIN &&
-        parseIssueCycleMarker(issue?.body)?.finding_fingerprint ===
-          findingFingerprint
-    )
-    .sort((a, b) => Number(b.number) - Number(a.number));
-  const openMatches = matchingIssues.filter((issue) => issue.state === "open");
-  if (openMatches.length > 1) {
-    throw new Error(
-      `More than one open managed Issue matches finding fingerprint ${findingFingerprint}`
-    );
+  const managedIssues = ensureArray(issues)
+    .map((issue) => getManagedIssueSnapshot(issue, repository))
+    .filter(Boolean)
+    .sort((a, b) => Number(b.issue.number) - Number(a.issue.number));
+  const openManagedIssues = managedIssues.filter(
+    (snapshot) => snapshot.issue.state === "open"
+  );
+  const openFingerprints = new Map();
+  for (const snapshot of openManagedIssues) {
+    const fingerprint = snapshot.marker.finding_fingerprint;
+    const existingIssueNumber = openFingerprints.get(fingerprint);
+    if (existingIssueNumber != null) {
+      throw new Error(
+        `More than one open managed Issue matches finding fingerprint ${fingerprint}: #${existingIssueNumber} and #${snapshot.issue.number}`
+      );
+    }
+    openFingerprints.set(fingerprint, snapshot.issue.number);
   }
-  const existing = openMatches[0] ?? null;
-  const regressionOfIssueNumber =
-    matchingIssues.find((issue) => issue.state === "closed")?.number ?? null;
 
-  if (existing) {
-    const existingMarker = parseIssueCycleMarker(existing.body);
-    const remediationCycle = existingMarker.remediation_cycle;
-    const title = renderIssueTitle(report, findingFingerprint);
-    const body = renderIssueBody(report, {
-      findingFingerprint,
-      remediationCycle,
-      regressionOfIssueNumber,
-    });
-    const updated = await request(`/repos/${owner}/${repo}/issues/${existing.number}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        title,
-        body,
-      }),
-    });
-    validateManagedIssueSnapshot(updated, {
-      repository,
-      issueNumber: existing.number,
-      findingFingerprint,
-      remediationCycle,
-    });
+  const coverageOwnerByKey = new Map();
+  const openCurrentSnapshots = [];
+  const openLegacySnapshots = [];
+  for (const snapshot of openManagedIssues) {
+    if (snapshot.marker.version === LEGACY_ISSUE_MARKER_VERSION) {
+      openLegacySnapshots.push(snapshot);
+      continue;
+    }
+    openCurrentSnapshots.push(snapshot);
+    for (const findingKey of snapshot.marker.finding_keys) {
+      const existingOwner = coverageOwnerByKey.get(findingKey);
+      if (existingOwner != null) {
+        throw new Error(
+          `Open managed Issues #${existingOwner} and #${snapshot.issue.number} contain overlapping finding coverage`
+        );
+      }
+      coverageOwnerByKey.set(findingKey, snapshot.issue.number);
+    }
+  }
+
+  const coveredIssueByFindingKey = new Map();
+  let uncoveredEntries = [];
+  for (const entry of detectedEntries) {
+    const coveringIssueNumber = coverageOwnerByKey.get(entry.finding_key);
+    if (coveringIssueNumber == null) {
+      uncoveredEntries.push(entry);
+    } else {
+      coveredIssueByFindingKey.set(entry.finding_key, coveringIssueNumber);
+    }
+  }
+
+  let legacyCoveringSnapshot = null;
+  if (uncoveredEntries.length > 0 && openLegacySnapshots.length > 0) {
+    const uncoveredFingerprint = getFindingFingerprint(
+      uncoveredEntries.map((entry) => entry.finding)
+    );
+    const matchingLegacyIssues = openLegacySnapshots.filter(
+      (snapshot) =>
+        snapshot.marker.finding_fingerprint === uncoveredFingerprint
+    );
+    if (matchingLegacyIssues.length > 1) {
+      throw new Error(
+        `More than one legacy Open managed Issue matches finding fingerprint ${uncoveredFingerprint}`
+      );
+    }
+    if (matchingLegacyIssues.length === 0) {
+      throw new Error(
+        "Cannot safely reconcile new findings while a non-matching legacy Open managed Issue lacks per-finding coverage"
+      );
+    }
+    legacyCoveringSnapshot = matchingLegacyIssues[0];
+    for (const entry of uncoveredEntries) {
+      coveredIssueByFindingKey.set(
+        entry.finding_key,
+        legacyCoveringSnapshot.issue.number
+      );
+    }
+    uncoveredEntries = [];
+  }
+
+  const coveredByIssueNumbers = [
+    ...new Set(coveredIssueByFindingKey.values()),
+  ].sort((left, right) => left - right);
+  const coveringSnapshotsByNumber = new Map(
+    [...openCurrentSnapshots, ...openLegacySnapshots].map((snapshot) => [
+      snapshot.issue.number,
+      snapshot,
+    ])
+  );
+  const coveringSnapshots = coveredByIssueNumbers.map((issueNumber) => {
+    const snapshot = coveringSnapshotsByNumber.get(issueNumber);
+    if (!snapshot) {
+      throw new Error(
+        `Missing trusted snapshot for covering Issue #${issueNumber}`
+      );
+    }
+    return snapshot;
+  });
+  await revalidateCoveringIssues(coveringSnapshots, {
+    owner,
+    repo,
+    repository,
+    request,
+  });
+
+  const coverage = [...coveredIssueByFindingKey.entries()]
+    .sort(([left], [right]) => compareCodePoints(left, right))
+    .map(([findingKey, issueNumber]) => ({
+      finding_key: findingKey,
+      issue_number: issueNumber,
+    }));
+  const uncoveredFindings = uncoveredEntries.map((entry) => entry.finding);
+  const findingKeys = uncoveredEntries.map((entry) => entry.finding_key);
+  if (uncoveredFindings.length === 0) {
     return {
-      action: "updated",
-      issue_number: updated.number,
-      issue_url: updated.html_url,
-      finding_fingerprint: findingFingerprint,
-      remediation_cycle: remediationCycle,
-      regression_of_issue_number: regressionOfIssueNumber,
+      action: "covered",
+      issue_number: 0,
+      issue_url: "",
+      finding_fingerprint: getFindingFingerprint([]),
+      coverage_fingerprint: getFindingCoverageFingerprint([]),
+      finding_keys: [],
+      remediation_cycle: "",
+      detected_finding_fingerprint: detectedFindingFingerprint,
+      detected_finding_count: detectedEntries.length,
+      covered_finding_count: coverage.length,
+      new_finding_count: 0,
+      covered_by_issue_numbers: coveredByIssueNumbers,
+      coverage,
     };
   }
 
+  const findingFingerprint = getFindingFingerprint(uncoveredFindings);
+  const coverageFingerprint =
+    getFindingCoverageFingerprintFromKeys(findingKeys);
+  const regressionOfIssueNumber =
+    managedIssues.find(
+      (snapshot) =>
+        snapshot.issue.state === "closed" &&
+        (
+          snapshot.marker.version === ISSUE_MARKER_VERSION
+            ? (
+                snapshot.marker.coverage_fingerprint ===
+                  coverageFingerprint &&
+                snapshot.marker.finding_keys.length === findingKeys.length &&
+                snapshot.marker.finding_keys.every(
+                  (findingKey, index) => findingKey === findingKeys[index]
+                )
+              )
+            : snapshot.marker.finding_fingerprint === findingFingerprint
+        )
+    )?.issue.number ?? null;
   const remediationCycle = createRemediationCycleId(
     repository,
     options.runId ?? process.env.GITHUB_RUN_ID,
     options.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? "1",
     findingFingerprint
   );
-  const title = renderIssueTitle(report, findingFingerprint);
-  const body = renderIssueBody(report, {
+  const scopedReport = buildScopedIssueReport(report, uncoveredFindings, {
+    coveredFindingCount: coverage.length,
+    coveredByIssueNumbers,
+  });
+  const title = renderIssueTitle(scopedReport, findingFingerprint);
+  const body = renderIssueBody(scopedReport, {
     findingFingerprint,
+    coverageFingerprint,
+    findingKeys,
     remediationCycle,
     regressionOfIssueNumber,
+    coveredByIssueNumbers,
   });
   const created = await request(`/repos/${owner}/${repo}/issues`, {
     method: "POST",
@@ -2392,15 +2801,128 @@ async function syncIssue(report, options = {}) {
     issueNumber: created?.number,
     findingFingerprint,
     remediationCycle,
+    coverageFingerprint,
+    findingKeys,
+    markerVersion: ISSUE_MARKER_VERSION,
   });
   return {
     action: "created",
     issue_number: created.number,
     issue_url: created.html_url,
     finding_fingerprint: findingFingerprint,
+    coverage_fingerprint: coverageFingerprint,
+    finding_keys: findingKeys,
     remediation_cycle: remediationCycle,
     regression_of_issue_number: regressionOfIssueNumber,
+    detected_finding_fingerprint: detectedFindingFingerprint,
+    detected_finding_count: detectedEntries.length,
+    covered_finding_count: coverage.length,
+    new_finding_count: uncoveredEntries.length,
+    covered_by_issue_numbers: coveredByIssueNumbers,
+    coverage,
   };
+}
+
+async function loadRemediationFixContext(options = {}) {
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_INPUT_PATH?.trim();
+  const agentOutputPath =
+    options.agentOutputPath ??
+    process.env.UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH?.trim();
+  const manifestPath =
+    options.manifestPath ??
+    process.env.UPSTREAM_REVIEW_FIX_MANIFEST_PATH?.trim();
+  const patchPath =
+    options.patchPath ??
+    process.env.UPSTREAM_REVIEW_FIX_PATCH_PATH?.trim();
+  const reportPath =
+    options.reportPath ??
+    process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim();
+  const expectedBaseSha =
+    options.baseSha ??
+    process.env.UPSTREAM_REVIEW_BASE_SHA?.trim() ??
+    "";
+  const hasDirectContext =
+    options.fixInput != null ||
+    options.fixAgentOutput != null ||
+    options.fixManifest != null ||
+    options.fixPatch != null ||
+    options.report != null;
+  const hasPathContext =
+    inputPath || agentOutputPath || manifestPath || patchPath || reportPath;
+  if (!hasDirectContext && !hasPathContext) return null;
+  if (!/^[a-f0-9]{40}$/.test(expectedBaseSha)) {
+    throw new Error("Missing trusted remediation artifact base SHA");
+  }
+
+  let fixInput;
+  let manifest;
+  let patch;
+  let agentOutputText;
+  let rawReport;
+  if (hasDirectContext) {
+    if (
+      options.fixInput == null ||
+      options.fixAgentOutput == null ||
+      options.fixManifest == null ||
+      options.fixPatch == null ||
+      options.report == null
+    ) {
+      throw new Error("Incomplete direct remediation artifact context");
+    }
+    fixInput = validateAgenticFixInput(options.fixInput);
+    patch = Buffer.isBuffer(options.fixPatch)
+      ? options.fixPatch
+      : Buffer.from(options.fixPatch);
+    manifest = validateFixManifest(
+      options.fixManifest,
+      fixInput,
+      patch,
+      expectedBaseSha
+    );
+    agentOutputText = JSON.stringify(options.fixAgentOutput);
+    rawReport = options.report;
+  } else {
+    if (
+      !inputPath ||
+      !agentOutputPath ||
+      !manifestPath ||
+      !patchPath ||
+      !reportPath
+    ) {
+      throw new Error("Incomplete remediation artifact paths");
+    }
+    ({ fixInput, manifest, patch } = await readAndValidateFixArtifact({
+      inputPath,
+      manifestPath,
+      patchPath,
+      expectedBaseSha,
+    }));
+    const [loadedAgentOutput, reportText] = await Promise.all([
+      readTextFile(agentOutputPath, "Codex fix output"),
+      readTextFile(reportPath, "agentic review report"),
+    ]);
+    agentOutputText = loadedAgentOutput;
+    rawReport = parseJsonDocument(reportText, "agentic review report");
+  }
+
+  const metadata = parseAgentFixOutput(
+    agentOutputText,
+    fixInput,
+    manifest.changed_files
+  );
+  const report = validateAgenticReviewReport(rawReport);
+  const rebuiltFixInput = buildAgenticFixInput(report);
+  if (
+    sha256(JSON.stringify(rebuiltFixInput)) !==
+    sha256(JSON.stringify(fixInput))
+  ) {
+    throw new Error(
+      "Remediation report does not reproduce the verified agentic fix input"
+    );
+  }
+  return { fixInput, manifest, metadata, report };
 }
 
 async function finalizeRemediationIssue(options = {}) {
@@ -2468,9 +2990,15 @@ async function finalizeRemediationIssue(options = {}) {
   const allFindingsAddressed =
     allFindingsAddressedValue === true ||
     allFindingsAddressedValue === "true";
-  const [issue, pullRequest] = await Promise.all([
+  const approvedStage = String(
+    options.approvedStage ??
+      process.env.UPSTREAM_REVIEW_APPROVED_STAGE ??
+      ""
+  ).trim();
+  const [issue, pullRequest, fixContext] = await Promise.all([
     request(`/repos/${owner}/${repo}/issues/${issueNumber}`),
     request(`/repos/${owner}/${repo}/pulls/${pullRequestNumber}`),
+    loadRemediationFixContext(options),
   ]);
   if (
     !isRecord(pullRequest) ||
@@ -2502,6 +3030,101 @@ async function finalizeRemediationIssue(options = {}) {
     );
   }
 
+  const issueMarker = parseIssueCycleMarker(issue?.body);
+  if (
+    issueMarker?.version === ISSUE_MARKER_VERSION &&
+    fixContext == null
+  ) {
+    throw new Error(
+      "Missing verified fix artifacts for a v2 remediation Issue"
+    );
+  }
+  if (
+    fixContext != null &&
+    issueMarker?.version !== ISSUE_MARKER_VERSION
+  ) {
+    throw new Error(
+      "Verified v2 remediation artifacts require a v2 managed Issue marker"
+    );
+  }
+  let cycleFindingKeys = null;
+  let cycleCoverageFingerprint = null;
+  let unresolvedFindings = null;
+  let unresolvedFindingKeys = null;
+  let unresolvedFindingFingerprint = null;
+  let unresolvedCoverageFingerprint = null;
+  if (fixContext) {
+    const { fixInput, manifest, metadata } = fixContext;
+    if (
+      ![
+        "initial-review",
+        "rework-round-1",
+        "rework-round-2",
+        "rework-round-3",
+      ].includes(approvedStage)
+    ) {
+      throw new Error("Invalid trusted remediation approval stage");
+    }
+    const metadataAllFindingsAddressed = metadata.outcomes.every(
+      (outcome) => outcome.status === "fixed"
+    );
+    if (
+      fixInput.source_report.issue_number !== issueNumber ||
+      fixInput.source_report.issue_url !== issueUrl ||
+      fixInput.source_report.remediation_cycle !== remediationCycle ||
+      fixInput.finding_fingerprint !== findingFingerprint ||
+      manifest.issue_number !== issueNumber ||
+      manifest.remediation_cycle !== remediationCycle ||
+      manifest.finding_fingerprint !== findingFingerprint ||
+      metadataAllFindingsAddressed !== allFindingsAddressed
+    ) {
+      throw new Error(
+        "Verified fix artifacts do not match the merged remediation cycle"
+      );
+    }
+    const runId = String(
+      options.runId ?? process.env.GITHUB_RUN_ID ?? ""
+    ).trim();
+    const expectedPrBody = renderFixPrBody(metadata, manifest, {
+      repository,
+      runId,
+      patchSha256: manifest.patch_sha256,
+      issueUrl,
+    });
+    if (
+      sha256(Buffer.from(expectedPrBody, "utf8")) !== prBodySha256 ||
+      expectedPrBody !== pullRequest.body
+    ) {
+      throw new Error(
+        "Verified fix artifacts do not reproduce the merged pull request body"
+      );
+    }
+    cycleFindingKeys = getFindingKeys(fixInput.findings);
+    cycleCoverageFingerprint =
+      getFindingCoverageFingerprintFromKeys(cycleFindingKeys);
+    if (!allFindingsAddressed) {
+      const outcomesByFindingId = new Map(
+        metadata.outcomes.map((outcome) => [
+          outcome.finding_id,
+          outcome,
+        ])
+      );
+      unresolvedFindings = fixInput.findings.filter(
+        (finding) =>
+          outcomesByFindingId.get(finding.finding_id)?.status === "not_fixed"
+      );
+      if (unresolvedFindings.length === 0) {
+        throw new Error(
+          "Partial remediation metadata does not contain unresolved findings"
+        );
+      }
+      unresolvedFindingKeys = getFindingKeys(unresolvedFindings);
+      unresolvedFindingFingerprint =
+        getFindingFingerprint(unresolvedFindings);
+      unresolvedCoverageFingerprint =
+        getFindingCoverageFingerprintFromKeys(unresolvedFindingKeys);
+    }
+  }
   const expectedIssueState =
     issue?.state === "closed" ? "closed" : "open";
   validateManagedIssueSnapshot(issue, {
@@ -2511,16 +3134,109 @@ async function finalizeRemediationIssue(options = {}) {
     remediationCycle,
     expectedState: expectedIssueState,
   });
+  let coverageAlreadyReduced = false;
+  if (
+    issueMarker?.version === ISSUE_MARKER_VERSION &&
+    cycleFindingKeys != null
+  ) {
+    const markerHasKeys = (expectedFindingKeys) =>
+      issueMarker.finding_keys.length === expectedFindingKeys.length &&
+      issueMarker.finding_keys.every(
+        (findingKey, index) => findingKey === expectedFindingKeys[index]
+      );
+    const hasOriginalCoverage =
+      issueMarker.coverage_fingerprint === cycleCoverageFingerprint &&
+      markerHasKeys(cycleFindingKeys);
+    const hasReducedCoverage =
+      !allFindingsAddressed &&
+      approvedStage === "initial-review" &&
+      issueMarker.coverage_fingerprint === unresolvedCoverageFingerprint &&
+      markerHasKeys(unresolvedFindingKeys);
+    if (!hasOriginalCoverage && !hasReducedCoverage) {
+      throw new Error(
+        `Managed remediation Issue #${issueNumber} has unexpected v2 coverage`
+      );
+    }
+    coverageAlreadyReduced = hasReducedCoverage;
+  }
   if (!allFindingsAddressed) {
     if (issue.state !== "open") {
       throw new Error(
         `Partially addressed remediation Issue #${issueNumber} was closed unexpectedly`
       );
     }
+    if (fixContext == null) {
+      return {
+        action: "left_open",
+        issue_number: issueNumber,
+        issue_url: issueUrl,
+      };
+    }
+    if (approvedStage !== "initial-review") {
+      return {
+        action: "left_open_after_rework",
+        issue_number: issueNumber,
+        issue_url: issueUrl,
+        finding_keys: cycleFindingKeys,
+        approved_stage: approvedStage,
+      };
+    }
+    if (coverageAlreadyReduced) {
+      return {
+        action: "already_reduced",
+        issue_number: issueNumber,
+        issue_url: issueUrl,
+        coverage_fingerprint: unresolvedCoverageFingerprint,
+        finding_keys: unresolvedFindingKeys,
+      };
+    }
+    const scopedReport = buildScopedIssueReport(
+      fixContext.report,
+      unresolvedFindings,
+      {
+        coveredFindingCount:
+          fixContext.report.issue?.covered_finding_count ?? 0,
+        coveredByIssueNumbers:
+          fixContext.report.issue?.covered_by_issue_numbers ?? [],
+        status: `Partial remediation PR #${pullRequestNumber} merged; ${unresolvedFindings.length} finding(s) remain unresolved.`,
+      }
+    );
+    const title = renderIssueTitle(
+      scopedReport,
+      unresolvedFindingFingerprint
+    );
+    const body = renderIssueBody(scopedReport, {
+      findingFingerprint,
+      coverageFingerprint: unresolvedCoverageFingerprint,
+      findingKeys: unresolvedFindingKeys,
+      remediationCycle,
+      regressionOfIssueNumber:
+        fixContext.report.issue?.regression_of_issue_number ?? null,
+      coveredByIssueNumbers:
+        fixContext.report.issue?.covered_by_issue_numbers ?? [],
+    });
+    const updated = await request(
+      `/repos/${owner}/${repo}/issues/${issueNumber}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ title, body }),
+      }
+    );
+    validateManagedIssueSnapshot(updated, {
+      repository,
+      issueNumber,
+      findingFingerprint,
+      remediationCycle,
+      coverageFingerprint: unresolvedCoverageFingerprint,
+      findingKeys: unresolvedFindingKeys,
+      markerVersion: ISSUE_MARKER_VERSION,
+    });
     return {
-      action: "left_open",
+      action: "coverage_reduced",
       issue_number: issueNumber,
       issue_url: issueUrl,
+      coverage_fingerprint: unresolvedCoverageFingerprint,
+      finding_keys: unresolvedFindingKeys,
     };
   }
   if (issue.state === "closed") {
@@ -2548,6 +3264,7 @@ async function finalizeRemediationIssue(options = {}) {
     issueNumber,
     findingFingerprint,
     remediationCycle,
+    findingKeys: cycleFindingKeys,
     expectedState: "closed",
   });
   if (updated.state_reason !== "completed") {

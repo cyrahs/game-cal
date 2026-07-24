@@ -58,17 +58,132 @@ function cycleMarker(findingFingerprint, cycle = remediationCycle) {
   return `<!-- upstream-review-cycle:v1 fingerprint=${findingFingerprint} cycle=${cycle} -->`;
 }
 
+function findingIdentity(item) {
+  const normalize = (value) =>
+    String(value ?? "")
+      .replace(/\\[rnt]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  return {
+    game: item.game,
+    kind: item.kind,
+    raw_title: normalize(item.raw_title),
+    api_title: normalize(item.api_title),
+    start_time: normalize(item.start_time),
+    end_time: normalize(item.end_time),
+  };
+}
+
+function findingKey(item) {
+  return createHash("sha256")
+    .update(
+      `upstream-review-finding:v1\n${JSON.stringify(findingIdentity(item))}`
+    )
+    .digest("hex");
+}
+
+function findingKeys(findings) {
+  return [...new Set(findings.map(findingKey))].sort();
+}
+
+function findingCoverageFingerprint(findings) {
+  return createHash("sha256")
+    .update(
+      `upstream-review-coverage:v1\n${JSON.stringify(findingKeys(findings))}`
+    )
+    .digest("hex");
+}
+
+function cycleMarkerV2(
+  findings,
+  {
+    findingFingerprint: cycleFingerprint = findingFingerprint(findings),
+    coverageFingerprint = findingCoverageFingerprint(findings),
+    cycle = remediationCycle,
+  } = {}
+) {
+  return `<!-- upstream-review-cycle:v2 fingerprint=${cycleFingerprint} cycle=${cycle} coverage=${coverageFingerprint} keys=${findingKeys(findings).join(",")} -->`;
+}
+
 function parseRequestBody(init = {}) {
   if (init.body == null || init.body === "") return null;
   return typeof init.body === "string" ? JSON.parse(init.body) : init.body;
+}
+
+function managedIssue({
+  number,
+  findings,
+  state = "open",
+  cycle = remediationCycle,
+  version = "v2",
+  cycleFindings = findings,
+}) {
+  const marker =
+    version === "v1"
+      ? cycleMarker(findingFingerprint(cycleFindings), cycle)
+      : cycleMarkerV2(findings, {
+          findingFingerprint: findingFingerprint(cycleFindings),
+          coverageFingerprint: findingCoverageFingerprint(findings),
+          cycle,
+        });
+  return {
+    number,
+    html_url: `https://github.com/${repository}/issues/${number}`,
+    title: "Upstream Review Alerts",
+    state,
+    body: `${marker}\n\nManaged Issue.\n`,
+    user: { login: "github-actions[bot]" },
+  };
+}
+
+function syncIssueRequest(issues, { createdIssueNumber = 90 } = {}) {
+  const calls = [];
+  const request = async (pathname, init = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = parseRequestBody(init);
+    calls.push({ pathname, method, body });
+    if (
+      method === "GET" &&
+      pathname.startsWith(`/repos/${repository}/issues?`)
+    ) {
+      return issues;
+    }
+    if (method === "GET") {
+      const match = new RegExp(
+        `^/repos/${repository.replace("/", "\\/")}/issues/([1-9]\\d*)$`
+      ).exec(pathname);
+      if (match) {
+        const issue = issues.find((candidate) => candidate.number === Number(match[1]));
+        if (issue) return issue;
+      }
+    }
+    if (
+      method === "POST" &&
+      pathname === `/repos/${repository}/issues`
+    ) {
+      return {
+        number: createdIssueNumber,
+        html_url:
+          `https://github.com/${repository}/issues/${createdIssueNumber}`,
+        title: body.title,
+        body: body.body,
+        state: "open",
+        user: { login: "github-actions[bot]" },
+      };
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
+  };
+  return { request, calls };
 }
 
 function remediationFinalizationFixture({
   allFindingsAddressed = true,
   issueState = "open",
   issueBody = null,
+  findingFingerprint = "d".repeat(64),
+  cycle = remediationCycle,
+  pullRequestBody = null,
 } = {}) {
-  const findingFingerprint = "d".repeat(64);
   const pullRequestNumber = 77;
   const pullRequestUrl =
     `https://github.com/${repository}/pull/${pullRequestNumber}`;
@@ -77,8 +192,9 @@ function remediationFinalizationFixture({
     ? `Closes #${issueNumber}`
     : `Refs #${issueNumber}`;
   const prMarker =
-    `<!-- upstream-review-pr:v1 issue=${issueNumber} fingerprint=${findingFingerprint} cycle=${remediationCycle} -->`;
+    `<!-- upstream-review-pr:v1 issue=${issueNumber} fingerprint=${findingFingerprint} cycle=${cycle} -->`;
   const prBody =
+    pullRequestBody ??
     `${prMarker}\n\n## Summary\n\nAutomatic remediation.\n\n${relation}\n`;
   const prBodySha256 = createHash("sha256")
     .update(prBody)
@@ -94,7 +210,7 @@ function remediationFinalizationFixture({
     },
     body:
       issueBody ??
-      `${cycleMarker(findingFingerprint, remediationCycle)}\n\nIssue body.\n`,
+      `${cycleMarker(findingFingerprint, cycle)}\n\nIssue body.\n`,
   };
   const pullRequest = {
     number: pullRequestNumber,
@@ -155,7 +271,7 @@ function remediationFinalizationFixture({
       issueNumber,
       issueUrl,
       findingFingerprint,
-      remediationCycle,
+      remediationCycle: cycle,
       pullRequestNumber,
       pullRequestUrl,
       prBodySha256,
@@ -179,20 +295,14 @@ function dataset(game) {
 }
 
 function findingFingerprint(findings) {
-  const normalize = (value) =>
-    String(value ?? "")
-      .replace(/\\[rnt]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  const canonical = findings
-    .map((item) => ({
-      game: item.game,
-      kind: item.kind,
-      raw_title: normalize(item.raw_title),
-      api_title: normalize(item.api_title),
-      start_time: normalize(item.start_time),
-      end_time: normalize(item.end_time),
-    }))
+  const canonical = [
+    ...new Map(
+      findings.map((item) => {
+        const identity = findingIdentity(item);
+        return [JSON.stringify(identity), identity];
+      })
+    ).values(),
+  ]
     .sort((left, right) => {
       const a = JSON.stringify(left);
       const b = JSON.stringify(right);
@@ -271,9 +381,12 @@ function agenticReviewReport(
       findings,
     },
     issue: {
+      action: findings.length > 0 ? "created" : "noop",
       issue_number: issueNumber,
       issue_url: issueUrl,
       finding_fingerprint: findingFingerprint(findings),
+      coverage_fingerprint: findingCoverageFingerprint(findings),
+      finding_keys: findingKeys(findings),
       remediation_cycle: remediationCycle,
     },
   };
@@ -668,6 +781,32 @@ test("builds a compact, stable fix request from unsuppressed findings", () => {
   assert.deepEqual(reordered.findings, input.findings);
 });
 
+test("deduplicates semantic findings before fingerprinting and repair", () => {
+  const original = finding("starrail");
+  const duplicate = {
+    ...original,
+    severity: "high",
+    confidence: "medium",
+    reason: "A second model explanation for the same semantic finding.",
+  };
+  const duplicatedInput = buildAgenticFixInput(
+    agenticReviewReport([original, duplicate])
+  );
+  const singleInput = buildAgenticFixInput(
+    agenticReviewReport([duplicate])
+  );
+
+  assert.equal(duplicatedInput.findings.length, 1);
+  assert.equal(
+    duplicatedInput.finding_fingerprint,
+    singleInput.finding_fingerprint
+  );
+  assert.deepEqual(
+    findingKeys([original, duplicate]),
+    findingKeys([original])
+  );
+});
+
 test("scopes an automatic fix branch to its remediation Issue cycle", () => {
   const fingerprint = "d".repeat(64);
   const firstBase = "a".repeat(40);
@@ -756,7 +895,10 @@ test("rejects a Codex fix that claims a different diff", () => {
 
 test("rejects missing or duplicate finding outcomes", () => {
   const input = buildAgenticFixInput(
-    agenticReviewReport([finding("starrail"), finding("starrail")])
+    agenticReviewReport([
+      finding("starrail"),
+      finding("starrail", { raw_title: "another starrail raw notice" }),
+    ])
   );
   const changedFiles = ["apps/api/src/games/starrail.ts"];
   const output = agentFixOutput(input, changedFiles);
@@ -2032,76 +2174,19 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
   }
 });
 
-test("reuses only the open remediation Issue with a matching fingerprint", async () => {
-  const findings = [finding("starrail")];
-  const report = agenticReviewReport(findings);
-  const findingFingerprint =
-    buildAgenticFixInput(report).finding_fingerprint;
-  delete report.issue;
-  const closedCycle = "7".repeat(64);
-  const openCycle = "8".repeat(64);
-  const issues = [
-    {
-      number: 39,
-      html_url: `https://github.com/${repository}/issues/39`,
-      title: "Upstream Review Alerts",
-      state: "closed",
-      body: `${cycleMarker(findingFingerprint, closedCycle)}\n`,
-      user: { login: "github-actions[bot]" },
-    },
-    {
-      number: 40,
-      html_url: `https://github.com/${repository}/issues/40`,
-      title: "Upstream Review Alerts",
-      state: "open",
-      body: `${cycleMarker("e".repeat(64), "6".repeat(64))}\n`,
-      user: { login: "github-actions[bot]" },
-    },
-    {
-      number: 41,
-      html_url: `https://github.com/${repository}/pull/41`,
-      title: "Upstream Review Alerts",
-      state: "open",
-      body: `${cycleMarker(findingFingerprint, "5".repeat(64))}\n`,
-      user: { login: "github-actions[bot]" },
-      pull_request: {
-        url: `https://api.github.com/repos/${repository}/pulls/41`,
-      },
-    },
-    {
-      number: issueNumber,
-      html_url: issueUrl,
-      title: "Upstream Review Alerts",
-      state: "open",
-      body: `${cycleMarker(findingFingerprint, openCycle)}\n`,
-      user: { login: "github-actions[bot]" },
-    },
+test("skips a finding set already contained in one open managed Issue", async () => {
+  const trackedFindings = [
+    finding("starrail"),
+    finding("genshin"),
   ];
-  const calls = [];
-  const request = async (pathname, init = {}) => {
-    const method = String(init.method ?? "GET").toUpperCase();
-    const body = parseRequestBody(init);
-    calls.push({ pathname, method, body });
-    if (
-      method === "GET" &&
-      pathname.startsWith(`/repos/${repository}/issues?`)
-    ) {
-      return issues;
-    }
-    if (
-      method === "PATCH" &&
-      pathname === `/repos/${repository}/issues/${issueNumber}`
-    ) {
-      return {
-        ...issues.at(-1),
-        ...body,
-        number: issueNumber,
-        html_url: issueUrl,
-        state: "open",
-      };
-    }
-    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
-  };
+  const report = agenticReviewReport([trackedFindings[0]]);
+  delete report.issue;
+  const issue = managedIssue({
+    number: issueNumber,
+    findings: trackedFindings,
+    cycle: "8".repeat(64),
+  });
+  const { request, calls } = syncIssueRequest([issue]);
 
   const result = await syncIssue(report, {
     request,
@@ -2111,20 +2196,281 @@ test("reuses only the open remediation Issue with a matching fingerprint", async
     dryRun: false,
   });
 
-  assert.equal(result.issue_number, issueNumber);
-  assert.equal(result.issue_url, issueUrl);
-  assert.equal(result.remediation_cycle, openCycle);
-  assert.deepEqual(
-    calls.filter((call) => call.method === "PATCH").map((call) => call.pathname),
-    [`/repos/${repository}/issues/${issueNumber}`]
-  );
-  assert.equal(calls.some((call) => call.method === "POST"), false);
-  const update = calls.find((call) => call.method === "PATCH");
+  assert.equal(result.action, "covered");
+  assert.deepEqual(result.covered_by_issue_numbers, [issueNumber]);
+  assert.equal(calls.some((call) => ["POST", "PATCH"].includes(call.method)), false);
+  report.issue = result;
+  const fixInput = buildAgenticFixInput(report);
+  assert.deepEqual(fixInput.findings, []);
+  assert.deepEqual(fixInput.target_games, []);
+  assert.deepEqual(fixInput.allowed_files, []);
+  assert.equal(fixInput.fix_branch, "");
+  assert.equal(fixInput.source_report.issue_number, 0);
+});
+
+test("uses the union of non-overlapping open Issues before skipping repair", async () => {
+  const starrailFinding = finding("starrail");
+  const genshinFinding = finding("genshin");
+  const report = agenticReviewReport([
+    starrailFinding,
+    genshinFinding,
+  ]);
+  delete report.issue;
+  const issues = [
+    managedIssue({ number: 40, findings: [starrailFinding] }),
+    managedIssue({
+      number: 41,
+      findings: [genshinFinding],
+      cycle: "8".repeat(64),
+    }),
+  ];
+  const { request, calls } = syncIssueRequest(issues);
+
+  const result = await syncIssue(report, {
+    request,
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+
+  assert.equal(result.action, "covered");
+  assert.deepEqual(result.covered_by_issue_numbers, [40, 41]);
+  assert.equal(result.covered_finding_count, 2);
+  assert.equal(calls.some((call) => ["POST", "PATCH"].includes(call.method)), false);
+});
+
+test("creates and repairs only the non-overlapping complement", async () => {
+  const trackedFinding = finding("starrail");
+  const newFinding = finding("genshin");
+  const report = agenticReviewReport([trackedFinding, newFinding]);
+  delete report.issue;
+  const trackedIssue = managedIssue({
+    number: 40,
+    findings: [trackedFinding],
+  });
+  const { request, calls } = syncIssueRequest([trackedIssue], {
+    createdIssueNumber: issueNumber,
+  });
+
+  const result = await syncIssue(report, {
+    request,
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+
+  assert.equal(result.action, "created");
+  assert.deepEqual(result.finding_keys, findingKeys([newFinding]));
+  assert.equal(result.finding_fingerprint, findingFingerprint([newFinding]));
+  assert.deepEqual(result.covered_by_issue_numbers, [40]);
+  assert.equal(calls.some((call) => call.method === "PATCH"), false);
+  const create = calls.find((call) => call.method === "POST");
+  assert.ok(create);
   assert.equal(
-    update.body.body.split("\n")[0],
-    cycleMarker(findingFingerprint, openCycle)
+    create.body.body.split("\n")[0],
+    cycleMarkerV2([newFinding], {
+      cycle: result.remediation_cycle,
+    })
   );
-  assert.equal(Object.hasOwn(update.body, "state"), false);
+  assert.match(create.body.body, /Excluded as already tracked.*#40/);
+  assert.doesNotMatch(create.body.body, /starrail raw notice/);
+  assert.match(create.body.body, /genshin raw notice/);
+
+  report.issue = result;
+  const fixInput = buildAgenticFixInput(report);
+  assert.equal(fixInput.findings.length, 1);
+  assert.equal(fixInput.findings[0].game, "genshin");
+  assert.deepEqual(fixInput.target_games, ["genshin"]);
+  assert.deepEqual(fixInput.allowed_files, [
+    "apps/api/src/games/genshin.ts",
+  ]);
+  assert.equal(fixInput.finding_fingerprint, findingFingerprint([newFinding]));
+  assert.equal(
+    fixInput.fix_branch,
+    getFixBranch(
+      findingFingerprint([newFinding]),
+      issueNumber,
+      reviewBaseSha
+    )
+  );
+});
+
+test("rejects overlapping coverage across existing open managed Issues", async () => {
+  const sharedFinding = finding("starrail");
+  const report = agenticReviewReport([sharedFinding]);
+  delete report.issue;
+  const issues = [
+    managedIssue({
+      number: 40,
+      findings: [sharedFinding],
+      cycleFindings: [sharedFinding, finding("genshin")],
+    }),
+    managedIssue({
+      number: 41,
+      findings: [sharedFinding],
+      cycle: "8".repeat(64),
+      cycleFindings: [sharedFinding, finding("ww")],
+    }),
+  ];
+  const { request, calls } = syncIssueRequest(issues);
+
+  await assert.rejects(
+    () =>
+      syncIssue(report, {
+        request,
+        repository,
+        runId: "12345",
+        runAttempt: "1",
+        dryRun: false,
+      }),
+    /overlapping finding coverage/
+  );
+  assert.equal(calls.some((call) => ["POST", "PATCH"].includes(call.method)), false);
+});
+
+test("fails closed when v2 coverage is malformed or changes during reconciliation", async () => {
+  const findings = [finding("starrail"), finding("genshin")];
+  const report = agenticReviewReport(findings);
+  delete report.issue;
+  const validIssue = managedIssue({ number: 40, findings });
+  const keys = findingKeys(findings);
+  const malformedIssue = {
+    ...validIssue,
+    body:
+      `<!-- upstream-review-cycle:v2 fingerprint=${findingFingerprint(findings)} cycle=${remediationCycle} coverage=${findingCoverageFingerprint(findings)} keys=${[...keys].reverse().join(",")} -->\n\nManaged Issue.\n`,
+  };
+  const malformedFixture = syncIssueRequest([malformedIssue]);
+  await assert.rejects(
+    () =>
+      syncIssue(report, {
+        request: malformedFixture.request,
+        repository,
+        runId: "12345",
+        runAttempt: "1",
+        dryRun: false,
+      }),
+    /sorted and unique/
+  );
+  assert.equal(
+    malformedFixture.calls.some((call) =>
+      ["POST", "PATCH"].includes(call.method)
+    ),
+    false
+  );
+
+  const mismatchedCoverageIssue = {
+    ...validIssue,
+    body: validIssue.body.replace(
+      /coverage=[a-f0-9]{64}/,
+      `coverage=${"f".repeat(64)}`
+    ),
+  };
+  const mismatchedFixture = syncIssueRequest([mismatchedCoverageIssue]);
+  await assert.rejects(
+    () =>
+      syncIssue(report, {
+        request: mismatchedFixture.request,
+        repository,
+        runId: "12345",
+        runAttempt: "1",
+        dryRun: false,
+      }),
+    /coverage fingerprint does not match/
+  );
+  assert.equal(
+    mismatchedFixture.calls.some((call) =>
+      ["POST", "PATCH"].includes(call.method)
+    ),
+    false
+  );
+
+  const closedMalformedFixture = syncIssueRequest([
+    { ...mismatchedCoverageIssue, state: "closed" },
+  ]);
+  const closedMalformedResult = await syncIssue(report, {
+    request: closedMalformedFixture.request,
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+  assert.equal(closedMalformedResult.action, "created");
+  assert.equal(
+    closedMalformedResult.regression_of_issue_number,
+    null
+  );
+
+  const calls = [];
+  const request = async (pathname, init = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    calls.push({ pathname, method });
+    if (pathname.startsWith(`/repos/${repository}/issues?`)) {
+      return [validIssue];
+    }
+    if (pathname === `/repos/${repository}/issues/40`) {
+      return { ...validIssue, state: "closed" };
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${pathname}`);
+  };
+  await assert.rejects(
+    () =>
+      syncIssue(report, {
+        request,
+        repository,
+        runId: "12345",
+        runAttempt: "1",
+        dryRun: false,
+      }),
+    /unexpected managed Issue snapshot/
+  );
+  assert.equal(calls.some((call) => ["POST", "PATCH"].includes(call.method)), false);
+});
+
+test("supports an exact legacy open cycle but fails closed for unknown legacy overlap", async () => {
+  const starrailFinding = finding("starrail");
+  const exactReport = agenticReviewReport([starrailFinding]);
+  delete exactReport.issue;
+  const legacyIssue = managedIssue({
+    number: 40,
+    findings: [starrailFinding],
+    version: "v1",
+  });
+  const exactFixture = syncIssueRequest([legacyIssue]);
+  const exactResult = await syncIssue(exactReport, {
+    request: exactFixture.request,
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+  assert.equal(exactResult.action, "covered");
+  assert.deepEqual(exactResult.covered_by_issue_numbers, [40]);
+
+  const expandedReport = agenticReviewReport([
+    starrailFinding,
+    finding("genshin"),
+  ]);
+  delete expandedReport.issue;
+  const expandedFixture = syncIssueRequest([legacyIssue]);
+  await assert.rejects(
+    () =>
+      syncIssue(expandedReport, {
+        request: expandedFixture.request,
+        repository,
+        runId: "12345",
+        runAttempt: "1",
+        dryRun: false,
+      }),
+    /legacy Open managed Issue/
+  );
+  assert.equal(
+    expandedFixture.calls.some((call) =>
+      ["POST", "PATCH"].includes(call.method)
+    ),
+    false
+  );
 });
 
 test("creates a new remediation Issue instead of reopening a closed cycle", async () => {
@@ -2189,7 +2535,11 @@ test("creates a new remediation Issue instead of reopening a closed cycle", asyn
   assert.ok(create);
   assert.equal(
     create.body.body.split("\n")[0],
-    cycleMarker(findingFingerprint, result.remediation_cycle)
+    cycleMarkerV2(findings, {
+      findingFingerprint,
+      coverageFingerprint: findingCoverageFingerprint(findings),
+      cycle: result.remediation_cycle,
+    })
   );
   assert.match(create.body.body, /Regression of: #39/);
 });
@@ -2229,6 +2579,75 @@ test("closes an exact all-addressed remediation Issue after its PR merges", asyn
   assert.equal(updates[0].body.state_reason, "completed");
 });
 
+test("closes a v2 Issue from verified artifact file paths", async () => {
+  const findings = [finding("starrail")];
+  const report = agenticReviewReport(findings);
+  const fixInput = buildAgenticFixInput(report);
+  const patch = Buffer.from("verified full patch");
+  const changedFiles = ["apps/api/src/games/starrail.ts"];
+  const fixOutput = agentFixOutput(fixInput, changedFiles);
+  const manifest = fixManifest(fixInput, changedFiles, patch);
+  const metadata = parseAgentFixOutput(
+    JSON.stringify(fixOutput),
+    fixInput,
+    changedFiles
+  );
+  const pullRequestBody = renderFixPrBody(metadata, manifest, {
+    repository,
+    runId: "12345",
+    patchSha256: manifest.patch_sha256,
+    issueUrl,
+  });
+  const fixture = remediationFinalizationFixture({
+    allFindingsAddressed: true,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    issueBody:
+      `${cycleMarkerV2(findings, {
+        findingFingerprint: fixInput.finding_fingerprint,
+      })}\n\nIssue body.\n`,
+  });
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-finalize-paths-")
+  );
+  const inputPath = path.join(tempDir, "upstream-review-fix-input.json");
+  const agentOutputPath = path.join(
+    tempDir,
+    "upstream-review-fix-agent.json"
+  );
+  const manifestPath = path.join(tempDir, "manifest.json");
+  const patchPath = path.join(tempDir, "fix.patch");
+  const reportPath = path.join(tempDir, "upstream-review.json");
+  try {
+    await Promise.all([
+      fs.writeFile(inputPath, `${JSON.stringify(fixInput)}\n`),
+      fs.writeFile(agentOutputPath, `${JSON.stringify(fixOutput)}\n`),
+      fs.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`),
+      fs.writeFile(patchPath, patch),
+      fs.writeFile(reportPath, `${JSON.stringify(report)}\n`),
+    ]);
+
+    const result = await finalizeRemediationIssue({
+      ...fixture.args,
+      runId: "12345",
+      baseSha: reviewBaseSha,
+      approvedStage: "initial-review",
+      inputPath,
+      agentOutputPath,
+      manifestPath,
+      patchPath,
+      reportPath,
+    });
+
+    assert.equal(result.action, "closed");
+    const update = fixture.calls.find((call) => call.method === "PATCH");
+    assert.equal(update.body.state, "closed");
+    assert.equal(update.body.state_reason, "completed");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("treats an Issue auto-closed by a merged PR as finalized", async () => {
   const fixture = remediationFinalizationFixture({
     issueState: "closed",
@@ -2252,6 +2671,199 @@ test("keeps a partially addressed remediation Issue open after merge", async () 
   assert.equal(
     fixture.calls.some((call) => call.method === "PATCH"),
     false
+  );
+});
+
+test("shrinks v2 Issue coverage to unresolved findings after a partial merge", async () => {
+  const fixedFinding = finding("starrail");
+  const unresolvedFinding = finding("genshin");
+  const report = agenticReviewReport([fixedFinding, unresolvedFinding]);
+  const fixInput = buildAgenticFixInput(report);
+  const patch = Buffer.from("verified patch");
+  const changedFiles = ["apps/api/src/games/starrail.ts"];
+  const fixOutput = agentFixOutput(fixInput, changedFiles);
+  const manifest = fixManifest(fixInput, changedFiles, patch);
+  const metadata = parseAgentFixOutput(
+    JSON.stringify(fixOutput),
+    fixInput,
+    changedFiles
+  );
+  const pullRequestBody = renderFixPrBody(metadata, manifest, {
+    repository,
+    runId: "12345",
+    patchSha256: manifest.patch_sha256,
+    issueUrl,
+  });
+  const originalIssueBody =
+    `${cycleMarkerV2([fixedFinding, unresolvedFinding], {
+      findingFingerprint: fixInput.finding_fingerprint,
+      coverageFingerprint:
+        findingCoverageFingerprint([fixedFinding, unresolvedFinding]),
+    })}\n\nIssue body.\n`;
+  const fixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    issueBody: originalIssueBody,
+  });
+
+  const result = await finalizeRemediationIssue({
+    ...fixture.args,
+    runId: "12345",
+    baseSha: reviewBaseSha,
+    approvedStage: "initial-review",
+    fixInput,
+    fixAgentOutput: fixOutput,
+    fixManifest: manifest,
+    fixPatch: patch,
+    report,
+  });
+
+  assert.equal(result.action, "coverage_reduced");
+  assert.deepEqual(result.finding_keys, findingKeys([unresolvedFinding]));
+  const update = fixture.calls.find((call) => call.method === "PATCH");
+  assert.ok(update);
+  assert.equal(Object.hasOwn(update.body, "state"), false);
+  assert.equal(
+    update.body.body.split("\n")[0],
+    cycleMarkerV2([unresolvedFinding], {
+      findingFingerprint: fixInput.finding_fingerprint,
+      coverageFingerprint: findingCoverageFingerprint([unresolvedFinding]),
+    })
+  );
+  assert.match(update.body.body, /genshin raw notice/);
+  assert.doesNotMatch(update.body.body, /starrail raw notice/);
+
+  const repeatedFixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    issueBody: update.body.body,
+  });
+  const repeatedResult = await finalizeRemediationIssue({
+    ...repeatedFixture.args,
+    runId: "12345",
+    baseSha: reviewBaseSha,
+    approvedStage: "initial-review",
+    fixInput,
+    fixAgentOutput: fixOutput,
+    fixManifest: manifest,
+    fixPatch: patch,
+    report,
+  });
+  assert.equal(repeatedResult.action, "already_reduced");
+  assert.equal(
+    repeatedFixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+
+  const downgradedFixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    issueBody:
+      `${cycleMarker(fixInput.finding_fingerprint, remediationCycle)}\n\nIssue body.\n`,
+  });
+  await assert.rejects(
+    () =>
+      finalizeRemediationIssue({
+        ...downgradedFixture.args,
+        runId: "12345",
+        baseSha: reviewBaseSha,
+        approvedStage: "initial-review",
+        fixInput,
+        fixAgentOutput: fixOutput,
+        fixManifest: manifest,
+        fixPatch: patch,
+        report,
+      }),
+    /require a v2 managed Issue marker/
+  );
+  assert.equal(
+    downgradedFixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+
+  const reworkFixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    issueBody: originalIssueBody,
+  });
+  const reworkResult = await finalizeRemediationIssue({
+    ...reworkFixture.args,
+    runId: "12345",
+    baseSha: reviewBaseSha,
+    approvedStage: "rework-round-1",
+    fixInput,
+    fixAgentOutput: fixOutput,
+    fixManifest: manifest,
+    fixPatch: patch,
+    report,
+  });
+  assert.equal(reworkResult.action, "left_open_after_rework");
+  assert.equal(reworkResult.approved_stage, "rework-round-1");
+  assert.deepEqual(
+    reworkResult.finding_keys,
+    findingKeys([fixedFinding, unresolvedFinding])
+  );
+  assert.equal(
+    reworkFixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+
+  const shrunkIssue = {
+    number: issueNumber,
+    html_url: issueUrl,
+    title: update.body.title,
+    body: update.body.body,
+    state: "open",
+    user: { login: "github-actions[bot]" },
+  };
+  const regressionReport = agenticReviewReport([fixedFinding]);
+  delete regressionReport.issue;
+  const regressionFixture = syncIssueRequest([shrunkIssue], {
+    createdIssueNumber: 91,
+  });
+  const regressionResult = await syncIssue(regressionReport, {
+    request: regressionFixture.request,
+    repository,
+    runId: "99999",
+    runAttempt: "1",
+    dryRun: false,
+  });
+  assert.equal(regressionResult.action, "created");
+  assert.deepEqual(regressionResult.finding_keys, findingKeys([fixedFinding]));
+
+  const unresolvedReport = agenticReviewReport([unresolvedFinding]);
+  delete unresolvedReport.issue;
+  const unresolvedFixture = syncIssueRequest([shrunkIssue]);
+  const unresolvedResult = await syncIssue(unresolvedReport, {
+    request: unresolvedFixture.request,
+    repository,
+    runId: "99999",
+    runAttempt: "2",
+    dryRun: false,
+  });
+  assert.equal(unresolvedResult.action, "covered");
+
+  const closedShrunkIssue = { ...shrunkIssue, state: "closed" };
+  const closedRegressionReport = agenticReviewReport([unresolvedFinding]);
+  delete closedRegressionReport.issue;
+  const closedRegressionFixture = syncIssueRequest([closedShrunkIssue], {
+    createdIssueNumber: 92,
+  });
+  const closedRegressionResult = await syncIssue(closedRegressionReport, {
+    request: closedRegressionFixture.request,
+    repository,
+    runId: "99999",
+    runAttempt: "3",
+    dryRun: false,
+  });
+  assert.equal(closedRegressionResult.action, "created");
+  assert.equal(
+    closedRegressionResult.regression_of_issue_number,
+    issueNumber
   );
 });
 

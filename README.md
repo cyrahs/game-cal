@@ -185,10 +185,12 @@ workflow 由相互隔离的审查、修复、复审和合并阶段组成：
   会话。每个 Codex 只读仓库和对应游戏的紧凑 JSON shard，没有 Issue 写权限；
   单个 shard 最多返回 8 条 findings，六份合计不超过 48 条。
 - `publish`：在第三个 runner 中严格校验结构化结果、再次应用 suppression，再由
-  确定性脚本为本次 remediation cycle 创建或复用 Issue。只有同一 finding
-  fingerprint 的 Open Issue 才会复用；Closed Issue 永不 reopen，相同问题再次出现
-  会创建新的 regression Issue。这个 job 不接触 OpenAI Secrets，并生成只含已确认
-  findings、匹配证据和静态 parser 白名单的紧凑修复请求。
+  确定性脚本对每条 finding 生成 semantic key，并从本轮结果中扣除所有 Open 托管
+  Issue 已覆盖的 key。若本轮集合已被旧 Issue 的并集包含，则不修改旧 Issue、不开
+  新 Issue，也不启动 repair；若只有部分重叠，则仅为不重叠的补集创建新 Issue。
+  Closed Issue 永不参与覆盖或 reopen，相同补集再次出现时会创建新的 regression
+  Issue。这个 job 不接触 OpenAI Secrets，并生成只含补集 findings、匹配证据和静态
+  parser 白名单的紧凑修复请求。
 - `repair`：仅在存在 findings 且当前 remediation cycle 没有 Open PR 时，再发起
   **一个** workspace-write Codex 会话。它没有 GitHub 写权限，只能修改受影响游戏
   对应的 `apps/api/src/games/<game>.ts`；补丁、base SHA、路径和 SHA-256 会由可信
@@ -223,9 +225,12 @@ workflow 由相互隔离的审查、修复、复审和合并阶段组成：
   Ready，并通过带 head SHA 条件的 API 自动 squash merge。Ready 后任一校验或合并
   失败时会尽力恢复为 Draft。
 - `finalize_remediation_issue`：仅在 GitHub 已确认 squash merge 后运行，重新验证
-  repository、Issue、fingerprint、cycle、PR 正文 digest 与 merge commit。全量修复
-  时确认对应 Issue 已按 `Closes #N` 关闭；部分修复时确认 `Refs #N` 对应的 Issue
-  仍保持 Open。
+  repository、Issue、fingerprint、cycle、PR 正文 digest、merge commit，以及原始
+  review/fix/manifest/patch artifacts。全量修复时确认对应 Issue 已按 `Closes #N`
+  关闭；初审直接通过的部分修复会让 `Refs #N` 对应的 Issue 保持 Open，并把其机器
+  coverage 和正文缩小到 `not_fixed` findings，避免已修复项以后回归时被旧 Issue
+  遮蔽。若 PR 经历过返工，则不再拿初始 fix 输出推断最终逐项状态，而是保守保留原
+  coverage，等待下一次巡检按当前上游数据重新做集合差。
 
 返工轮次在主 workflow DAG 中静态展开，硬上限为 3，不能由 review 文本、PR 内容或
 dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，在原始 base 上创建新的
@@ -240,9 +245,18 @@ dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，�
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
 采集数据、任一 Codex 输出不完整、六个游戏未全部审查或 JSON 不符合约束时，发布
 步骤会失败。没有 findings 时不会创建、关闭或修改任何历史 Issue；有 findings 时，
-workflow 以隐藏的 cycle marker 和 finding fingerprint 查找唯一的 Open Issue。找到
-时更新该周期，找不到时创建新 Issue；即使相同 fingerprint 曾经出现过，只要旧 Issue
-已经 Closed，也只会把它记录为 regression 来源并新开 Issue，绝不 reopen 历史记录。
+workflow 用六个稳定身份字段
+（`game`、`kind`、`raw_title`、`api_title`、`start_time`、`end_time`）为每条
+finding 生成 SHA-256 key，并读取 v2 hidden cycle marker 中排序且去重的 key 集合。
+marker 的 coverage digest 由该 key 列表确定性重算，二者不一致时立即失败。
+所有 Open 托管 Issue 的 coverage 必须彼此不重叠；本轮 findings 被它们的并集完全
+包含时返回 `covered` 且不做任何 Issue 写入，部分重叠时只对集合差创建一个补集 Issue，
+并且后续 fix input、证据、文件白名单、fingerprint、分支和 PR 都只绑定这个补集。
+同一 semantic finding 被模型重复输出时会先去重。Closed Issue 不计入 coverage；
+若 Closed v2 Issue 的 coverage key 集与新补集完全相同（v1 则按整体 fingerprint），
+只会记录为 regression 来源并新开 Issue，绝不 reopen 历史记录。旧 v1 Open marker
+没有逐条 key，只在其整体
+fingerprint 可精确覆盖当前剩余集合时兼容；其他情况会 fail closed，避免猜测重叠关系。
 自动修复若越过文件白名单、创建/删除/重命名文件、改变文件模式、只改空白、生成
 二进制或超过 512 KB 的初始 patch、测试失败，均不会进入提 PR 阶段；每轮返工的增量
 和累计 patch 还分别限制为 128 KiB，且累计 patch 不得丢失上一轮已修改的 parser。
@@ -254,8 +268,10 @@ base 上已有当前 cycle 的 Open PR 时停止重复创建；默认分支因�
 返工链路
 能以精确旧 head lease 替换刚审查过的自动分支，任何并发或人工 head 变化都会使操作
 失败。自动修复无补丁、验证失败、返工耗尽或合并失败时，对应 Issue 保持 Open 供人工
-跟进；只有全部 findings 都被修复并成功合并时才关闭，部分修复成功合并后也继续
-Open。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与 PR
+跟进；只有全部 findings 都被修复并成功合并时才关闭，部分修复成功合并后继续 Open。
+初审直接通过时 coverage 会原子缩小到仍为 `not_fixed` 的 key；经历返工后则保留
+原 coverage，避免初始逐项结果被误当作最终状态。review 输出不完整、上下文 digest
+不一致、PR head 漂移或 reviewer 与 PR
 作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未配置
 “新提交使旧批准失效”时，也会在调用模型前失败。不含人工重新运行 job 的单次初始
 完整运行最多调用 8 个 agent；三轮都执行时，最多为 14 个：六个游戏 reviewer、
