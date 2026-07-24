@@ -328,6 +328,40 @@ function stableEventId(title: string, startTime: string, endTime: string): strin
   return stableHash64(`${title}|${startTime}|${endTime}`);
 }
 
+function extractSnowbreakGachaTimeRange(
+  contentHtml: string,
+  fallbackStartIso: string
+): { startIso: string; endIso: string } | null {
+  const timeLine = tokenizeAnnouncementLines(contentHtml).find((line) =>
+    /活动时间[:：]/.test(line)
+  );
+  const timeText = /活动时间[:：]\s*(.+)$/.exec(timeLine ?? "")?.[1];
+  const range = parseTimeRange(timeText ?? "");
+  if (!range) return null;
+
+  const anchorYear = Number(fallbackStartIso.slice(0, 4));
+  const anchorMonth = Number(fallbackStartIso.slice(5, 7));
+  const anchorDay = Number(fallbackStartIso.slice(8, 10));
+  const parseOpts = { anchorYear, anchorMonth, anchorDay };
+  const start = parseDatePoint(range.startRaw, parseOpts);
+  const end = parseDatePoint(range.endRaw, parseOpts);
+  if (!start || !end) return null;
+
+  const startIso = toIsoWithSourceOffset(
+    formatNaiveDateTime(start),
+    SNOWBREAK_SOURCE_TZ_OFFSET
+  );
+  const endIso = toIsoWithSourceOffset(
+    formatNaiveDateTime(end),
+    SNOWBREAK_SOURCE_TZ_OFFSET
+  );
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
+    ? { startIso, endIso }
+    : null;
+}
+
 function parsePositiveIntLike(input: unknown): number | null {
   if (input == null) return null;
   const n = typeof input === "number" ? input : Number(input);
@@ -405,9 +439,18 @@ function extractSnowbreakGachaEventsFromAnnouncements(list: SnowbreakAnnItem[]):
     const endSeconds = parsePositiveIntLike(item.end_time);
     if (startSeconds == null || endSeconds == null || endSeconds <= startSeconds) continue;
 
-    const startIso = unixSecondsToIsoWithSourceOffset(startSeconds, SNOWBREAK_SOURCE_TZ_OFFSET);
-    const endIso = unixSecondsToIsoWithSourceOffset(endSeconds, SNOWBREAK_SOURCE_TZ_OFFSET);
+    const fallbackStartIso = unixSecondsToIsoWithSourceOffset(
+      startSeconds,
+      SNOWBREAK_SOURCE_TZ_OFFSET
+    );
+    const fallbackEndIso = unixSecondsToIsoWithSourceOffset(
+      endSeconds,
+      SNOWBREAK_SOURCE_TZ_OFFSET
+    );
     const contentHtml = parseLocalizedText(item.content);
+    const contentRange = extractSnowbreakGachaTimeRange(contentHtml, fallbackStartIso);
+    const startIso = contentRange?.startIso ?? fallbackStartIso;
+    const endIso = contentRange?.endIso ?? fallbackEndIso;
     const numericId = parsePositiveIntLike(item.id);
     const id =
       numericId != null

@@ -53,6 +53,12 @@ type MihoyoAnnContentResponse = {
   };
 };
 
+type StarRailParsedTimeRange = {
+  startIso: string | null;
+  endIso: string | null;
+  endText?: string;
+};
+
 const STARRAIL_DEFAULT_LIST_API =
   "https://hkrpg-api-static.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnList?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn&platform=pc&region=prod_gf_cn&level=30&uid=11111111";
 
@@ -311,7 +317,7 @@ function escapeRegExp(input: string): string {
 function isStarRailTimeLabelLine(line: string, label: string): boolean {
   const normalized = normalizeSectionBoundary(line);
   return new RegExp(
-    `^(?:本期)?${escapeRegExp(label)}(?:$|\\s*[：:为]|\\s+(?=${STARRAIL_DATE_TIME_PATTERN}))`
+    `^(?:本期)?${escapeRegExp(label)}(?:$|\\s*[：:为]|\\s+)`
   ).test(normalized);
 }
 
@@ -366,7 +372,7 @@ function extractStarRailTimeRangeFromContent(
     singleVersionMaintenanceEndIso: string | null;
     listEndIso: string;
   }
-): { startIso: string | null; endIso: string | null } {
+): StarRailParsedTimeRange {
   const section = extractStarRailTimeSection(content);
   if (!section) return { startIso: null, endIso: null };
 
@@ -401,7 +407,8 @@ function extractStarRailTimeRangeFromContent(
   if (dates.length === 1 && /(?:后开启|后长期开放|长期开放|永久开放|持续开放)/.test(section)) {
     return {
       startIso: toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET),
-      endIso: opts.listEndIso,
+      endIso: null,
+      endText: /永久开放/.test(section) ? "永久开放" : "长期开放",
     };
   }
 
@@ -532,9 +539,17 @@ function addContentItem(out: Map<number, MihoyoAnnContentItem[]>, item: MihoyoAn
     out.set(item.ann_id, [item]);
     return;
   }
-  // Keep stable insertion order, but avoid exact title duplicates.
-  if (!list.some((x) => `${x.title?.trim() ?? ""}|${x.subtitle?.trim() ?? ""}` === titleKey)) {
+  const duplicateIndex = list.findIndex(
+    (x) => `${x.title?.trim() ?? ""}|${x.subtitle?.trim() ?? ""}` === titleKey
+  );
+  if (duplicateIndex < 0) {
     list.push(item);
+    return;
+  }
+
+  const existing = list[duplicateIndex]!;
+  if ((item.content?.length ?? 0) > (existing.content?.length ?? 0)) {
+    list[duplicateIndex] = item;
   }
 }
 
@@ -775,7 +790,13 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
   });
 
   const versionMaintenanceEndByLabel = new Map<string, string>();
-  for (const noticeItem of list) {
+  const allNoticeItems = new Map<string, MihoyoAnnItem>();
+  for (const category of categories) {
+    for (const noticeItem of category.list ?? []) {
+      allNoticeItems.set(makeAnnItemKey(noticeItem), noticeItem);
+    }
+  }
+  for (const noticeItem of allNoticeItems.values()) {
     if (!isVersionNoticeText(noticeItem.title ?? "") && !isVersionNoticeText(noticeItem.subtitle ?? "")) {
       continue;
     }
@@ -835,7 +856,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
-  return [...filteredWithContent, ...contentOnlyItems].map((item) => {
+  return [...filteredWithContent, ...contentOnlyItems].map((item): CalendarEvent => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
@@ -853,12 +874,27 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const sMs = Date.parse(resolvedStartIso);
     const eMs = Date.parse(resolvedEndIso);
     const hasValidContentRange = Number.isFinite(sMs) && Number.isFinite(eMs) && eMs > sMs;
+    const relativeEndText = contentRange.endText?.trim();
+    const hasValidRelativeContentRange =
+      contentRange.startIso != null &&
+      Number.isFinite(Date.parse(contentRange.startIso)) &&
+      relativeEndText != null;
 
     return {
       id: `starrail:${makeAnnItemKey(item)}`,
       title,
-      start_time: hasValidContentRange ? resolvedStartIso : listStartIso,
-      end_time: hasValidContentRange ? resolvedEndIso : listEndIso,
+      start_time: hasValidRelativeContentRange
+        ? contentRange.startIso!
+        : hasValidContentRange
+          ? resolvedStartIso
+          : listStartIso,
+      end_time: hasValidRelativeContentRange
+        ? null
+        : hasValidContentRange
+          ? resolvedEndIso
+          : listEndIso,
+      end_time_kind: hasValidRelativeContentRange ? "relative" : undefined,
+      end_time_text: hasValidRelativeContentRange ? relativeEndText : undefined,
       is_gacha: isGacha,
       gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,
