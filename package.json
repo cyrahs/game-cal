@@ -20,6 +20,7 @@
     "review:upstream:finalize-pr-rework": "node scripts/review-upstream.mjs --finalize-pr-rework",
     "review:upstream:verify-pr-rework": "node scripts/review-upstream.mjs --verify-pr-rework-artifact",
     "test:upstream-review": "node --test scripts/review-upstream.test.mjs",
+    "test:game-parsers": "pnpm --filter @game-cal/api test:game-parsers",
     "cf:dev": "pnpm --filter @game-cal/web build && wrangler dev",
     "cf:deploy": "pnpm --filter @game-cal/web build && wrangler deploy",
     "cf:deploy:dry": "pnpm --filter @game-cal/web build && wrangler deploy --dry-run",

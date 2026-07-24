@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
@@ -45,8 +45,9 @@ const DEFAULT_ISSUE_TITLE = "Upstream Review Alerts";
 const GITHUB_ACTIONS_LOGIN = "github-actions[bot]";
 const ISSUE_MARKER_VERSION = "v2";
 const LEGACY_ISSUE_MARKER_VERSION = "v1";
-const FINDING_KEY_VERSION = "v1";
-const FINDING_COVERAGE_VERSION = "v1";
+const FINDING_IDENTITY_VERSION = 3;
+const FINDING_KEY_VERSION = "v3";
+const FINDING_COVERAGE_VERSION = "v3";
 const DEFAULT_SUPPRESSIONS_PATH = ".github/upstream-review-suppressions.json";
 const DEFAULT_GAMES = ["genshin", "starrail", "ww", "zzz", "snowbreak", "endfield"];
 const SUPPORTED_GAMES = new Set(DEFAULT_GAMES);
@@ -69,6 +70,7 @@ const MAX_AGENT_SUMMARY_LENGTH = 2_000;
 const MAX_AGENT_TITLE_LENGTH = 500;
 const MAX_AGENT_TIME_LENGTH = 100;
 const MAX_AGENT_REASON_LENGTH = 1_000;
+const MAX_FINDING_EVIDENCE_REFS = 4;
 const MAX_ISSUE_BODY_BYTES = 60_000;
 const MAX_FIX_EVIDENCE_ITEMS = 4;
 const MAX_FIX_PATCH_BYTES = 512_000;
@@ -112,6 +114,17 @@ const GAME_SOURCE_FILES = {
   snowbreak: "apps/api/src/games/snowbreak.ts",
   endfield: "apps/api/src/games/endfield.ts",
 };
+const AGENT_PARSER_REGRESSION_TEST_FILE =
+  "apps/api/src/games/parser-regressions.agent.test.ts";
+const TRUSTED_PARSER_REGRESSION_TEST_FILE =
+  "apps/api/src/games/parser-regressions.trusted.test.ts";
+
+function getAllowedFixFiles(targetGames) {
+  const sourceFiles = targetGames.map((game) => GAME_SOURCE_FILES[game]);
+  return targetGames.length > 0
+    ? [...sourceFiles, AGENT_PARSER_REGRESSION_TEST_FILE]
+    : [];
+}
 
 function trimTrailingSlash(input) {
   return input.replace(/\/+$/, "");
@@ -758,6 +771,87 @@ function getDatasetNotes(game) {
   }
 }
 
+function normalizeIdentityText(input) {
+  return normalizeWhitespace(input)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s·・•‧．.「」『』“”"'’‘:：,，。!！?？()[\]（）【】{}]/gu, "");
+}
+
+function getEvidenceTitle(item) {
+  return normalizeWhitespace(
+    item?.title || item?.subtitle || item?.left_title || item?.name || ""
+  );
+}
+
+function getRawEvidenceSourceId(game, item) {
+  for (const field of [
+    "ann_id",
+    "activity_id",
+    "article_id",
+    "notice_id",
+    "cid",
+    "id",
+    "url",
+    "linkUrl",
+  ]) {
+    const value = item?.[field];
+    if (
+      (typeof value === "string" && value.trim()) ||
+      (typeof value === "number" && Number.isFinite(value))
+    ) {
+      const sourceId = `${field}:${normalizeWhitespace(value)}`;
+      if (game === "starrail" && field === "ann_id") {
+        const titleKey = normalizeIdentityText(getEvidenceTitle(item));
+        const typeKey = normalizeIdentityText(
+          `${item?.type ?? ""}:${item?.type_label ?? ""}`
+        );
+        if (!titleKey) {
+          throw new Error(
+            "Cannot disambiguate Star Rail evidence with a reused ann_id"
+          );
+        }
+        // Star Rail can reuse ann_id for distinct records. Keep mutable
+        // windows out of the identity, but include the record subject so
+        // separate announcements cannot collapse into one finding.
+        return `${sourceId}|title:${titleKey}|type:${typeKey}`;
+      }
+      return sourceId;
+    }
+  }
+  return "";
+}
+
+function getEvidenceIdentityRef(game, side, item) {
+  const titleKey = normalizeIdentityText(getEvidenceTitle(item));
+  const sourceId = side === "raw" ? getRawEvidenceSourceId(game, item) : "";
+  const basis = sourceId || `title:${titleKey}`;
+  if (!titleKey && !sourceId) {
+    throw new Error(`Cannot derive stable ${side} evidence identity for ${game}`);
+  }
+  return `${side}:${game}:${sha256(
+    `upstream-review-evidence-identity:v1\n${basis}`
+  ).slice(0, 32)}`;
+}
+
+function decorateEvidenceItems(game, side, items) {
+  const decorated = items.map((item, index) => {
+    const serialized = JSON.stringify(item);
+    return {
+      ...item,
+      review_ref: `${side}:${game}:${sha256(
+        `upstream-review-evidence-snapshot:v1\n${index}\n${serialized}`
+      ).slice(0, 32)}`,
+      identity_ref: getEvidenceIdentityRef(game, side, item),
+    };
+  });
+  const reviewRefs = decorated.map((item) => item.review_ref);
+  if (new Set(reviewRefs).size !== reviewRefs.length) {
+    throw new Error(`Duplicate ${side} evidence review_ref in ${game} dataset`);
+  }
+  return decorated;
+}
+
 function buildGameDataset(game, rawNotices, apiEvents, maxItems) {
   return {
     game,
@@ -765,8 +859,16 @@ function buildGameDataset(game, rawNotices, apiEvents, maxItems) {
     notes: getDatasetNotes(game),
     raw_notice_count: rawNotices.length,
     api_event_count: apiEvents.length,
-    raw_notices: rawNotices.slice(0, maxItems),
-    api_events: apiEvents.slice(0, maxItems),
+    raw_notices: decorateEvidenceItems(
+      game,
+      "raw",
+      rawNotices.slice(0, maxItems)
+    ),
+    api_events: decorateEvidenceItems(
+      game,
+      "api",
+      apiEvents.slice(0, maxItems)
+    ),
   };
 }
 
@@ -823,6 +925,28 @@ function truncateText(value, maxLength) {
   return `${characters.slice(0, Math.max(0, maxLength - 1)).join("")}…`;
 }
 
+function normalizeEvidenceRefs(value, label, { required = false } = {}) {
+  if (value == null && !required) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_FINDING_EVIDENCE_REFS ||
+    value.some(
+      (ref) =>
+        typeof ref !== "string" ||
+        !/^(?:raw|api):[a-z]+:[a-f0-9]{32}$/.test(ref)
+    )
+  ) {
+    throw new Error(
+      `Invalid ${label}: expected at most ${MAX_FINDING_EVIDENCE_REFS} evidence refs`
+    );
+  }
+  const refs = value.map((ref) => ref.trim());
+  if (new Set(refs).size !== refs.length) {
+    throw new Error(`Invalid ${label}: evidence refs must be unique`);
+  }
+  return refs.sort(compareCodePoints);
+}
+
 function normalizeFinding(raw, fallbackGame = "unknown") {
   const game = SUPPORTED_GAMES.has(fallbackGame) ? fallbackGame : "unknown";
   const severity = ["high", "medium", "low"].includes(raw?.severity) ? raw.severity : "medium";
@@ -845,10 +969,31 @@ function normalizeFinding(raw, fallbackGame = "unknown") {
     start_time: truncateText(raw?.start_time, MAX_AGENT_TIME_LENGTH),
     end_time: truncateText(raw?.end_time, MAX_AGENT_TIME_LENGTH),
     reason: truncateText(normalizeWhitespace(raw?.reason || ""), MAX_AGENT_REASON_LENGTH),
+    raw_refs: normalizeEvidenceRefs(raw?.raw_refs, "finding raw_refs"),
+    api_refs: normalizeEvidenceRefs(raw?.api_refs, "finding api_refs"),
+    ...(Array.isArray(raw?.subject_refs)
+      ? {
+          subject_refs: [...new Set(
+            raw.subject_refs.map((ref) => {
+              if (
+                typeof ref !== "string" ||
+                !/^(?:raw|api):[a-z]+:[a-f0-9]{32}$/.test(ref)
+              ) {
+                throw new Error("Invalid finding subject_refs");
+              }
+              return ref;
+            })
+          )].sort(compareCodePoints),
+        }
+      : {}),
   };
 }
 
-function validateAgentFinding(raw, index) {
+function validateAgentFinding(
+  raw,
+  index,
+  { requireEvidenceRefs = false } = {}
+) {
   if (!isRecord(raw)) {
     throw new Error(`Invalid agent finding at index ${index}: expected an object`);
   }
@@ -895,14 +1040,103 @@ function validateAgentFinding(raw, index) {
   if (!finding.title && !finding.raw_title && !finding.api_title) {
     throw new Error(`Invalid agent finding at index ${index}: at least one title is required`);
   }
+  if (requireEvidenceRefs) {
+    normalizeEvidenceRefs(raw.raw_refs, `finding raw_refs at index ${index}`, {
+      required: true,
+    });
+    normalizeEvidenceRefs(raw.api_refs, `finding api_refs at index ${index}`, {
+      required: true,
+    });
+  }
 
   return finding;
+}
+
+function getFindingEvidenceMinimums(kind) {
+  switch (kind) {
+    case "missing_event":
+      return { raw: 1, api: 0 };
+    case "non_event_included":
+      return { raw: 0, api: 1 };
+    case "duplicate_event":
+      return { raw: 0, api: 2 };
+    case "wrong_time_window":
+      return { raw: 1, api: 1 };
+    default:
+      return { raw: 0, api: 0, either: 1 };
+  }
+}
+
+function materializeFindingEvidence(finding, dataset, index) {
+  if (!isRecord(dataset) || dataset.game !== finding.game) {
+    throw new Error(
+      `Finding at index ${index} has no matching trusted review dataset`
+    );
+  }
+  const rawByRef = new Map(
+    dataset.raw_notices.map((item) => [item.review_ref, item])
+  );
+  const apiByRef = new Map(
+    dataset.api_events.map((item) => [item.review_ref, item])
+  );
+  const rawItems = finding.raw_refs.map((ref) => {
+    const item = rawByRef.get(ref);
+    if (!item) {
+      throw new Error(
+        `Finding at index ${index} cites unknown raw evidence ref ${ref}`
+      );
+    }
+    return item;
+  });
+  const apiItems = finding.api_refs.map((ref) => {
+    const item = apiByRef.get(ref);
+    if (!item) {
+      throw new Error(
+        `Finding at index ${index} cites unknown API evidence ref ${ref}`
+      );
+    }
+    return item;
+  });
+  const minimums = getFindingEvidenceMinimums(finding.kind);
+  if (
+    rawItems.length < minimums.raw ||
+    apiItems.length < minimums.api ||
+    (minimums.either && rawItems.length + apiItems.length < minimums.either)
+  ) {
+    throw new Error(
+      `Finding at index ${index} does not cite the required evidence for ${finding.kind}`
+    );
+  }
+
+  let subjectItems;
+  if (finding.kind === "missing_event" || finding.kind === "wrong_time_window") {
+    subjectItems = rawItems.length > 0 ? rawItems : apiItems;
+  } else if (
+    finding.kind === "non_event_included" ||
+    finding.kind === "duplicate_event"
+  ) {
+    subjectItems = apiItems;
+  } else {
+    subjectItems = [...rawItems, ...apiItems];
+  }
+  const subjectRefs = [
+    ...new Set(subjectItems.map((item) => item.identity_ref).filter(Boolean)),
+  ].sort(compareCodePoints);
+  if (subjectRefs.length === 0) {
+    throw new Error(`Finding at index ${index} has no stable evidence identity`);
+  }
+
+  return {
+    ...finding,
+    subject_refs: subjectRefs,
+  };
 }
 
 function parseAgentReview(
   text,
   expectedGames = DEFAULT_GAMES,
-  maxFindings = MAX_AGENT_FINDINGS
+  maxFindings = MAX_AGENT_FINDINGS,
+  options = {}
 ) {
   if (
     !Array.isArray(expectedGames) ||
@@ -987,7 +1221,7 @@ function parseAgentReview(
 
   const allowedGames = new Set(expectedGames);
   const findings = rawFindings.map((finding, index) =>
-    validateAgentFinding(finding, index)
+    validateAgentFinding(finding, index, options)
   );
   const crossGameFinding = findings.find((finding) => !allowedGames.has(finding.game));
   if (crossGameFinding) {
@@ -1002,7 +1236,13 @@ function parseAgentReview(
   };
 }
 
-function validateCollectedDataset(dataset, index, label, maxItems) {
+function validateCollectedDataset(
+  dataset,
+  index,
+  label,
+  maxItems,
+  { requireEvidenceRefs = false } = {}
+) {
   if (!isRecord(dataset)) {
     throw new Error(`Invalid collected review input: ${label}[${index}] must be an object`);
   }
@@ -1048,6 +1288,20 @@ function validateCollectedDataset(dataset, index, label, maxItems) {
         `Invalid collected review input: ${label}[${index}].${itemsField} has ${items.length} item(s); expected ${expectedLength}`
       );
     }
+    if (
+      requireEvidenceRefs &&
+      items.some(
+        (item) =>
+          typeof item.review_ref !== "string" ||
+          typeof item.identity_ref !== "string" ||
+          !/^(?:raw|api):[a-z]+:[a-f0-9]{32}$/.test(item.review_ref) ||
+          !/^(?:raw|api):[a-z]+:[a-f0-9]{32}$/.test(item.identity_ref)
+      )
+    ) {
+      throw new Error(
+        `Invalid collected review input: ${label}[${index}].${itemsField} lacks stable evidence refs`
+      );
+    }
   }
 
   return game;
@@ -1057,9 +1311,10 @@ function validateCollectedReviewInput(input) {
   if (!isRecord(input) || input.mode !== "collect_only") {
     throw new Error("Invalid collected review input: expected mode=collect_only");
   }
-  if (input.schema_version !== 2) {
+  if (![2, 3].includes(input.schema_version)) {
     throw new Error("Invalid collected review input: unsupported schema_version");
   }
+  const requireEvidenceRefs = input.schema_version === 3;
   if (
     typeof input.generated_at !== "string" ||
     !Number.isFinite(Date.parse(input.generated_at))
@@ -1077,10 +1332,14 @@ function validateCollectedReviewInput(input) {
   }
 
   const snapshotGames = input.datasets.map((dataset, index) =>
-    validateCollectedDataset(dataset, index, "datasets", input.max_items)
+    validateCollectedDataset(dataset, index, "datasets", input.max_items, {
+      requireEvidenceRefs,
+    })
   );
   const games = input.review_datasets.map((dataset, index) =>
-    validateCollectedDataset(dataset, index, "review_datasets", input.max_items)
+    validateCollectedDataset(dataset, index, "review_datasets", input.max_items, {
+      requireEvidenceRefs,
+    })
   );
 
   if (new Set(games).size !== games.length) {
@@ -1168,8 +1427,18 @@ function parseJsonDocument(text, label) {
 }
 
 function validateAgenticReviewReport(report) {
-  if (!isRecord(report) || report.mode !== "agentic_review" || report.schema_version !== 2) {
+  if (
+    !isRecord(report) ||
+    report.mode !== "agentic_review" ||
+    ![2, 3].includes(report.schema_version)
+  ) {
     throw new Error("Invalid agentic review report");
+  }
+  if (
+    report.schema_version === 3 &&
+    report.finding_identity_version !== FINDING_IDENTITY_VERSION
+  ) {
+    throw new Error("Invalid agentic review report finding identity version");
   }
   if (!isRecord(report.review) || !Array.isArray(report.review.findings)) {
     throw new Error("Invalid agentic review report: missing findings");
@@ -1180,8 +1449,9 @@ function validateAgenticReviewReport(report) {
     );
   }
 
-  const findings = report.review.findings.map((finding, index) =>
-    validateAgentFinding(finding, index)
+  const requireEvidenceRefs = report.schema_version === 3;
+  const normalizedFindings = report.review.findings.map((finding, index) =>
+    validateAgentFinding(finding, index, { requireEvidenceRefs })
   );
   const reviewDatasets = report.review_datasets;
   if (!Array.isArray(reviewDatasets)) {
@@ -1217,6 +1487,19 @@ function validateAgenticReviewReport(report) {
       "Invalid agentic review report: review_datasets must cover all six games"
     );
   }
+
+  const datasetsByGame = new Map(
+    reviewDatasets.map((dataset) => [dataset.game, dataset])
+  );
+  const findings = requireEvidenceRefs
+    ? normalizedFindings.map((finding, index) =>
+        materializeFindingEvidence(
+          finding,
+          datasetsByGame.get(finding.game),
+          index
+        )
+      )
+    : normalizedFindings;
 
   return {
     ...report,
@@ -1261,6 +1544,18 @@ function selectFindingEvidence(items, candidateTitles) {
     .slice(0, MAX_FIX_EVIDENCE_ITEMS);
 }
 
+function selectFindingEvidenceByRefs(items, refs, fallbackTitles = []) {
+  const requestedRefs = new Set(refs);
+  if (requestedRefs.size > 0) {
+    const selected = items.filter((item) => requestedRefs.has(item.review_ref));
+    if (selected.length !== requestedRefs.size) {
+      throw new Error("Finding evidence refs are missing from the trusted dataset");
+    }
+    return selected;
+  }
+  return selectFindingEvidence(items, fallbackTitles);
+}
+
 function sha256(input) {
   return createHash("sha256").update(input).digest("hex");
 }
@@ -1273,7 +1568,7 @@ function compareCodePoints(a, b) {
   return 0;
 }
 
-function canonicalizeFindingIdentity(finding) {
+function canonicalizeLegacyFindingIdentity(finding) {
   return {
     game: finding.game,
     kind: finding.kind,
@@ -1284,7 +1579,70 @@ function canonicalizeFindingIdentity(finding) {
   };
 }
 
+function getFallbackFindingSubjectRefs(finding) {
+  const rawTitle = normalizeIdentityText(
+    finding.raw_title || finding.title || ""
+  );
+  const apiTitle = normalizeIdentityText(
+    finding.api_title || finding.title || ""
+  );
+  let subjects;
+  if (finding.kind === "missing_event" || finding.kind === "wrong_time_window") {
+    subjects = rawTitle ? [`legacy:raw-title:${rawTitle}`] : [];
+  } else if (
+    finding.kind === "non_event_included" ||
+    finding.kind === "duplicate_event"
+  ) {
+    subjects = apiTitle ? [`legacy:api-title:${apiTitle}`] : [];
+  } else {
+    subjects = [
+      ...(rawTitle ? [`legacy:raw-title:${rawTitle}`] : []),
+      ...(apiTitle ? [`legacy:api-title:${apiTitle}`] : []),
+    ];
+  }
+  if (subjects.length === 0) {
+    throw new Error("Finding has no stable subject identity");
+  }
+  return [...new Set(subjects)].sort(compareCodePoints);
+}
+
+function canonicalizeFindingIdentity(finding) {
+  const subjectRefs =
+    Array.isArray(finding.subject_refs) && finding.subject_refs.length > 0
+      ? [...new Set(finding.subject_refs.map(String))].sort(compareCodePoints)
+      : getFallbackFindingSubjectRefs(finding);
+  return {
+    identity_version: FINDING_IDENTITY_VERSION,
+    game: finding.game,
+    kind: finding.kind,
+    subject_refs: subjectRefs,
+  };
+}
+
+function getLegacyFindingKey(finding) {
+  return sha256(
+    `upstream-review-finding:v1\n${JSON.stringify(
+      canonicalizeLegacyFindingIdentity(finding)
+    )}`
+  );
+}
+
+function getLegacyFindingFingerprint(findings) {
+  const canonicalFindings = [
+    ...new Map(
+      findings.map((finding) => {
+        const canonical = canonicalizeLegacyFindingIdentity(finding);
+        return [JSON.stringify(canonical), canonical];
+      })
+    ).values(),
+  ].sort((a, b) => compareCodePoints(JSON.stringify(a), JSON.stringify(b)));
+  return sha256(JSON.stringify(canonicalFindings));
+}
+
 function getFindingKey(finding) {
+  if (!Array.isArray(finding.subject_refs) || finding.subject_refs.length === 0) {
+    return getLegacyFindingKey(finding);
+  }
   return sha256(
     `upstream-review-finding:${FINDING_KEY_VERSION}\n${JSON.stringify(
       canonicalizeFindingIdentity(finding)
@@ -1314,6 +1672,19 @@ function getFindingKeys(findings) {
 }
 
 function getFindingFingerprint(findings) {
+  const identityVersions = new Set(
+    findings.map((finding) =>
+      Array.isArray(finding.subject_refs) && finding.subject_refs.length > 0
+        ? FINDING_IDENTITY_VERSION
+        : 1
+    )
+  );
+  if (identityVersions.size > 1) {
+    throw new Error("Cannot fingerprint mixed finding identity versions");
+  }
+  if (identityVersions.has(1)) {
+    return getLegacyFindingFingerprint(findings);
+  }
   const canonicalFindings = [
     ...new Map(
       findings.map((finding) => {
@@ -1347,20 +1718,37 @@ function validateFindingKeys(
   return value;
 }
 
-function getFindingCoverageFingerprintFromKeys(findingKeys) {
+function getFindingCoverageFingerprintFromKeys(
+  findingKeys,
+  identityVersion = FINDING_IDENTITY_VERSION
+) {
   const keys = validateFindingKeys(findingKeys, {
     allowEmpty: true,
     label: "coverage finding keys",
   });
   return sha256(
-    `upstream-review-coverage:${FINDING_COVERAGE_VERSION}\n${JSON.stringify(
+    `upstream-review-coverage:${
+      identityVersion === 1 ? "v1" : FINDING_COVERAGE_VERSION
+    }\n${JSON.stringify(
       keys
     )}`
   );
 }
 
 function getFindingCoverageFingerprint(findings) {
-  return getFindingCoverageFingerprintFromKeys(getFindingKeys(findings));
+  const identityVersion =
+    findings.length > 0 &&
+    findings.every(
+      (finding) =>
+        !Array.isArray(finding.subject_refs) ||
+        finding.subject_refs.length === 0
+    )
+      ? 1
+      : FINDING_IDENTITY_VERSION;
+  return getFindingCoverageFingerprintFromKeys(
+    getFindingKeys(findings),
+    identityVersion
+  );
 }
 
 function validateIssueNumber(value, label = "issue number") {
@@ -1444,7 +1832,11 @@ function renderIssueCycleMarker(
   const keys = validateFindingKeys(findingKeys);
   if (
     coverageFingerprint !==
-    getFindingCoverageFingerprintFromKeys(keys)
+      getFindingCoverageFingerprintFromKeys(
+        keys,
+        FINDING_IDENTITY_VERSION
+      ) &&
+    coverageFingerprint !== getFindingCoverageFingerprintFromKeys(keys, 1)
   ) {
     throw new Error(
       "Remediation cycle coverage fingerprint does not match its finding keys"
@@ -1464,9 +1856,20 @@ function parseIssueCycleMarker(body) {
     validateFindingKeys(findingKeys, {
       label: "managed Issue finding keys",
     });
-    const coverageFingerprint =
-      getFindingCoverageFingerprintFromKeys(findingKeys);
-    if (currentMatch[3] !== coverageFingerprint) {
+    const currentCoverageFingerprint =
+      getFindingCoverageFingerprintFromKeys(
+        findingKeys,
+        FINDING_IDENTITY_VERSION
+      );
+    const legacyCoverageFingerprint =
+      getFindingCoverageFingerprintFromKeys(findingKeys, 1);
+    const identityVersion =
+      currentMatch[3] === currentCoverageFingerprint
+        ? FINDING_IDENTITY_VERSION
+        : currentMatch[3] === legacyCoverageFingerprint
+          ? 1
+          : null;
+    if (identityVersion == null) {
       throw new Error(
         "Managed Issue coverage fingerprint does not match its finding keys"
       );
@@ -1475,8 +1878,9 @@ function parseIssueCycleMarker(body) {
       version: ISSUE_MARKER_VERSION,
       finding_fingerprint: currentMatch[1],
       remediation_cycle: currentMatch[2],
-      coverage_fingerprint: coverageFingerprint,
+      coverage_fingerprint: currentMatch[3],
       finding_keys: findingKeys,
+      finding_identity_version: identityVersion,
     };
   }
   if (text.startsWith(`<!-- upstream-review-cycle:${ISSUE_MARKER_VERSION}`)) {
@@ -1494,6 +1898,7 @@ function parseIssueCycleMarker(body) {
     remediation_cycle: legacyMatch[2],
     coverage_fingerprint: legacyMatch[1],
     finding_keys: null,
+    finding_identity_version: 1,
   };
 }
 
@@ -1592,11 +1997,21 @@ function buildAgenticFixInput(rawReport) {
       finding.api_title,
       finding.title,
     ]);
+    const rawRefs = gameFindings.flatMap((finding) => finding.raw_refs ?? []);
+    const apiRefs = gameFindings.flatMap((finding) => finding.api_refs ?? []);
     return {
       game,
       notes: dataset.notes,
-      matching_raw_notices: selectFindingEvidence(dataset.raw_notices, rawTitles),
-      matching_api_events: selectFindingEvidence(dataset.api_events, apiTitles),
+      matching_raw_notices: selectFindingEvidenceByRefs(
+        dataset.raw_notices,
+        rawRefs,
+        rawTitles
+      ),
+      matching_api_events: selectFindingEvidenceByRefs(
+        dataset.api_events,
+        apiRefs,
+        apiTitles
+      ),
     };
   });
 
@@ -1625,7 +2040,10 @@ function buildAgenticFixInput(rawReport) {
       (
         report.issue?.coverage_fingerprint != null &&
         report.issue.coverage_fingerprint !==
-          getFindingCoverageFingerprintFromKeys(remediationFindingKeys)
+          getFindingCoverageFingerprintFromKeys(
+            remediationFindingKeys,
+            report.schema_version === 3 ? FINDING_IDENTITY_VERSION : 1
+          )
       ) ||
       !/^[a-f0-9]{64}$/.test(remediationCycle) ||
       !/^[a-f0-9]{40}$/.test(baseSha)
@@ -1640,8 +2058,11 @@ function buildAgenticFixInput(rawReport) {
     : "";
 
   return {
-    schema_version: 2,
+    schema_version: report.schema_version === 3 ? 3 : 2,
     mode: "agentic_fix",
+    ...(report.schema_version === 3
+      ? { finding_identity_version: FINDING_IDENTITY_VERSION }
+      : {}),
     source_report: {
       generated_at: normalizeWhitespace(report.generated_at || ""),
       finalized_at: normalizeWhitespace(report.finalized_at || ""),
@@ -1653,15 +2074,39 @@ function buildAgenticFixInput(rawReport) {
     finding_fingerprint: findingFingerprint,
     fix_branch: fixBranch,
     target_games: targetGames,
-    allowed_files: targetGames.map((game) => GAME_SOURCE_FILES[game]),
+    allowed_files:
+      report.schema_version === 3
+        ? getAllowedFixFiles(targetGames)
+        : targetGames.map((game) => GAME_SOURCE_FILES[game]),
+    ...(report.schema_version === 3
+      ? {
+          required_test_files:
+            targetGames.length > 0
+              ? [AGENT_PARSER_REGRESSION_TEST_FILE]
+              : [],
+        }
+      : {}),
     findings,
     evidence,
   };
 }
 
 function validateAgenticFixInput(input) {
-  if (!isRecord(input) || input.mode !== "agentic_fix" || input.schema_version !== 2) {
+  if (
+    !isRecord(input) ||
+    input.mode !== "agentic_fix" ||
+    ![2, 3].includes(input.schema_version)
+  ) {
     throw new Error("Invalid agentic fix input");
+  }
+  if (
+    (input.schema_version === 3 &&
+      input.finding_identity_version !== FINDING_IDENTITY_VERSION) ||
+    (input.schema_version === 2 &&
+      input.finding_identity_version != null &&
+      input.finding_identity_version !== 1)
+  ) {
+    throw new Error("Invalid agentic fix input finding identity version");
   }
   if (
     !Array.isArray(input.target_games) ||
@@ -1694,15 +2139,34 @@ function validateAgenticFixInput(input) {
     throw new Error("Invalid agentic fix input: target_games must use canonical order");
   }
 
-  const expectedAllowedFiles = expectedTargetGames.map(
-    (game) => GAME_SOURCE_FILES[game]
-  );
+  const expectedAllowedFiles =
+    input.schema_version === 3
+      ? getAllowedFixFiles(expectedTargetGames)
+      : expectedTargetGames.map((game) => GAME_SOURCE_FILES[game]);
   if (
     !Array.isArray(input.allowed_files) ||
     input.allowed_files.length !== expectedAllowedFiles.length ||
     input.allowed_files.some((file, index) => file !== expectedAllowedFiles[index])
   ) {
     throw new Error("Invalid agentic fix input: allowed_files does not match target_games");
+  }
+  const expectedTestFiles =
+    expectedTargetGames.length > 0
+      ? [AGENT_PARSER_REGRESSION_TEST_FILE]
+      : [];
+  if (
+    input.schema_version === 3 &&
+    (
+      !Array.isArray(input.required_test_files) ||
+      input.required_test_files.length !== expectedTestFiles.length ||
+      input.required_test_files.some(
+        (file, index) => file !== expectedTestFiles[index]
+      )
+    )
+  ) {
+    throw new Error(
+      "Invalid agentic fix input: required_test_files does not match target_games"
+    );
   }
   if (!Array.isArray(input.findings) || input.findings.length > MAX_AGENT_FINDINGS) {
     throw new Error("Invalid agentic fix input: findings is invalid");
@@ -1720,7 +2184,31 @@ function validateAgenticFixInput(input) {
       throw new Error(`Invalid agentic fix input finding at index ${index}`);
     }
     findingIds.add(finding.finding_id);
-    const validatedFinding = validateAgentFinding(finding, index);
+    const validatedFinding = validateAgentFinding(finding, index, {
+      requireEvidenceRefs: input.schema_version === 3,
+    });
+    if (
+      input.schema_version === 3 &&
+      (
+        !Array.isArray(finding.subject_refs) ||
+        finding.subject_refs.length === 0 ||
+        finding.subject_refs.some(
+          (ref) =>
+            typeof ref !== "string" ||
+            !/^(?:raw|api):[a-z]+:[a-f0-9]{32}$/.test(ref)
+        ) ||
+        new Set(finding.subject_refs).size !== finding.subject_refs.length ||
+        finding.subject_refs.some(
+          (ref, refIndex) =>
+            refIndex > 0 &&
+            compareCodePoints(finding.subject_refs[refIndex - 1], ref) >= 0
+        )
+      )
+    ) {
+      throw new Error(
+        `Invalid agentic fix input finding identity at index ${index}`
+      );
+    }
     const findingKey = getFindingKey(validatedFinding);
     if (findingKeys.has(findingKey)) {
       throw new Error(
@@ -1807,6 +2295,91 @@ function validateAgenticFixInput(input) {
     )
   ) {
     throw new Error("Invalid agentic fix input: evidence is invalid");
+  }
+  if (input.schema_version === 3) {
+    const evidenceByGame = new Map(
+      input.evidence.map((entry) => [entry.game, entry])
+    );
+    for (const game of expectedTargetGames) {
+      const entry = evidenceByGame.get(game);
+      if (!entry || entry.notes !== getDatasetNotes(game)) {
+        throw new Error(
+          `Invalid agentic fix input: evidence policy mismatch for ${game}`
+        );
+      }
+      const gameFindings = input.findings.filter(
+        (finding) => finding.game === game
+      );
+      if (gameFindings.length > MAX_AGENT_FINDINGS_PER_GAME) {
+        throw new Error(
+          `Invalid agentic fix input: too many findings for ${game}`
+        );
+      }
+      for (const [side, items] of [
+        ["raw", entry.matching_raw_notices],
+        ["api", entry.matching_api_events],
+      ]) {
+        const refs = items.map((item) => item.review_ref);
+        if (
+          items.length >
+            MAX_AGENT_FINDINGS_PER_GAME * MAX_FINDING_EVIDENCE_REFS ||
+          new Set(refs).size !== refs.length ||
+          items.some(
+            (item) =>
+              typeof item.review_ref !== "string" ||
+              typeof item.identity_ref !== "string" ||
+              !new RegExp(
+                `^${side}:${game}:[a-f0-9]{32}$`
+              ).test(item.review_ref) ||
+              !new RegExp(
+                `^${side}:${game}:[a-f0-9]{32}$`
+              ).test(item.identity_ref)
+          )
+        ) {
+          throw new Error(
+            `Invalid agentic fix input: malformed ${side} evidence for ${game}`
+          );
+        }
+        const expectedRefs = [
+          ...new Set(
+            gameFindings.flatMap((finding) =>
+              side === "raw" ? finding.raw_refs : finding.api_refs
+            )
+          ),
+        ].sort(compareCodePoints);
+        const actualRefs = [...refs].sort(compareCodePoints);
+        if (
+          actualRefs.length !== expectedRefs.length ||
+          actualRefs.some((ref, index) => ref !== expectedRefs[index])
+        ) {
+          throw new Error(
+            `Invalid agentic fix input: incomplete ${side} evidence for ${game}`
+          );
+        }
+      }
+    }
+    for (const [index, finding] of input.findings.entries()) {
+      const entry = evidenceByGame.get(finding.game);
+      const materialized = materializeFindingEvidence(
+        finding,
+        {
+          game: finding.game,
+          raw_notices: entry.matching_raw_notices,
+          api_events: entry.matching_api_events,
+        },
+        index
+      );
+      if (
+        !isDeepStrictEqual(
+          materialized.subject_refs,
+          finding.subject_refs
+        )
+      ) {
+        throw new Error(
+          `Invalid agentic fix input: subject evidence mismatch at index ${index}`
+        );
+      }
+    }
   }
 
   return input;
@@ -1946,7 +2519,9 @@ function parseAgentFixOutput(text, rawFixInput, actualChangedFiles) {
       .map((outcome) => findingsById.get(outcome.finding_id).game)
   );
   const changedGames = new Set(
-    changedFiles.map((file) => gameBySourceFile.get(file))
+    changedFiles
+      .map((file) => gameBySourceFile.get(file))
+      .filter(Boolean)
   );
   if (
     [...fixedGames].some((game) => !changedGames.has(game)) ||
@@ -1954,6 +2529,24 @@ function parseAgentFixOutput(text, rawFixInput, actualChangedFiles) {
   ) {
     throw new Error(
       "Codex fixed outcomes and changed game parser files do not match"
+    );
+  }
+  if (
+    fixInput.schema_version === 3 &&
+    fixedGames.size > 0 &&
+    !changedFiles.includes(AGENT_PARSER_REGRESSION_TEST_FILE)
+  ) {
+    throw new Error(
+      "Codex fixes must include a deterministic parser regression test"
+    );
+  }
+  if (
+    fixInput.schema_version === 3 &&
+    changedFiles.includes(AGENT_PARSER_REGRESSION_TEST_FILE) &&
+    fixedGames.size === 0
+  ) {
+    throw new Error(
+      "Codex changed the parser regression test without fixing a finding"
     );
   }
 
@@ -2004,7 +2597,7 @@ async function extractGameReviewInput(game, options = {}) {
   }
 
   const gameInput = {
-    schema_version: 2,
+    schema_version: input.schema_version,
     mode: "review_game",
     generated_at: input.generated_at,
     target_game: targetGame,
@@ -2301,13 +2894,19 @@ function renderIssueBody(report, options = {}) {
           findingKeys
         )
       : "";
-  const regressionOfIssueNumber =
-    options.regressionOfIssueNumber == null
-      ? null
-      : validateIssueNumber(
-          options.regressionOfIssueNumber,
-          "regression Issue number"
-        );
+  const regressionOfIssueNumbers = [
+    ...new Set(
+      (
+        Array.isArray(options.regressionOfIssueNumbers)
+          ? options.regressionOfIssueNumbers
+          : options.regressionOfIssueNumber == null
+            ? []
+            : [options.regressionOfIssueNumber]
+      ).map((issueNumber) =>
+        validateIssueNumber(issueNumber, "regression Issue number")
+      )
+    ),
+  ].sort((left, right) => left - right);
   const coveredByIssueNumbers = ensureArray(options.coveredByIssueNumbers)
     .map((issueNumber) =>
       validateIssueNumber(issueNumber, "covering Issue number")
@@ -2333,9 +2932,13 @@ function renderIssueBody(report, options = {}) {
           `Remediation cycle: \`${remediationCycle}\``,
         ]
       : []),
-    ...(regressionOfIssueNumber == null
+    ...(regressionOfIssueNumbers.length === 0
       ? []
-      : [`Regression of: #${regressionOfIssueNumber}`]),
+      : [
+          `Regression of: ${regressionOfIssueNumbers
+            .map((issueNumber) => `#${issueNumber}`)
+            .join(", ")}`,
+        ]),
     ...(coveredByIssueNumbers.length === 0
       ? []
       : [
@@ -2442,6 +3045,153 @@ async function listAllRepositoryIssues(owner, repo, request = githubRequest) {
   }
 
   return out;
+}
+
+async function listAllRepositoryPullRequests(
+  owner,
+  repo,
+  request = githubRequest
+) {
+  const out = [];
+
+  for (let page = 1; ; page += 1) {
+    const pullRequests = await request(
+      `/repos/${owner}/${repo}/pulls?state=all&per_page=100&page=${page}`
+    );
+    const list = ensureArray(pullRequests);
+    if (list.length === 0) break;
+    out.push(...list);
+    if (list.length < 100) break;
+  }
+
+  return out;
+}
+
+function parseManagedRemediationPrMarker(body) {
+  const text = String(body ?? "");
+  const match =
+    /^<!-- upstream-review-pr:v1 issue=([1-9]\d*) fingerprint=([a-f0-9]{64}) cycle=([a-f0-9]{64}) -->\n/.exec(
+      text
+    );
+  if (!match) {
+    if (text.startsWith("<!-- upstream-review-pr:")) {
+      throw new Error("Invalid managed remediation PR marker");
+    }
+    return null;
+  }
+  return {
+    issue_number: validateIssueNumber(
+      match[1],
+      "managed remediation PR Issue number"
+    ),
+    finding_fingerprint: match[2],
+    remediation_cycle: match[3],
+  };
+}
+
+function classifyManagedRemediationPullRequests(
+  pullRequests,
+  {
+    repository,
+    defaultBranch,
+    issueNumber,
+    findingFingerprint,
+    remediationCycle,
+  }
+) {
+  const trustedRepository = validateRepositorySlug(repository);
+  const trustedDefaultBranch = String(defaultBranch ?? "").trim();
+  const trustedIssueNumber = validateIssueNumber(issueNumber);
+  if (
+    !/^[A-Za-z0-9._/-]+$/.test(trustedDefaultBranch) ||
+    trustedDefaultBranch.startsWith("/") ||
+    trustedDefaultBranch.endsWith("/") ||
+    !/^[a-f0-9]{64}$/.test(findingFingerprint) ||
+    !/^[a-f0-9]{64}$/.test(remediationCycle)
+  ) {
+    throw new Error("Invalid managed remediation PR lookup context");
+  }
+  const branchPrefix =
+    `codex/upstream-review-${findingFingerprint.slice(0, 16)}` +
+    `-i${trustedIssueNumber}-b`;
+  const related = [];
+
+  for (const pullRequest of ensureArray(pullRequests)) {
+    if (!isRecord(pullRequest)) continue;
+    const marker = parseManagedRemediationPrMarker(pullRequest.body);
+    const markerMatches =
+      marker?.issue_number === trustedIssueNumber &&
+      marker.finding_fingerprint === findingFingerprint &&
+      marker.remediation_cycle === remediationCycle;
+    const headRef =
+      typeof pullRequest.head?.ref === "string"
+        ? pullRequest.head.ref
+        : "";
+    const branchMatches =
+      pullRequest.head?.repo?.full_name === trustedRepository &&
+      headRef.startsWith(branchPrefix);
+    const trustedMarkerCandidate =
+      markerMatches && pullRequest.user?.login === GITHUB_ACTIONS_LOGIN;
+    if (!branchMatches && !trustedMarkerCandidate) continue;
+
+    const pullRequestNumber = validateIssueNumber(
+      pullRequest.number,
+      "managed remediation PR number"
+    );
+    const baseSha =
+      typeof pullRequest.base?.sha === "string"
+        ? pullRequest.base.sha
+        : "";
+    const expectedBranch =
+      /^[a-f0-9]{40}$/.test(baseSha)
+        ? getFixBranch(
+            findingFingerprint,
+            trustedIssueNumber,
+            baseSha
+          )
+        : "";
+    const closed = pullRequest.state === "closed";
+    const merged =
+      closed &&
+      typeof pullRequest.merged_at === "string" &&
+      pullRequest.merged_at.length > 0;
+    if (
+      !markerMatches ||
+      pullRequest.user?.login !== GITHUB_ACTIONS_LOGIN ||
+      pullRequest.html_url !==
+        `https://github.com/${trustedRepository}/pull/${pullRequestNumber}` ||
+      pullRequest.base?.repo?.full_name !== trustedRepository ||
+      pullRequest.base?.ref !== trustedDefaultBranch ||
+      !["open", "closed"].includes(pullRequest.state) ||
+      (pullRequest.state === "open" && pullRequest.merged_at != null) ||
+      expectedBranch === "" ||
+      headRef !== expectedBranch ||
+      (
+        pullRequest.head?.repo?.full_name !== trustedRepository &&
+        !(closed && pullRequest.head?.repo == null)
+      )
+    ) {
+      throw new Error(
+        "Conflicting pull request belongs to the managed remediation Issue cycle"
+      );
+    }
+    related.push({
+      number: pullRequestNumber,
+      url: pullRequest.html_url,
+      status: merged
+        ? "merged_pr_pending_finalization"
+        : closed
+          ? "closed_pr_requires_manual_recovery"
+          : "active_pr",
+    });
+  }
+
+  if (related.length > 1) {
+    throw new Error(
+      "More than one pull request belongs to the managed remediation Issue cycle"
+    );
+  }
+  return related[0] ?? null;
 }
 
 function parseRepoSlug(value = process.env.GITHUB_REPOSITORY) {
@@ -2643,12 +3393,37 @@ async function syncIssue(report, options = {}) {
   }
 
   const coverageOwnerByKey = new Map();
+  const legacyCoverageOwnerByKey = new Map();
   const openCurrentSnapshots = [];
+  const openPreviousSnapshots = [];
   const openLegacySnapshots = [];
+  const reportIdentityVersion =
+    report.schema_version === 3 ? FINDING_IDENTITY_VERSION : 1;
   for (const snapshot of openManagedIssues) {
     if (snapshot.marker.version === LEGACY_ISSUE_MARKER_VERSION) {
       openLegacySnapshots.push(snapshot);
       continue;
+    }
+    if (
+      snapshot.marker.finding_identity_version !== reportIdentityVersion
+    ) {
+      if (
+        reportIdentityVersion === FINDING_IDENTITY_VERSION &&
+        snapshot.marker.finding_identity_version === 1
+      ) {
+        openPreviousSnapshots.push(snapshot);
+        for (const findingKey of snapshot.marker.finding_keys) {
+          const existingOwner = legacyCoverageOwnerByKey.get(findingKey);
+          if (existingOwner != null) {
+            throw new Error(
+              `Open managed Issues #${existingOwner} and #${snapshot.issue.number} contain overlapping legacy finding coverage`
+            );
+          }
+          legacyCoverageOwnerByKey.set(findingKey, snapshot.issue.number);
+        }
+        continue;
+      }
+      throw new Error("Unsupported open managed Issue identity version");
     }
     openCurrentSnapshots.push(snapshot);
     for (const findingKey of snapshot.marker.finding_keys) {
@@ -2663,13 +3438,43 @@ async function syncIssue(report, options = {}) {
   }
 
   const coveredIssueByFindingKey = new Map();
+  const matchedLegacyFindingKeys = new Set();
   let uncoveredEntries = [];
   for (const entry of detectedEntries) {
-    const coveringIssueNumber = coverageOwnerByKey.get(entry.finding_key);
+    const legacyFindingKey =
+      reportIdentityVersion === FINDING_IDENTITY_VERSION
+        ? getLegacyFindingKey(entry.finding)
+        : null;
+    const coveringIssueNumber =
+      coverageOwnerByKey.get(entry.finding_key) ??
+      (
+        legacyFindingKey != null
+          ? legacyCoverageOwnerByKey.get(legacyFindingKey)
+          : null
+      );
     if (coveringIssueNumber == null) {
       uncoveredEntries.push(entry);
     } else {
       coveredIssueByFindingKey.set(entry.finding_key, coveringIssueNumber);
+      if (legacyFindingKey != null && legacyCoverageOwnerByKey.has(legacyFindingKey)) {
+        matchedLegacyFindingKeys.add(legacyFindingKey);
+      }
+    }
+  }
+
+  if (uncoveredEntries.length > 0 && openPreviousSnapshots.length > 0) {
+    const snapshotsWithUnmatchedLegacyCoverage = openPreviousSnapshots.filter(
+      (snapshot) =>
+        snapshot.marker.finding_keys.some(
+          (findingKey) => !matchedLegacyFindingKeys.has(findingKey)
+        )
+    );
+    if (snapshotsWithUnmatchedLegacyCoverage.length > 0) {
+      throw new Error(
+        `Cannot safely reconcile new stable-identity findings while legacy identity-v1 Open managed Issue coverage is unmatched: ${snapshotsWithUnmatchedLegacyCoverage
+          .map((snapshot) => `#${snapshot.issue.number}`)
+          .join(", ")}`
+      );
     }
   }
 
@@ -2706,7 +3511,11 @@ async function syncIssue(report, options = {}) {
     ...new Set(coveredIssueByFindingKey.values()),
   ].sort((left, right) => left - right);
   const coveringSnapshotsByNumber = new Map(
-    [...openCurrentSnapshots, ...openLegacySnapshots].map((snapshot) => [
+    [
+      ...openCurrentSnapshots,
+      ...openPreviousSnapshots,
+      ...openLegacySnapshots,
+    ].map((snapshot) => [
       snapshot.issue.number,
       snapshot,
     ])
@@ -2736,6 +3545,99 @@ async function syncIssue(report, options = {}) {
   const uncoveredFindings = uncoveredEntries.map((entry) => entry.finding);
   const findingKeys = uncoveredEntries.map((entry) => entry.finding_key);
   if (uncoveredFindings.length === 0) {
+    const detectedFindingKeys = getFindingKeys(detectedFindings);
+    const exactCurrentSnapshot =
+      report.schema_version === 3 &&
+      coveredByIssueNumbers.length === 1
+        ? coveringSnapshots.find((snapshot) => {
+            const marker = snapshot.marker;
+            return (
+              marker.version === ISSUE_MARKER_VERSION &&
+              marker.finding_identity_version === FINDING_IDENTITY_VERSION &&
+              marker.finding_fingerprint === detectedFindingFingerprint &&
+              marker.coverage_fingerprint ===
+                getFindingCoverageFingerprintFromKeys(
+                  detectedFindingKeys,
+                  FINDING_IDENTITY_VERSION
+                ) &&
+              marker.finding_keys.length === detectedFindingKeys.length &&
+              marker.finding_keys.every(
+                (findingKey, index) =>
+                  findingKey === detectedFindingKeys[index]
+              )
+            );
+          })
+        : null;
+    if (exactCurrentSnapshot) {
+      const defaultBranch = String(
+        options.defaultBranch ??
+          process.env.UPSTREAM_REVIEW_DEFAULT_BRANCH ??
+          ""
+      ).trim();
+      const relatedPullRequest =
+        classifyManagedRemediationPullRequests(
+          await listAllRepositoryPullRequests(owner, repo, request),
+          {
+            repository,
+            defaultBranch,
+            issueNumber: exactCurrentSnapshot.issue.number,
+            findingFingerprint: detectedFindingFingerprint,
+            remediationCycle:
+              exactCurrentSnapshot.marker.remediation_cycle,
+          }
+        );
+      await revalidateCoveringIssues([exactCurrentSnapshot], {
+        owner,
+        repo,
+        repository,
+        request,
+      });
+      if (relatedPullRequest) {
+        return {
+          action: "covered",
+          issue_number: 0,
+          issue_url: "",
+          finding_fingerprint: getFindingFingerprint([]),
+          coverage_fingerprint: getFindingCoverageFingerprint([]),
+          finding_keys: [],
+          remediation_cycle: "",
+          detected_finding_fingerprint: detectedFindingFingerprint,
+          detected_finding_count: detectedEntries.length,
+          covered_finding_count: coverage.length,
+          new_finding_count: 0,
+          covered_by_issue_numbers: coveredByIssueNumbers,
+          coverage,
+          recovery: {
+            status: relatedPullRequest.status,
+            related_pr_count: 1,
+            pull_request_number: relatedPullRequest.number,
+            pull_request_url: relatedPullRequest.url,
+          },
+        };
+      }
+      return {
+        action: "resume_orphan",
+        issue_number: exactCurrentSnapshot.issue.number,
+        issue_url: exactCurrentSnapshot.issue.html_url,
+        finding_fingerprint: detectedFindingFingerprint,
+        coverage_fingerprint:
+          exactCurrentSnapshot.marker.coverage_fingerprint,
+        finding_keys: detectedFindingKeys,
+        remediation_cycle:
+          exactCurrentSnapshot.marker.remediation_cycle,
+        detected_finding_fingerprint: detectedFindingFingerprint,
+        detected_finding_count: detectedEntries.length,
+        covered_finding_count: coverage.length,
+        new_finding_count: 0,
+        covered_by_issue_numbers: coveredByIssueNumbers,
+        coverage,
+        resumed_finding_count: detectedEntries.length,
+        recovery: {
+          status: "resumed_orphan",
+          related_pr_count: 0,
+        },
+      };
+    }
     return {
       action: "covered",
       issue_number: 0,
@@ -2755,24 +3657,58 @@ async function syncIssue(report, options = {}) {
 
   const findingFingerprint = getFindingFingerprint(uncoveredFindings);
   const coverageFingerprint =
-    getFindingCoverageFingerprintFromKeys(findingKeys);
-  const regressionOfIssueNumber =
-    managedIssues.find(
+    getFindingCoverageFingerprint(uncoveredFindings);
+  const regressionByFindingKey = uncoveredEntries
+    .map((entry) => {
+      const legacyKey = getLegacyFindingKey(entry.finding);
+      const matchingSnapshot = managedIssues.find((snapshot) => {
+        if (snapshot.issue.state !== "closed") return false;
+        if (snapshot.marker.version === LEGACY_ISSUE_MARKER_VERSION) {
+          return false;
+        }
+        if (
+          snapshot.marker.finding_identity_version ===
+          reportIdentityVersion
+        ) {
+          return snapshot.marker.finding_keys.includes(entry.finding_key);
+        }
+        return (
+          reportIdentityVersion === FINDING_IDENTITY_VERSION &&
+          snapshot.marker.finding_identity_version === 1 &&
+          snapshot.marker.finding_keys.includes(legacyKey)
+        );
+      });
+      return matchingSnapshot
+        ? {
+            finding_key: entry.finding_key,
+            issue_number: matchingSnapshot.issue.number,
+          }
+        : null;
+    })
+    .filter(Boolean);
+  let regressionOfIssueNumbers = [
+    ...new Set(
+      regressionByFindingKey.map((entry) => entry.issue_number)
+    ),
+  ].sort((left, right) => left - right);
+  if (
+    regressionOfIssueNumbers.length === 0 &&
+    reportIdentityVersion === 1
+  ) {
+    const legacyWholeIssue = managedIssues.find(
       (snapshot) =>
         snapshot.issue.state === "closed" &&
-        (
-          snapshot.marker.version === ISSUE_MARKER_VERSION
-            ? (
-                snapshot.marker.coverage_fingerprint ===
-                  coverageFingerprint &&
-                snapshot.marker.finding_keys.length === findingKeys.length &&
-                snapshot.marker.finding_keys.every(
-                  (findingKey, index) => findingKey === findingKeys[index]
-                )
-              )
-            : snapshot.marker.finding_fingerprint === findingFingerprint
-        )
-    )?.issue.number ?? null;
+        snapshot.marker.version === LEGACY_ISSUE_MARKER_VERSION &&
+        snapshot.marker.finding_fingerprint === findingFingerprint
+    );
+    if (legacyWholeIssue) {
+      regressionOfIssueNumbers = [legacyWholeIssue.issue.number];
+    }
+  }
+  const regressionOfIssueNumber =
+    regressionOfIssueNumbers.length === 1
+      ? regressionOfIssueNumbers[0]
+      : null;
   const remediationCycle = createRemediationCycleId(
     repository,
     options.runId ?? process.env.GITHUB_RUN_ID,
@@ -2790,6 +3726,7 @@ async function syncIssue(report, options = {}) {
     findingKeys,
     remediationCycle,
     regressionOfIssueNumber,
+    regressionOfIssueNumbers,
     coveredByIssueNumbers,
   });
   const created = await request(`/repos/${owner}/${repo}/issues`, {
@@ -2814,6 +3751,8 @@ async function syncIssue(report, options = {}) {
     finding_keys: findingKeys,
     remediation_cycle: remediationCycle,
     regression_of_issue_number: regressionOfIssueNumber,
+    regression_of_issue_numbers: regressionOfIssueNumbers,
+    regression_by_finding_key: regressionByFindingKey,
     detected_finding_fingerprint: detectedFindingFingerprint,
     detected_finding_count: detectedEntries.length,
     covered_finding_count: coverage.length,
@@ -2925,6 +3864,122 @@ async function loadRemediationFixContext(options = {}) {
   return { fixInput, manifest, metadata, report };
 }
 
+function validateRemediationVerificationResult(result, input) {
+  if (
+    !isRecord(result) ||
+    result.schema_version !== 1 ||
+    result.mode !== "remediation_verification_result" ||
+    !Array.isArray(result.outcomes)
+  ) {
+    throw new Error("Invalid remediation verification result");
+  }
+  const normalized = parseRemediationVerificationOutput(
+    JSON.stringify({
+      complete: true,
+      errors: [],
+      input_sha256: result.input_sha256,
+      summary: result.summary,
+      outcomes: result.outcomes,
+    }),
+    input
+  );
+  if (JSON.stringify(normalized) !== JSON.stringify(result)) {
+    throw new Error("Remediation verification result is not canonical");
+  }
+  return normalized;
+}
+
+async function loadRemediationVerificationContext(options = {}) {
+  if (options.verificationInput && options.verificationResult) {
+    const input = validateRemediationVerificationInput(
+      options.verificationInput
+    );
+    return {
+      input,
+      result: validateRemediationVerificationResult(
+        options.verificationResult,
+        input
+      ),
+    };
+  }
+  const inputPath =
+    options.verificationInputPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH?.trim();
+  const resultPath =
+    options.verificationResultPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH?.trim();
+  if (!inputPath && !resultPath) return null;
+  if (!inputPath || !resultPath) {
+    throw new Error("Incomplete remediation verification artifact paths");
+  }
+  const [inputText, resultText] = await Promise.all([
+    readTextFile(inputPath, "remediation verification input"),
+    readTextFile(resultPath, "remediation verification result"),
+  ]);
+  const input = validateRemediationVerificationInput(
+    parseJsonDocument(inputText, "remediation verification input")
+  );
+  return {
+    input,
+    result: validateRemediationVerificationResult(
+      parseJsonDocument(resultText, "remediation verification result"),
+      input
+    ),
+  };
+}
+
+async function loadApprovedRemediationFixContext(options = {}) {
+  const expectedBaseSha = String(
+    options.baseSha ??
+      process.env.UPSTREAM_REVIEW_BASE_SHA ??
+      ""
+  ).trim();
+  const hasDirectContext =
+    options.approvedFixInput != null ||
+    options.approvedFixManifest != null ||
+    options.approvedFixPatch != null;
+  if (hasDirectContext) {
+    if (
+      options.approvedFixInput == null ||
+      options.approvedFixManifest == null ||
+      options.approvedFixPatch == null
+    ) {
+      throw new Error("Incomplete approved remediation artifact context");
+    }
+    const fixInput = validateAgenticFixInput(options.approvedFixInput);
+    const patch = Buffer.isBuffer(options.approvedFixPatch)
+      ? options.approvedFixPatch
+      : Buffer.from(options.approvedFixPatch);
+    const manifest = validateFixManifest(
+      options.approvedFixManifest,
+      fixInput,
+      patch,
+      expectedBaseSha
+    );
+    return { fixInput, manifest, patch };
+  }
+
+  const inputPath =
+    options.approvedFixInputPath ??
+    process.env.UPSTREAM_REVIEW_APPROVED_FIX_INPUT_PATH?.trim();
+  const manifestPath =
+    options.approvedFixManifestPath ??
+    process.env.UPSTREAM_REVIEW_APPROVED_FIX_MANIFEST_PATH?.trim();
+  const patchPath =
+    options.approvedFixPatchPath ??
+    process.env.UPSTREAM_REVIEW_APPROVED_FIX_PATCH_PATH?.trim();
+  if (!inputPath && !manifestPath && !patchPath) return null;
+  if (!inputPath || !manifestPath || !patchPath) {
+    throw new Error("Incomplete approved remediation artifact paths");
+  }
+  return readAndValidateFixArtifact({
+    inputPath,
+    manifestPath,
+    patchPath,
+    expectedBaseSha,
+  });
+}
+
 async function finalizeRemediationIssue(options = {}) {
   const request = options.request ?? githubRequest;
   const repository = validateRepositorySlug(
@@ -2995,10 +4050,20 @@ async function finalizeRemediationIssue(options = {}) {
       process.env.UPSTREAM_REVIEW_APPROVED_STAGE ??
       ""
   ).trim();
-  const [issue, pullRequest, fixContext] = await Promise.all([
+  const [
+    issue,
+    pullRequest,
+    mergeCommit,
+    fixContext,
+    approvedFixContext,
+    verificationContext,
+  ] = await Promise.all([
     request(`/repos/${owner}/${repo}/issues/${issueNumber}`),
     request(`/repos/${owner}/${repo}/pulls/${pullRequestNumber}`),
+    request(`/repos/${owner}/${repo}/git/commits/${mergeSha}`),
     loadRemediationFixContext(options),
+    loadApprovedRemediationFixContext(options),
+    loadRemediationVerificationContext(options),
   ]);
   if (
     !isRecord(pullRequest) ||
@@ -3014,6 +4079,85 @@ async function finalizeRemediationIssue(options = {}) {
   ) {
     throw new Error(
       "Merged automatic PR does not match the trusted remediation snapshot"
+    );
+  }
+  const trustedBaseSha =
+    fixContext?.fixInput.source_report.base_sha ??
+    approvedFixContext?.fixInput.source_report.base_sha ??
+    String(
+      options.baseSha ??
+        process.env.UPSTREAM_REVIEW_BASE_SHA ??
+        ""
+    ).trim();
+  const trustedResultTree =
+    approvedFixContext?.manifest.result_tree ??
+    fixContext?.manifest.result_tree ??
+    "";
+  if (
+    !isRecord(mergeCommit) ||
+    mergeCommit.sha !== mergeSha ||
+    !Array.isArray(mergeCommit.parents) ||
+    mergeCommit.parents.length !== 1 ||
+    mergeCommit.parents[0]?.sha !== trustedBaseSha ||
+    (
+      trustedResultTree &&
+      mergeCommit.tree?.sha !== trustedResultTree
+    )
+  ) {
+    throw new Error(
+      "Merged automatic PR commit does not match the trusted base and result tree"
+    );
+  }
+  if (
+    fixContext?.fixInput.schema_version === 3 &&
+    (approvedFixContext == null || verificationContext == null)
+  ) {
+    throw new Error(
+      "Missing approved artifact or exact-head verification for a v3 remediation cycle"
+    );
+  }
+  if (verificationContext) {
+    const { input: verificationInput, result: verificationResult } =
+      verificationContext;
+    if (approvedFixContext) {
+      validateRemediationVerificationBinding(
+        verificationInput,
+        approvedFixContext.fixInput,
+        approvedFixContext.manifest,
+        pullRequest.head?.sha ?? ""
+      );
+    }
+    if (
+      verificationResult.status !== "resolved" ||
+      verificationInput.base_sha !==
+        (fixContext?.fixInput.source_report.base_sha ?? "") ||
+      verificationInput.finding_fingerprint !== findingFingerprint ||
+      verificationInput.remediation_cycle !== remediationCycle ||
+      verificationInput.head_sha !== pullRequest.head?.sha ||
+      verificationResult.head_sha !== pullRequest.head?.sha ||
+      verificationResult.finding_fingerprint !== findingFingerprint ||
+      verificationResult.remediation_cycle !== remediationCycle ||
+      verificationResult.patch_sha256 !== verificationInput.patch_sha256 ||
+      verificationResult.outcomes.some(
+        (outcome) =>
+          outcome.status !== "resolved" || outcome.confidence === "low"
+      )
+    ) {
+      throw new Error(
+        "Exact-head remediation verification does not match the merged remediation"
+      );
+    }
+  }
+  if (
+    fixContext?.fixInput.schema_version === 3 &&
+    approvedFixContext &&
+    !isDeepStrictEqual(
+      approvedFixContext.fixInput,
+      fixContext.fixInput
+    )
+  ) {
+    throw new Error(
+      "Approved remediation artifact does not match the original fix scope"
     );
   }
   const expectedPrMarker =
@@ -3101,7 +4245,10 @@ async function finalizeRemediationIssue(options = {}) {
     }
     cycleFindingKeys = getFindingKeys(fixInput.findings);
     cycleCoverageFingerprint =
-      getFindingCoverageFingerprintFromKeys(cycleFindingKeys);
+      getFindingCoverageFingerprintFromKeys(
+        cycleFindingKeys,
+        fixInput.schema_version === 3 ? FINDING_IDENTITY_VERSION : 1
+      );
     if (!allFindingsAddressed) {
       const outcomesByFindingId = new Map(
         metadata.outcomes.map((outcome) => [
@@ -3122,7 +4269,10 @@ async function finalizeRemediationIssue(options = {}) {
       unresolvedFindingFingerprint =
         getFindingFingerprint(unresolvedFindings);
       unresolvedCoverageFingerprint =
-        getFindingCoverageFingerprintFromKeys(unresolvedFindingKeys);
+        getFindingCoverageFingerprintFromKeys(
+          unresolvedFindingKeys,
+          fixInput.schema_version === 3 ? FINDING_IDENTITY_VERSION : 1
+        );
     }
   }
   const expectedIssueState =
@@ -3159,7 +4309,9 @@ async function finalizeRemediationIssue(options = {}) {
     }
     coverageAlreadyReduced = hasReducedCoverage;
   }
-  if (!allFindingsAddressed) {
+  const exactHeadVerificationResolved =
+    verificationContext?.result.status === "resolved";
+  if (!allFindingsAddressed && !exactHeadVerificationResolved) {
     if (issue.state !== "open") {
       throw new Error(
         `Partially addressed remediation Issue #${issueNumber} was closed unexpectedly`
@@ -3264,7 +4416,9 @@ async function finalizeRemediationIssue(options = {}) {
     issueNumber,
     findingFingerprint,
     remediationCycle,
-    findingKeys: cycleFindingKeys,
+    findingKeys: coverageAlreadyReduced
+      ? unresolvedFindingKeys
+      : cycleFindingKeys,
     expectedState: "closed",
   });
   if (updated.state_reason !== "completed") {
@@ -3432,6 +4586,8 @@ function validateFixManifest(manifest, fixInput, patch, expectedBaseSha = "") {
     !Number.isInteger(manifest.patch_bytes) ||
     manifest.patch_bytes <= 0 ||
     manifest.patch_bytes > MAX_FIX_PATCH_BYTES ||
+    typeof manifest.result_tree !== "string" ||
+    !/^[a-f0-9]{40}$/.test(manifest.result_tree) ||
     !Array.isArray(manifest.finding_ids) ||
     !Array.isArray(manifest.target_games) ||
     !Array.isArray(manifest.changed_files)
@@ -3663,7 +4819,8 @@ async function verifyAgenticFixArtifact(options = {}) {
       process.env.GITHUB_WORKSPACE?.trim() ??
       process.cwd()
   );
-  const { fixInput, manifest } = await readAndValidateFixArtifact(options);
+  const { fixInput, manifest, patch } =
+    await readAndValidateFixArtifact(options);
   const inspection = await inspectAgenticFixPatch(patchPath, cwd);
   if (inspection.head_sha !== manifest.base_sha) {
     throw new Error(
@@ -3675,11 +4832,21 @@ async function verifyAgenticFixArtifact(options = {}) {
     manifest.changed_files,
     "Agentic fix patch paths"
   );
+  const resultTree = await computePatchedTree(
+    manifest.base_sha,
+    patch,
+    cwd,
+    "Agentic fix patch"
+  );
+  if (resultTree !== manifest.result_tree) {
+    throw new Error("Agentic fix patch result tree mismatch");
+  }
   await appendGitHubOutputs(
     {
       fix_branch: fixInput.fix_branch,
       patch_sha256: manifest.patch_sha256,
       patch_bytes: manifest.patch_bytes,
+      result_tree: manifest.result_tree,
     },
     options.githubOutputPath
   );
@@ -3689,6 +4856,86 @@ async function verifyAgenticFixArtifact(options = {}) {
       base_sha: manifest.base_sha,
       changed_files: manifest.changed_files,
       patch_sha256: manifest.patch_sha256,
+      result_tree: manifest.result_tree,
+    })
+  );
+  return manifest;
+}
+
+async function verifyAgenticFixArtifactAtHead(options = {}) {
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const expectedHeadSha = String(
+    options.headSha ??
+      process.env.UPSTREAM_REVIEW_HEAD_SHA ??
+      ""
+  ).trim();
+  if (!/^[a-f0-9]{40}$/.test(expectedHeadSha)) {
+    throw new Error(
+      `Invalid exact-head fix SHA: ${expectedHeadSha || "(empty)"}`
+    );
+  }
+
+  const { fixInput, manifest, patch } =
+    await readAndValidateFixArtifact(options);
+  if (expectedHeadSha === manifest.base_sha) {
+    throw new Error("Exact-head fix SHA must differ from the trusted base");
+  }
+  const [headResult, trackedStatusResult, inspection] = await Promise.all([
+    runGit(["rev-parse", "HEAD"], { cwd }),
+    runGit(["status", "--porcelain=v1", "--untracked-files=no"], { cwd }),
+    inspectPatchBuffer(
+      patch,
+      manifest.base_sha,
+      cwd,
+      "Exact-head agentic fix patch"
+    ),
+  ]);
+  const checkoutHead = String(headResult.stdout).trim();
+  if (checkoutHead !== expectedHeadSha) {
+    throw new Error(
+      `Exact-head fix checkout mismatch: expected ${expectedHeadSha}, got ${checkoutHead}`
+    );
+  }
+  if (String(trackedStatusResult.stdout).trim()) {
+    throw new Error("Exact-head fix checkout contains tracked worktree changes");
+  }
+  assertExactStringSet(
+    inspection.changed_files,
+    manifest.changed_files,
+    "Exact-head agentic fix patch paths"
+  );
+  if (inspection.result_tree !== manifest.result_tree) {
+    throw new Error("Exact-head agentic fix patch result tree mismatch");
+  }
+  await assertSingleParentSnapshot(
+    expectedHeadSha,
+    manifest.base_sha,
+    manifest.result_tree,
+    cwd,
+    "Exact-head agentic fix commit"
+  );
+  await appendGitHubOutputs(
+    {
+      fix_branch: fixInput.fix_branch,
+      head_sha: expectedHeadSha,
+      patch_sha256: manifest.patch_sha256,
+      patch_bytes: manifest.patch_bytes,
+      result_tree: manifest.result_tree,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: "agentic_fix_exact_head",
+      base_sha: manifest.base_sha,
+      head_sha: expectedHeadSha,
+      changed_files: manifest.changed_files,
+      patch_sha256: manifest.patch_sha256,
+      result_tree: manifest.result_tree,
     })
   );
   return manifest;
@@ -3818,6 +5065,12 @@ async function finalizeAgenticFix(options = {}) {
       `Agentic fix patch is ${patch.length} bytes; expected 1-${MAX_FIX_PATCH_BYTES}`
     );
   }
+  const resultTree = await computePatchedTree(
+    baseSha,
+    patch,
+    cwd,
+    "Agentic fix patch"
+  );
 
   const manifest = {
     schema_version: 2,
@@ -3832,6 +5085,7 @@ async function finalizeAgenticFix(options = {}) {
     changed_files: metadata.changed_files,
     patch_sha256: sha256(patch),
     patch_bytes: patch.length,
+    result_tree: resultTree,
   };
   validateFixManifest(manifest, fixInput, patch, baseSha);
 
@@ -3853,6 +5107,7 @@ async function finalizeAgenticFix(options = {}) {
       "fix_branch",
       "patch_sha256",
       "patch_bytes",
+      "result_tree",
     ]) {
       if (manifest[field] !== expectedManifest[field]) {
         throw new Error(`Verified agentic fix ${field} mismatch`);
@@ -3873,6 +5128,7 @@ async function finalizeAgenticFix(options = {}) {
       has_patch: true,
       changed_file_count: metadata.changed_files.length,
       patch_sha256: manifest.patch_sha256,
+      result_tree: manifest.result_tree,
     },
     options.githubOutputPath
   );
@@ -3882,6 +5138,7 @@ async function finalizeAgenticFix(options = {}) {
       changed_files: metadata.changed_files,
       patch_sha256: manifest.patch_sha256,
       patch_bytes: manifest.patch_bytes,
+      result_tree: manifest.result_tree,
     })
   );
   return { metadata, manifest };
@@ -3980,6 +5237,7 @@ function renderFixPrBody(metadata, manifest, options = {}) {
     "## Validation",
     "",
     "- `pnpm test:upstream-review`",
+    "- `pnpm test:game-parsers`",
     "- `pnpm typecheck`",
     "- `pnpm build`",
     "",
@@ -4819,14 +6077,20 @@ function normalizeAgenticPrReworkContext(rawContext) {
   if (
     !Array.isArray(rawContext.allowed_files) ||
     rawContext.allowed_files.length === 0 ||
-    rawContext.allowed_files.length > DEFAULT_GAMES.length ||
-    new Set(rawContext.allowed_files).size !== rawContext.allowed_files.length
+    rawContext.allowed_files.length > DEFAULT_GAMES.length + 1 ||
+    new Set(rawContext.allowed_files).size !== rawContext.allowed_files.length ||
+    rawContext.allowed_files.includes(TRUSTED_PARSER_REGRESSION_TEST_FILE)
   ) {
     throw new Error("Invalid agentic PR rework allowed_files");
   }
-  const expectedAllowedFiles = DEFAULT_GAMES.filter((game) =>
+  const allowedGames = DEFAULT_GAMES.filter((game) =>
     rawContext.allowed_files.includes(GAME_SOURCE_FILES[game])
-  ).map((game) => GAME_SOURCE_FILES[game]);
+  );
+  const expectedAllowedFiles = rawContext.allowed_files.includes(
+    AGENT_PARSER_REGRESSION_TEST_FILE
+  )
+    ? getAllowedFixFiles(allowedGames)
+    : allowedGames.map((game) => GAME_SOURCE_FILES[game]);
   if (
     expectedAllowedFiles.length !== rawContext.allowed_files.length ||
     rawContext.allowed_files.some(
@@ -5237,6 +6501,18 @@ function parseAgentPrReworkOutput(text, rawInput, actualChangedFiles) {
       `Codex PR rework changed a file outside the allowlist: ${disallowedFile}`
     );
   }
+  const changedParserFile = changedFiles.some((file) =>
+    Object.values(GAME_SOURCE_FILES).includes(file)
+  );
+  if (
+    input.allowed_files.includes(AGENT_PARSER_REGRESSION_TEST_FILE) &&
+    changedParserFile &&
+    !changedFiles.includes(AGENT_PARSER_REGRESSION_TEST_FILE)
+  ) {
+    throw new Error(
+      "Codex PR rework parser changes must update the regression test"
+    );
+  }
 
   if (!Array.isArray(parsed.outcomes)) {
     throw new Error("Invalid Codex PR rework outcomes");
@@ -5296,12 +6572,20 @@ function parseAgentPrReworkOutput(text, rawInput, actualChangedFiles) {
       .map((outcome) => findingsById.get(outcome.finding_id).path)
   );
   const changedFileSet = new Set(changedFiles);
+  const companionTestFiles = new Set(
+    changedParserFile &&
+      changedFileSet.has(AGENT_PARSER_REGRESSION_TEST_FILE)
+      ? [AGENT_PARSER_REGRESSION_TEST_FILE]
+      : []
+  );
   if (
     [...fixedPaths].some((file) => !changedFileSet.has(file)) ||
-    [...changedFileSet].some((file) => !fixedPaths.has(file))
+    [...changedFileSet].some(
+      (file) => !fixedPaths.has(file) && !companionTestFiles.has(file)
+    )
   ) {
     throw new Error(
-      "Codex PR rework fixed outcomes and changed parser files do not match"
+      "Codex PR rework fixed outcomes and changed files do not match"
     );
   }
 
@@ -5569,10 +6853,11 @@ function validatePrReworkManifest(
     "Agentic PR rework cumulative changed_files"
   );
   if (
+    manifest.result_tree !== validatedCumulativeManifest.result_tree ||
     typeof manifest.result_tree !== "string" ||
     !/^[a-f0-9]{40}$/.test(manifest.result_tree)
   ) {
-    throw new Error("Agentic PR rework manifest has an invalid result tree");
+    throw new Error("Agentic PR rework manifest result tree mismatch");
   }
   return {
     ...manifest,
@@ -5673,10 +6958,13 @@ async function finalizeAgenticPrRework(options = {}) {
     sources.fixManifest.changed_files,
     "Previous cumulative fix patch paths"
   );
+  if (previousInspection.result_tree !== sources.fixManifest.result_tree) {
+    throw new Error("Previous cumulative fix patch result tree mismatch");
+  }
   await assertSingleParentSnapshot(
     sources.reviewedHeadSha,
     sources.baseSha,
-    previousInspection.result_tree,
+    sources.fixManifest.result_tree,
     cwd,
     "Reviewed PR head"
   );
@@ -5848,6 +7136,7 @@ async function finalizeAgenticPrRework(options = {}) {
     changed_files: cumulativeChangedFiles,
     patch_sha256: sha256(cumulativePatch),
     patch_bytes: cumulativePatch.length,
+    result_tree: cumulativeInspection.result_tree,
   };
   validateFixManifest(
     cumulativeManifest,
@@ -6023,10 +7312,13 @@ async function verifyAgenticPrReworkArtifact(options = {}) {
     sources.fixManifest.changed_files,
     "Previous cumulative fix patch paths"
   );
+  if (previousInspection.result_tree !== sources.fixManifest.result_tree) {
+    throw new Error("Previous cumulative fix patch result tree mismatch");
+  }
   await assertSingleParentSnapshot(
     sources.reviewedHeadSha,
     sources.baseSha,
-    previousInspection.result_tree,
+    sources.fixManifest.result_tree,
     cwd,
     "Reviewed PR head"
   );
@@ -6089,7 +7381,11 @@ async function verifyAgenticPrReworkArtifact(options = {}) {
   };
 }
 
-async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
+async function readAgentGameReviews(
+  agentOutputDir,
+  legacyAgentOutputPath,
+  options = {}
+) {
   if (agentOutputDir) {
     return await Promise.all(
       DEFAULT_GAMES.map(async (game) => {
@@ -6104,7 +7400,8 @@ async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
         const review = parseAgentReview(
           outputText,
           [game],
-          MAX_AGENT_FINDINGS_PER_GAME
+          MAX_AGENT_FINDINGS_PER_GAME,
+          options
         );
         return { game, ...review };
       })
@@ -6115,12 +7412,1264 @@ async function readAgentGameReviews(agentOutputDir, legacyAgentOutputPath) {
     legacyAgentOutputPath,
     "Codex review output"
   );
-  const review = parseAgentReview(outputText);
+  const review = parseAgentReview(
+    outputText,
+    DEFAULT_GAMES,
+    MAX_AGENT_FINDINGS,
+    options
+  );
   return DEFAULT_GAMES.map((game) => ({
     game,
     summary: review.summary,
     findings: review.findings.filter((finding) => finding.game === game),
   }));
+}
+
+function buildReviewDraft(
+  input,
+  agentGameReviews,
+  suppressions,
+  suppressionsPath,
+  baseSha
+) {
+  const agentFindings = agentGameReviews.flatMap((review) => review.findings);
+  if (agentFindings.length > MAX_AGENT_FINDINGS) {
+    throw new Error(
+      `Invalid combined agent review: ${agentFindings.length} findings exceeds the ${MAX_AGENT_FINDINGS} limit`
+    );
+  }
+  const datasetsByGame = new Map(
+    input.review_datasets.map((dataset) => [dataset.game, dataset])
+  );
+  const materializedFindings = agentFindings.map((finding, index) =>
+    materializeFindingEvidence(
+      finding,
+      datasetsByGame.get(finding.game),
+      index
+    )
+  );
+  const agentSummary = truncateText(
+    agentGameReviews
+      .map(
+        (review) =>
+          `${review.game}: ${review.summary || "No clear findings."}`
+      )
+      .join(" "),
+    MAX_AGENT_SUMMARY_LENGTH
+  );
+  const { filteredFindings, suppressedFindings } = applySuppressions(
+    materializedFindings,
+    suppressions
+  );
+  const uniqueFindings = getUniqueFindingEntries(filteredFindings)
+    .map((entry) => entry.finding)
+    .sort(compareFixFindings);
+  if (uniqueFindings.length > 0 && !/^[a-f0-9]{40}$/.test(baseSha)) {
+    throw new Error("Missing or invalid remediation base SHA");
+  }
+  const modelLabel = "Codex via Responses API";
+  return {
+    schema_version: 3,
+    mode: "agentic_review",
+    finding_identity_version: FINDING_IDENTITY_VERSION,
+    generated_at: input.generated_at,
+    finalized_at: "",
+    base_sha: baseSha,
+    api_base_url: input.api_base_url,
+    datasets: input.datasets,
+    review_datasets: input.review_datasets,
+    suppressions: {
+      ...input.suppressions,
+      path: suppressionsPath,
+      count: suppressions.length,
+    },
+    review: {
+      engine: "codex",
+      transport: "responses",
+      model: modelLabel,
+      raw_summary: agentSummary,
+      game_reviews: agentGameReviews.map((review) => ({
+        game: review.game,
+        model: modelLabel,
+        raw_summary: review.summary,
+        raw_finding_count: review.findings.length,
+      })),
+      summary: summarizeFilteredReview(
+        agentSummary,
+        uniqueFindings.length,
+        suppressedFindings.length
+      ),
+      findings: uniqueFindings,
+      suppressed_findings: suppressedFindings,
+    },
+  };
+}
+
+function buildFindingConfirmationInput(game, candidates, draftReport) {
+  const dataset = draftReport.review_datasets.find(
+    (entry) => entry.game === game
+  );
+  if (!dataset) {
+    throw new Error(`Missing trusted confirmation dataset for ${game}`);
+  }
+  const rawByRef = new Map(
+    dataset.raw_notices.map((item) => [item.review_ref, item])
+  );
+  const apiByRef = new Map(
+    dataset.api_events.map((item) => [item.review_ref, item])
+  );
+  const context = {
+    schema_version: 1,
+    mode: "confirm_findings",
+    generated_at: draftReport.generated_at,
+    target_game: game,
+    notes: dataset.notes,
+    candidates: candidates.map((candidate) => ({
+      finding_id: candidate.finding_id,
+      finding_key: candidate.finding_key,
+      finding: candidate.finding,
+      raw_evidence: candidate.finding.raw_refs.map((ref) => rawByRef.get(ref)),
+      api_evidence: candidate.finding.api_refs.map((ref) => apiByRef.get(ref)),
+    })),
+  };
+  return {
+    ...context,
+    input_sha256: sha256(JSON.stringify(context)),
+  };
+}
+
+function buildFindingConfirmationCandidates(draftReport) {
+  return getUniqueFindingEntries(draftReport.review.findings).map(
+    (entry, index) => ({
+      finding_id: `finding-${String(index + 1).padStart(3, "0")}`,
+      ...entry,
+    })
+  );
+}
+
+function buildFindingConfirmationGamePlans(candidates, draftReport) {
+  return DEFAULT_GAMES.filter((game) =>
+    candidates.some((candidate) => candidate.finding.game === game)
+  ).map((game) => {
+    const gameCandidates = candidates.filter(
+      (candidate) => candidate.finding.game === game
+    );
+    const input = buildFindingConfirmationInput(
+      game,
+      gameCandidates,
+      draftReport
+    );
+    return {
+      input,
+      metadata: {
+        game,
+        filename: `upstream-review-confirm-input-${game}.json`,
+        input_sha256: input.input_sha256,
+        finding_ids: gameCandidates.map((candidate) => candidate.finding_id),
+      },
+    };
+  });
+}
+
+function validateFindingConfirmationInput(input) {
+  if (
+    !isRecord(input) ||
+    input.schema_version !== 1 ||
+    input.mode !== "confirm_findings" ||
+    !SUPPORTED_GAMES.has(input.target_game) ||
+    typeof input.generated_at !== "string" ||
+    typeof input.notes !== "string" ||
+    !Array.isArray(input.candidates) ||
+    input.candidates.length === 0 ||
+    input.candidates.length > MAX_AGENT_FINDINGS_PER_GAME
+  ) {
+    throw new Error("Invalid finding confirmation input");
+  }
+  const context = {
+    schema_version: input.schema_version,
+    mode: input.mode,
+    generated_at: input.generated_at,
+    target_game: input.target_game,
+    notes: input.notes,
+    candidates: input.candidates,
+  };
+  if (
+    typeof input.input_sha256 !== "string" ||
+    input.input_sha256 !== sha256(JSON.stringify(context))
+  ) {
+    throw new Error("Finding confirmation input SHA-256 mismatch");
+  }
+  const seenIds = new Set();
+  for (const [index, candidate] of input.candidates.entries()) {
+    if (
+      !isRecord(candidate) ||
+      !/^finding-[0-9]{3}$/.test(candidate.finding_id) ||
+      !/^[a-f0-9]{64}$/.test(candidate.finding_key) ||
+      !isRecord(candidate.finding) ||
+      candidate.finding.game !== input.target_game ||
+      getFindingKey(candidate.finding) !== candidate.finding_key ||
+      !Array.isArray(candidate.raw_evidence) ||
+      !Array.isArray(candidate.api_evidence) ||
+      seenIds.has(candidate.finding_id)
+    ) {
+      throw new Error(
+        `Invalid finding confirmation candidate at index ${index}`
+      );
+    }
+    seenIds.add(candidate.finding_id);
+    const rawRefs = candidate.raw_evidence.map((item) => item?.review_ref);
+    const apiRefs = candidate.api_evidence.map((item) => item?.review_ref);
+    if (
+      JSON.stringify(rawRefs) !== JSON.stringify(candidate.finding.raw_refs) ||
+      JSON.stringify(apiRefs) !== JSON.stringify(candidate.finding.api_refs)
+    ) {
+      throw new Error(
+        `Finding confirmation evidence mismatch at index ${index}`
+      );
+    }
+  }
+  return input;
+}
+
+function parseFindingConfirmationOutput(text, rawInput) {
+  const input = validateFindingConfirmationInput(rawInput);
+  const parsed = parseJsonDocument(text, "Codex finding confirmation output");
+  assertExactObjectFields(
+    parsed,
+    ["complete", "errors", "input_sha256", "decisions"],
+    "Codex finding confirmation output"
+  );
+  if (
+    parsed.complete !== true ||
+    !Array.isArray(parsed.errors) ||
+    parsed.errors.length > 0 ||
+    parsed.errors.some((error) => typeof error !== "string") ||
+    parsed.input_sha256 !== input.input_sha256 ||
+    !Array.isArray(parsed.decisions) ||
+    parsed.decisions.length !== input.candidates.length
+  ) {
+    throw new Error("Codex finding confirmation output is incomplete");
+  }
+  return parsed.decisions.map((decision, index) => {
+    assertExactObjectFields(
+      decision,
+      ["finding_id", "verdict", "confidence", "reason"],
+      `Codex finding confirmation decision at index ${index}`
+    );
+    const expected = input.candidates[index];
+    if (
+      decision.finding_id !== expected.finding_id ||
+      !["confirmed", "rejected", "ambiguous"].includes(decision.verdict) ||
+      !["high", "medium", "low"].includes(decision.confidence) ||
+      typeof decision.reason !== "string" ||
+      !normalizeWhitespace(decision.reason)
+    ) {
+      throw new Error(
+        `Invalid Codex finding confirmation decision at index ${index}`
+      );
+    }
+    return {
+      finding_id: decision.finding_id,
+      verdict: decision.verdict,
+      confidence: decision.confidence,
+      reason: truncateText(
+        normalizeWhitespace(decision.reason),
+        MAX_AGENT_REASON_LENGTH
+      ),
+    };
+  });
+}
+
+async function prepareFindingConfirmation(options = {}) {
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_INPUT_PATH?.trim();
+  const agentOutputDir =
+    options.agentOutputDir ??
+    process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_DIR?.trim();
+  const agentOutputPath =
+    options.agentOutputPath ??
+    process.env.UPSTREAM_REVIEW_AGENT_OUTPUT_PATH?.trim();
+  const planPath =
+    options.planPath ??
+    process.env.UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH?.trim();
+  const outputDir = path.resolve(
+    options.outputDir ??
+      process.env.UPSTREAM_REVIEW_CONFIRMATION_INPUT_DIR?.trim() ??
+      path.dirname(path.resolve(planPath))
+  );
+  const inputText = await readTextFile(inputPath, "collected review input");
+  const input = validateCollectedReviewInput(
+    parseJsonDocument(inputText, "collected review input")
+  );
+  if (input.schema_version !== 3) {
+    throw new Error("Finding confirmation requires collected input schema v3");
+  }
+  const agentGameReviews = await readAgentGameReviews(
+    agentOutputDir,
+    agentOutputPath,
+    { requireEvidenceRefs: true }
+  );
+  const suppressionsPath =
+    options.suppressionsPath ??
+    (process.env.UPSTREAM_REVIEW_SUPPRESSIONS_PATH?.trim() ||
+    input.suppressions?.path ||
+    DEFAULT_SUPPRESSIONS_PATH);
+  const suppressions = await loadSuppressions(suppressionsPath);
+  const baseSha = String(
+    options.baseSha ??
+      process.env.UPSTREAM_REVIEW_BASE_SHA ??
+      process.env.GITHUB_SHA ??
+      ""
+  ).trim();
+  const draftReport = buildReviewDraft(
+    input,
+    agentGameReviews,
+    suppressions,
+    suppressionsPath,
+    baseSha
+  );
+  const candidates = buildFindingConfirmationCandidates(draftReport);
+  const gamePlans = buildFindingConfirmationGamePlans(candidates, draftReport);
+  const games = gamePlans.map(({ metadata }) => metadata.game);
+  await fs.mkdir(outputDir, { recursive: true });
+  for (const { input: confirmationInput, metadata } of gamePlans) {
+    await writeReport(
+      confirmationInput,
+      path.join(outputDir, metadata.filename),
+      false
+    );
+  }
+  const planWithoutHash = {
+    schema_version: 1,
+    mode: "finding_confirmation_plan",
+    draft_report: draftReport,
+    candidates,
+    games: gamePlans.map(({ metadata }) => metadata),
+  };
+  const plan = {
+    ...planWithoutHash,
+    plan_sha256: sha256(JSON.stringify(planWithoutHash)),
+  };
+  await writeReport(plan, planPath, false);
+  await appendGitHubOutputs(
+    {
+      has_candidates: candidates.length > 0,
+      candidate_count: candidates.length,
+      matrix: JSON.stringify(games),
+      plan_sha256: plan.plan_sha256,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: plan.mode,
+      candidate_count: candidates.length,
+      games,
+      plan_sha256: plan.plan_sha256,
+    })
+  );
+  return plan;
+}
+
+function validateFindingConfirmationPlan(plan) {
+  if (
+    !isRecord(plan) ||
+    plan.schema_version !== 1 ||
+    plan.mode !== "finding_confirmation_plan" ||
+    !isRecord(plan.draft_report) ||
+    !Array.isArray(plan.candidates) ||
+    !Array.isArray(plan.games)
+  ) {
+    throw new Error("Invalid finding confirmation plan");
+  }
+  assertExactObjectFields(
+    plan,
+    [
+      "schema_version",
+      "mode",
+      "draft_report",
+      "candidates",
+      "games",
+      "plan_sha256",
+    ],
+    "Finding confirmation plan"
+  );
+  const planWithoutHash = {
+    schema_version: plan.schema_version,
+    mode: plan.mode,
+    draft_report: plan.draft_report,
+    candidates: plan.candidates,
+    games: plan.games,
+  };
+  if (plan.plan_sha256 !== sha256(JSON.stringify(planWithoutHash))) {
+    throw new Error("Finding confirmation plan SHA-256 mismatch");
+  }
+  const draftReport = validateAgenticReviewReport(plan.draft_report);
+  if (!isDeepStrictEqual(plan.draft_report, draftReport)) {
+    throw new Error("Finding confirmation draft report is not canonical");
+  }
+  const expectedCandidates = buildFindingConfirmationCandidates(draftReport);
+  if (!isDeepStrictEqual(plan.candidates, expectedCandidates)) {
+    throw new Error(
+      "Finding confirmation plan candidates do not match the draft report"
+    );
+  }
+  const expectedGames = buildFindingConfirmationGamePlans(
+    expectedCandidates,
+    draftReport
+  ).map(({ metadata }) => metadata);
+  if (!isDeepStrictEqual(plan.games, expectedGames)) {
+    throw new Error(
+      "Finding confirmation plan games do not match the draft candidates"
+    );
+  }
+  return plan;
+}
+
+async function finalizeFindingConfirmation(options = {}) {
+  const planPath =
+    options.planPath ??
+    process.env.UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH?.trim();
+  const outputDir = path.resolve(
+    options.outputDir ??
+      process.env.UPSTREAM_REVIEW_CONFIRMATION_OUTPUT_DIR?.trim() ??
+      ""
+  );
+  const reportPath =
+    options.reportPath ??
+    process.env.UPSTREAM_REVIEW_REPORT_PATH?.trim() ??
+    "";
+  const plan = validateFindingConfirmationPlan(
+    parseJsonDocument(
+      await readTextFile(planPath, "finding confirmation plan"),
+      "finding confirmation plan"
+    )
+  );
+  const decisionsById = new Map();
+  for (const gameEntry of plan.games) {
+    const expectedCandidates = plan.candidates.filter(
+      (candidate) => candidate.finding.game === gameEntry.game
+    );
+    const expectedInput = buildFindingConfirmationInput(
+      gameEntry.game,
+      expectedCandidates,
+      plan.draft_report
+    );
+    const input = validateFindingConfirmationInput(
+      parseJsonDocument(
+        await readTextFile(
+          path.join(
+            path.dirname(path.resolve(planPath)),
+            gameEntry.filename
+          ),
+          `${gameEntry.game} finding confirmation input`
+        ),
+        `${gameEntry.game} finding confirmation input`
+      )
+    );
+    if (
+      input.input_sha256 !== gameEntry.input_sha256 ||
+      !isDeepStrictEqual(
+        input.candidates.map((candidate) => candidate.finding_id),
+        gameEntry.finding_ids
+      ) ||
+      !isDeepStrictEqual(input, expectedInput)
+    ) {
+      throw new Error(
+        `${gameEntry.game} finding confirmation input does not match its trusted plan`
+      );
+    }
+    const outputText = await readTextFile(
+      path.join(
+        outputDir,
+        `upstream-review-confirm-agent-${gameEntry.game}.json`
+      ),
+      `${gameEntry.game} Codex finding confirmation output`
+    );
+    const decisions = parseFindingConfirmationOutput(outputText, input);
+    for (const decision of decisions) {
+      if (decisionsById.has(decision.finding_id)) {
+        throw new Error(`Duplicate confirmation for ${decision.finding_id}`);
+      }
+      decisionsById.set(decision.finding_id, decision);
+    }
+  }
+  if (
+    decisionsById.size !== plan.candidates.length ||
+    plan.candidates.some(
+      (candidate) => !decisionsById.has(candidate.finding_id)
+    )
+  ) {
+    throw new Error("Confirmations must cover every candidate exactly once");
+  }
+
+  const confirmed = [];
+  const rejected = [];
+  const deferred = [];
+  for (const candidate of plan.candidates) {
+    const decision = decisionsById.get(candidate.finding_id);
+    const auditEntry = {
+      finding_id: candidate.finding_id,
+      finding_key: candidate.finding_key,
+      finding: candidate.finding,
+      decision,
+    };
+    if (
+      decision.verdict === "confirmed" &&
+      decision.confidence !== "low" &&
+      candidate.finding.confidence !== "low"
+    ) {
+      confirmed.push(candidate.finding);
+    } else if (
+      decision.verdict === "rejected" &&
+      decision.confidence !== "low"
+    ) {
+      rejected.push(auditEntry);
+    } else {
+      deferred.push(auditEntry);
+    }
+  }
+  const report = {
+    ...plan.draft_report,
+    finalized_at: new Date().toISOString(),
+    review: {
+      ...plan.draft_report.review,
+      summary: summarizeFilteredReview(
+        plan.draft_report.review.raw_summary,
+        confirmed.length,
+        plan.draft_report.review.suppressed_findings.length
+      ),
+      findings: confirmed,
+      initial_findings: plan.candidates.map((candidate) => candidate.finding),
+      confirmation: {
+        plan_sha256: plan.plan_sha256,
+        candidate_count: plan.candidates.length,
+        confirmed_count: confirmed.length,
+        rejected_count: rejected.length,
+        deferred_count: deferred.length,
+        decisions: plan.candidates.map((candidate) => ({
+          finding_id: candidate.finding_id,
+          finding_key: candidate.finding_key,
+          ...decisionsById.get(candidate.finding_id),
+        })),
+      },
+      rejected_findings: rejected,
+      deferred_findings: deferred,
+    },
+  };
+  const issue = await syncIssue(report).catch((error) => ({
+    action: "failed",
+    error: getErrorMessage(error),
+  }));
+  report.issue = issue;
+  await writeReport(report, reportPath);
+  console.log(JSON.stringify(report, null, 2));
+  if (issue.action === "failed") {
+    throw new Error(issue.error);
+  }
+  return report;
+}
+
+function stripEvidenceRuntimeRefs(item) {
+  if (!isRecord(item)) return item;
+  const { review_ref: _reviewRef, identity_ref: _identityRef, ...rest } = item;
+  return rest;
+}
+
+function validateRemediationVerificationInput(input) {
+  if (
+    !isRecord(input) ||
+    input.schema_version !== 1 ||
+    input.mode !== "verify_remediation" ||
+    !/^[a-f0-9]{40}$/.test(input.base_sha) ||
+    !/^[a-f0-9]{40}$/.test(input.head_sha) ||
+    input.base_sha === input.head_sha ||
+    !/^[a-f0-9]{64}$/.test(input.finding_fingerprint) ||
+    !/^[a-f0-9]{64}$/.test(input.remediation_cycle) ||
+    !/^[a-f0-9]{64}$/.test(input.patch_sha256) ||
+    !/^[a-f0-9]{64}$/.test(input.fix_input_sha256) ||
+    !/^[a-f0-9]{64}$/.test(input.fix_manifest_sha256) ||
+    !Array.isArray(input.findings) ||
+    input.findings.length === 0 ||
+    input.findings.length > MAX_AGENT_FINDINGS ||
+    !Array.isArray(input.evidence) ||
+    input.evidence.length !== input.findings.length ||
+    !Array.isArray(input.patched_api_snapshots)
+  ) {
+    throw new Error("Invalid remediation verification input");
+  }
+  assertExactObjectFields(
+    input,
+    [
+      "schema_version",
+      "mode",
+      "base_sha",
+      "head_sha",
+      "finding_fingerprint",
+      "remediation_cycle",
+      "patch_sha256",
+      "fix_input_sha256",
+      "fix_manifest_sha256",
+      "findings",
+      "evidence",
+      "patched_api_snapshots",
+      "input_sha256",
+    ],
+    "Remediation verification input"
+  );
+  const context = {
+    schema_version: input.schema_version,
+    mode: input.mode,
+    base_sha: input.base_sha,
+    head_sha: input.head_sha,
+    finding_fingerprint: input.finding_fingerprint,
+    remediation_cycle: input.remediation_cycle,
+    patch_sha256: input.patch_sha256,
+    fix_input_sha256: input.fix_input_sha256,
+    fix_manifest_sha256: input.fix_manifest_sha256,
+    findings: input.findings,
+    evidence: input.evidence,
+    patched_api_snapshots: input.patched_api_snapshots,
+  };
+  if (input.input_sha256 !== sha256(JSON.stringify(context))) {
+    throw new Error("Remediation verification input SHA-256 mismatch");
+  }
+  if (getFindingFingerprint(input.findings) !== input.finding_fingerprint) {
+    throw new Error(
+      "Remediation verification findings do not match their fingerprint"
+    );
+  }
+  const findingIds = new Set();
+  const expectedSnapshotGames = DEFAULT_GAMES.filter((game) =>
+    input.findings.some((finding) => finding.game === game)
+  );
+  if (
+    input.patched_api_snapshots.length !== expectedSnapshotGames.length
+  ) {
+    throw new Error("Invalid remediation patched API snapshots");
+  }
+  for (const [index, snapshot] of input.patched_api_snapshots.entries()) {
+    const expectedGame = expectedSnapshotGames[index];
+    if (!isRecord(snapshot)) {
+      throw new Error(
+        `Invalid remediation patched API snapshot at index ${index}`
+      );
+    }
+    assertExactObjectFields(
+      snapshot,
+      ["game", "status", "api_event_count", "api_events"],
+      `Remediation patched API snapshot at index ${index}`
+    );
+    if (
+      snapshot.game !== expectedGame ||
+      !["complete", "truncated"].includes(snapshot.status) ||
+      !Number.isInteger(snapshot.api_event_count) ||
+      snapshot.api_event_count < 0 ||
+      !Array.isArray(snapshot.api_events) ||
+      snapshot.api_events.length > 60 ||
+      snapshot.api_events.length > snapshot.api_event_count ||
+      (
+        snapshot.status === "complete" &&
+        snapshot.api_events.length !== snapshot.api_event_count
+      ) ||
+      (
+        snapshot.status === "truncated" &&
+        snapshot.api_events.length >= snapshot.api_event_count
+      ) ||
+      snapshot.api_events.some(
+        (item) =>
+          !isRecord(item) ||
+          typeof item.review_ref !== "string" ||
+          typeof item.identity_ref !== "string" ||
+          !new RegExp(
+            `^api:${expectedGame}:[a-f0-9]{32}$`
+          ).test(item.review_ref) ||
+          !new RegExp(
+            `^api:${expectedGame}:[a-f0-9]{32}$`
+          ).test(item.identity_ref)
+      ) ||
+      new Set(
+        snapshot.api_events.map((item) => item.review_ref)
+      ).size !== snapshot.api_events.length
+    ) {
+      throw new Error(
+        `Invalid remediation patched API snapshot at index ${index}`
+      );
+    }
+  }
+  for (const [index, finding] of input.findings.entries()) {
+    if (
+      !isRecord(finding) ||
+      finding.finding_id !==
+        `finding-${String(index + 1).padStart(3, "0")}` ||
+      findingIds.has(finding.finding_id)
+    ) {
+      throw new Error(
+        `Invalid remediation verification finding at index ${index}`
+      );
+    }
+    findingIds.add(finding.finding_id);
+    const evidence = input.evidence[index];
+    if (
+      !isRecord(evidence) ||
+      evidence.finding_id !== finding.finding_id ||
+      evidence.game !== finding.game ||
+      !Array.isArray(evidence.raw_before) ||
+      !Array.isArray(evidence.raw_current) ||
+      !Array.isArray(evidence.api_before) ||
+      !Array.isArray(evidence.api_patched) ||
+      !["unchanged", "drifted", "not_applicable"].includes(
+        evidence.raw_snapshot_status
+      )
+    ) {
+      throw new Error(
+        `Invalid remediation verification evidence at index ${index}`
+      );
+    }
+  }
+  return input;
+}
+
+function getRemediationFixArtifactDigests(fixInput, manifest) {
+  return {
+    fix_input_sha256: sha256(JSON.stringify(fixInput)),
+    fix_manifest_sha256: sha256(JSON.stringify(manifest)),
+  };
+}
+
+function validateRemediationVerificationBinding(
+  rawInput,
+  rawFixInput,
+  rawManifest,
+  expectedHeadSha = ""
+) {
+  const input = validateRemediationVerificationInput(rawInput);
+  const fixInput = validateAgenticFixInput(rawFixInput);
+  if (fixInput.schema_version !== 3) {
+    throw new Error("Runtime remediation verification requires fix input v3");
+  }
+  if (!isRecord(rawManifest)) {
+    throw new Error("Invalid remediation verification fix manifest");
+  }
+  const digests = getRemediationFixArtifactDigests(fixInput, rawManifest);
+  if (
+    input.base_sha !== rawManifest.base_sha ||
+    input.finding_fingerprint !== fixInput.finding_fingerprint ||
+    input.remediation_cycle !== fixInput.source_report.remediation_cycle ||
+    input.patch_sha256 !== rawManifest.patch_sha256 ||
+    input.fix_input_sha256 !== digests.fix_input_sha256 ||
+    input.fix_manifest_sha256 !== digests.fix_manifest_sha256 ||
+    !isDeepStrictEqual(input.findings, fixInput.findings)
+  ) {
+    throw new Error(
+      "Remediation verification input is not bound to the trusted fix artifact"
+    );
+  }
+  const sourceEvidenceByGame = new Map(
+    fixInput.evidence.map((entry) => [entry.game, entry])
+  );
+  const patchedApiSnapshotByGame = new Map(
+    input.patched_api_snapshots.map((entry) => [entry.game, entry])
+  );
+  for (const [index, finding] of fixInput.findings.entries()) {
+    const source = sourceEvidenceByGame.get(finding.game);
+    const evidence = input.evidence[index];
+    const rawRefs = new Set(finding.raw_refs ?? []);
+    const apiRefs = new Set(finding.api_refs ?? []);
+    const expectedRawBefore = source?.matching_raw_notices.filter((item) =>
+      rawRefs.has(item.review_ref)
+    ) ?? [];
+    const expectedApiBefore = source?.matching_api_events.filter((item) =>
+      apiRefs.has(item.review_ref)
+    ) ?? [];
+    const patchedApiRefs = new Set(
+      patchedApiSnapshotByGame
+        .get(finding.game)
+        ?.api_events.map((item) => item.review_ref) ?? []
+    );
+    const expectedRawIdentities = new Set(
+      expectedRawBefore.map((item) => item.identity_ref)
+    );
+    const rawCurrentHasUnexpectedSubject = evidence.raw_current.some(
+      (item) => !expectedRawIdentities.has(item?.identity_ref)
+    );
+    let expectedRawSnapshotStatus = "not_applicable";
+    if (expectedRawBefore.length > 0) {
+      const currentByIdentity = new Map();
+      for (const item of evidence.raw_current) {
+        const list = currentByIdentity.get(item.identity_ref) ?? [];
+        list.push(item);
+        currentByIdentity.set(item.identity_ref, list);
+      }
+      const everyAnchorUnchanged = expectedRawBefore.every((beforeItem) => {
+        const matches = currentByIdentity.get(beforeItem.identity_ref) ?? [];
+        return (
+          matches.length === 1 &&
+          JSON.stringify(stripEvidenceRuntimeRefs(matches[0])) ===
+            JSON.stringify(stripEvidenceRuntimeRefs(beforeItem))
+        );
+      });
+      expectedRawSnapshotStatus =
+        everyAnchorUnchanged && !rawCurrentHasUnexpectedSubject
+          ? "unchanged"
+          : "drifted";
+    }
+    if (
+      evidence.finding_id !== finding.finding_id ||
+      evidence.game !== finding.game ||
+      evidence.notes !== getDatasetNotes(finding.game) ||
+      !isDeepStrictEqual(evidence.raw_before, expectedRawBefore) ||
+      !isDeepStrictEqual(evidence.api_before, expectedApiBefore) ||
+      evidence.api_patched.some(
+        (item) => !patchedApiRefs.has(item?.review_ref)
+      ) ||
+      evidence.raw_snapshot_status !== expectedRawSnapshotStatus
+    ) {
+      throw new Error(
+        `Remediation verification evidence is not bound to ${finding.finding_id}`
+      );
+    }
+  }
+  if (
+    expectedHeadSha &&
+    (!/^[a-f0-9]{40}$/.test(expectedHeadSha) ||
+      input.head_sha !== expectedHeadSha)
+  ) {
+    throw new Error(
+      "Remediation verification input does not match the approved head"
+    );
+  }
+  return input;
+}
+
+async function readAndValidateRemediationFixArtifact(options = {}) {
+  return readAndValidateFixArtifact({
+    inputPath: options.fixInputPath,
+    manifestPath: options.fixManifestPath,
+    patchPath: options.fixPatchPath,
+    expectedBaseSha: options.expectedBaseSha,
+  });
+}
+
+function buildRemediationVerificationInput(
+  fixInput,
+  manifest,
+  headSha,
+  currentDatasets
+) {
+  const currentByGame = new Map(
+    currentDatasets.map((dataset) => [dataset.game, dataset])
+  );
+  const originalEvidenceByGame = new Map(
+    fixInput.evidence.map((entry) => [entry.game, entry])
+  );
+  const patchedApiSnapshots = fixInput.target_games.map((game) => {
+    const current = currentByGame.get(game);
+    if (!current) {
+      throw new Error(
+        `Missing remediation verification API snapshot for ${game}`
+      );
+    }
+    return {
+      game,
+      status:
+        current.api_event_count === current.api_events.length
+          ? "complete"
+          : "truncated",
+      api_event_count: current.api_event_count,
+      api_events: current.api_events,
+    };
+  });
+  const evidence = fixInput.findings.map((finding) => {
+    const original = originalEvidenceByGame.get(finding.game);
+    const current = currentByGame.get(finding.game);
+    if (!original || !current) {
+      throw new Error(
+        `Missing remediation verification evidence for ${finding.game}`
+      );
+    }
+    const rawRefs = new Set(finding.raw_refs ?? []);
+    const apiRefs = new Set(finding.api_refs ?? []);
+    const rawBefore = original.matching_raw_notices.filter((item) =>
+      rawRefs.has(item.review_ref)
+    );
+    const apiBefore = original.matching_api_events.filter((item) =>
+      apiRefs.has(item.review_ref)
+    );
+    const currentRawByIdentity = new Map();
+    for (const item of current.raw_notices) {
+      const list = currentRawByIdentity.get(item.identity_ref) ?? [];
+      list.push(item);
+      currentRawByIdentity.set(item.identity_ref, list);
+    }
+    const rawCurrent = rawBefore.flatMap(
+      (item) => currentRawByIdentity.get(item.identity_ref) ?? []
+    );
+    let rawSnapshotStatus = "not_applicable";
+    if (rawBefore.length > 0) {
+      const everyAnchorUnchanged = rawBefore.every((beforeItem) => {
+        const matches = currentRawByIdentity.get(beforeItem.identity_ref) ?? [];
+        return (
+          matches.length === 1 &&
+          JSON.stringify(stripEvidenceRuntimeRefs(matches[0])) ===
+            JSON.stringify(stripEvidenceRuntimeRefs(beforeItem))
+        );
+      });
+      rawSnapshotStatus = everyAnchorUnchanged ? "unchanged" : "drifted";
+    }
+    const apiIdentityRefs = new Set(
+      apiBefore.map((item) => item.identity_ref).filter(Boolean)
+    );
+    const apiTitles = [
+      finding.api_title,
+      finding.raw_title,
+      finding.title,
+      ...apiBefore.flatMap(getEvidenceTitles),
+      ...rawBefore.flatMap(getEvidenceTitles),
+    ].filter(Boolean);
+    const apiPatched = current.api_events
+      .filter(
+        (item) =>
+          apiIdentityRefs.has(item.identity_ref) ||
+          getEvidenceTitles(item).some((itemTitle) =>
+            apiTitles.some((title) =>
+              evidenceTitleMatches(itemTitle, normalizeWhitespace(title))
+            )
+          )
+      )
+      .slice(0, MAX_FIX_EVIDENCE_ITEMS);
+    return {
+      finding_id: finding.finding_id,
+      game: finding.game,
+      notes: current.notes,
+      raw_snapshot_status: rawSnapshotStatus,
+      raw_before: rawBefore,
+      raw_current: rawCurrent,
+      api_before: apiBefore,
+      api_patched: apiPatched,
+    };
+  });
+  const context = {
+    schema_version: 1,
+    mode: "verify_remediation",
+    base_sha: manifest.base_sha,
+    head_sha: headSha,
+    finding_fingerprint: fixInput.finding_fingerprint,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    patch_sha256: manifest.patch_sha256,
+    ...getRemediationFixArtifactDigests(fixInput, manifest),
+    findings: fixInput.findings,
+    evidence,
+    patched_api_snapshots: patchedApiSnapshots,
+  };
+  return {
+    ...context,
+    input_sha256: sha256(JSON.stringify(context)),
+  };
+}
+
+async function prepareRemediationVerification(options = {}) {
+  const cwd = path.resolve(
+    options.cwd ??
+      process.env.GITHUB_WORKSPACE?.trim() ??
+      process.cwd()
+  );
+  const apiBaseUrl = trimTrailingSlash(
+    options.apiBaseUrl ??
+      process.env.UPSTREAM_REVIEW_API_BASE_URL?.trim() ??
+      DEFAULT_API_BASE_URL
+  );
+  const outputPath =
+    options.outputPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH?.trim();
+  const expectedHeadSha = String(
+    options.headSha ??
+      process.env.UPSTREAM_REVIEW_HEAD_SHA ??
+      ""
+  ).trim();
+  const { fixInput, manifest } = await readAndValidateFixArtifact(options);
+  if (fixInput.schema_version !== 3) {
+    throw new Error("Runtime remediation verification requires fix input v3");
+  }
+  const [headResult, treeResult, commitResult] = await Promise.all([
+    runGit(["rev-parse", "HEAD"], { cwd }),
+    runGit(["rev-parse", "HEAD^{tree}"], { cwd }),
+    runGit(["rev-list", "--parents", "-n", "1", "HEAD"], { cwd }),
+  ]);
+  const checkoutHead = String(headResult.stdout).trim();
+  const checkoutTree = String(treeResult.stdout).trim();
+  const commitParts = String(commitResult.stdout).trim().split(/\s+/);
+  if (
+    checkoutHead !== expectedHeadSha ||
+    checkoutTree !== manifest.result_tree ||
+    commitParts.length !== 2 ||
+    commitParts[0] !== expectedHeadSha ||
+    commitParts[1] !== manifest.base_sha
+  ) {
+    throw new Error(
+      "Remediation verification checkout does not match the exact verified head"
+    );
+  }
+  const currentDatasets = await Promise.all(
+    fixInput.target_games.map((game) =>
+      withRetry(`remediation verification collection for ${game}`, async () => {
+        const [rawNotices, apiEvents] = await Promise.all([
+          fetchRawNotices(game),
+          fetchApiEvents(apiBaseUrl, game),
+        ]);
+        return buildGameDataset(game, rawNotices, apiEvents, 60);
+      })
+    )
+  );
+  const input = buildRemediationVerificationInput(
+    fixInput,
+    manifest,
+    expectedHeadSha,
+    currentDatasets
+  );
+  validateRemediationVerificationBinding(
+    input,
+    fixInput,
+    manifest,
+    expectedHeadSha
+  );
+  await writeReport(input, outputPath, false);
+  await appendGitHubOutputs(
+    {
+      verification_input_sha256: input.input_sha256,
+      raw_snapshot_status: input.evidence.some(
+        (entry) => entry.raw_snapshot_status === "drifted"
+      )
+        ? "drifted"
+        : "unchanged",
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: input.mode,
+      head_sha: input.head_sha,
+      finding_count: input.findings.length,
+      input_sha256: input.input_sha256,
+    })
+  );
+  return input;
+}
+
+async function validateRemediationVerificationArtifactInput(options = {}) {
+  const inputPath =
+    options.verificationInputPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH?.trim();
+  const expectedHeadSha = String(
+    options.headSha ??
+      process.env.UPSTREAM_REVIEW_HEAD_SHA ??
+      ""
+  ).trim();
+  const [inputText, artifact] = await Promise.all([
+    readTextFile(inputPath, "remediation verification input"),
+    readAndValidateRemediationFixArtifact(options),
+  ]);
+  const input = validateRemediationVerificationBinding(
+    parseJsonDocument(inputText, "remediation verification input"),
+    artifact.fixInput,
+    artifact.manifest,
+    expectedHeadSha
+  );
+  await appendGitHubOutputs(
+    {
+      verified_head_sha: input.head_sha,
+      verification_input_sha256: input.input_sha256,
+      patch_sha256: input.patch_sha256,
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: "remediation_verification_input",
+      head_sha: input.head_sha,
+      finding_count: input.findings.length,
+      input_sha256: input.input_sha256,
+      patch_sha256: input.patch_sha256,
+    })
+  );
+  return { input, ...artifact };
+}
+
+function parseRemediationVerificationOutput(text, rawInput) {
+  const input = validateRemediationVerificationInput(rawInput);
+  const parsed = parseJsonDocument(
+    text,
+    "Codex remediation verification output"
+  );
+  assertExactObjectFields(
+    parsed,
+    ["complete", "errors", "input_sha256", "summary", "outcomes"],
+    "Codex remediation verification output"
+  );
+  if (
+    parsed.complete !== true ||
+    !Array.isArray(parsed.errors) ||
+    parsed.errors.length > 0 ||
+    parsed.errors.some((error) => typeof error !== "string") ||
+    parsed.input_sha256 !== input.input_sha256 ||
+    typeof parsed.summary !== "string" ||
+    !normalizeWhitespace(parsed.summary) ||
+    !Array.isArray(parsed.outcomes) ||
+    parsed.outcomes.length !== input.findings.length
+  ) {
+    throw new Error("Codex remediation verification output is incomplete");
+  }
+  const outcomes = parsed.outcomes.map((outcome, index) => {
+    assertExactObjectFields(
+      outcome,
+      ["finding_id", "status", "confidence", "reason"],
+      `Codex remediation verification outcome at index ${index}`
+    );
+    const expected = input.findings[index];
+    if (
+      outcome.finding_id !== expected.finding_id ||
+      !["resolved", "unresolved", "indeterminate"].includes(outcome.status) ||
+      !["high", "medium", "low"].includes(outcome.confidence) ||
+      typeof outcome.reason !== "string" ||
+      !normalizeWhitespace(outcome.reason)
+    ) {
+      throw new Error(
+        `Invalid Codex remediation verification outcome at index ${index}`
+      );
+    }
+    const evidence = input.evidence[index];
+    const patchedApiSnapshot = input.patched_api_snapshots.find(
+      (snapshot) => snapshot.game === expected.game
+    );
+    if (
+      evidence.raw_snapshot_status === "drifted" &&
+      outcome.status !== "indeterminate"
+    ) {
+      throw new Error(
+        `Drifted raw evidence must be indeterminate for ${outcome.finding_id}`
+      );
+    }
+    if (
+      outcome.status === "resolved" &&
+      evidence.raw_before.length > 0 &&
+      evidence.raw_snapshot_status !== "unchanged"
+    ) {
+      throw new Error(
+        `Resolved raw-backed finding lacks an unchanged snapshot for ${outcome.finding_id}`
+      );
+    }
+    if (
+      outcome.status === "resolved" &&
+      ["missing_event", "wrong_time_window"].includes(expected.kind) &&
+      evidence.api_patched.length === 0
+    ) {
+      throw new Error(
+        `Resolved ${expected.kind} lacks patched API evidence for ${outcome.finding_id}`
+      );
+    }
+    if (
+      outcome.status === "resolved" &&
+      (
+        ["non_event_included", "duplicate_event"].includes(expected.kind) ||
+        (
+          evidence.raw_before.length === 0 &&
+          evidence.api_before.length > 0
+        )
+      ) &&
+      patchedApiSnapshot?.status !== "complete"
+    ) {
+      throw new Error(
+        `Resolved API-only finding lacks a complete patched API snapshot for ${outcome.finding_id}`
+      );
+    }
+    return {
+      finding_id: outcome.finding_id,
+      status: outcome.status,
+      confidence: outcome.confidence,
+      reason: truncateText(
+        normalizeWhitespace(outcome.reason),
+        MAX_AGENT_REASON_LENGTH
+      ),
+    };
+  });
+  return {
+    schema_version: 1,
+    mode: "remediation_verification_result",
+    input_sha256: input.input_sha256,
+    base_sha: input.base_sha,
+    head_sha: input.head_sha,
+    finding_fingerprint: input.finding_fingerprint,
+    remediation_cycle: input.remediation_cycle,
+    patch_sha256: input.patch_sha256,
+    summary: truncateText(
+      normalizeWhitespace(parsed.summary),
+      MAX_AGENT_SUMMARY_LENGTH
+    ),
+    status: outcomes.every(
+      (outcome) =>
+        outcome.status === "resolved" && outcome.confidence !== "low"
+    )
+      ? "resolved"
+      : outcomes.some((outcome) => outcome.status === "unresolved")
+        ? "unresolved"
+        : "indeterminate",
+    outcomes,
+  };
+}
+
+async function finalizeRemediationVerification(options = {}) {
+  const inputPath =
+    options.inputPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH?.trim();
+  const agentOutputPath =
+    options.agentOutputPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_AGENT_OUTPUT_PATH?.trim();
+  const resultPath =
+    options.resultPath ??
+    process.env.UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH?.trim();
+  const expectedHeadSha = String(
+    options.headSha ??
+      process.env.UPSTREAM_REVIEW_HEAD_SHA ??
+      ""
+  ).trim();
+  const [inputText, outputText, artifact] = await Promise.all([
+    readTextFile(inputPath, "remediation verification input"),
+    readTextFile(agentOutputPath, "Codex remediation verification output"),
+    readAndValidateRemediationFixArtifact(options),
+  ]);
+  const input = validateRemediationVerificationBinding(
+    parseJsonDocument(inputText, "remediation verification input"),
+    artifact.fixInput,
+    artifact.manifest,
+    expectedHeadSha
+  );
+  const result = parseRemediationVerificationOutput(outputText, input);
+  const resultText = `${JSON.stringify(result)}\n`;
+  await writeTextFile(resultPath, resultText);
+  await appendGitHubOutputs(
+    {
+      verification_status: result.status,
+      verified_head_sha: result.head_sha,
+      verification_input_sha256: result.input_sha256,
+      verification_result_sha256: sha256(Buffer.from(resultText, "utf8")),
+    },
+    options.githubOutputPath
+  );
+  console.log(
+    JSON.stringify({
+      mode: result.mode,
+      status: result.status,
+      head_sha: result.head_sha,
+      finding_count: result.outcomes.length,
+    })
+  );
+  if (result.status !== "resolved") {
+    throw new Error(
+      `Remediation verification did not resolve every finding: ${result.status}`
+    );
+  }
+  return result;
 }
 
 async function finalizeAgenticReview() {
@@ -6142,6 +8691,11 @@ async function finalizeAgenticReview() {
   }
 
   const input = validateCollectedReviewInput(collectedInput);
+  if (input.schema_version === 3) {
+    throw new Error(
+      "Collected input schema v3 requires --prepare-confirmation and --finalize-confirmation"
+    );
+  }
   const agentFindings = agentGameReviews.flatMap((review) => review.findings);
   if (agentFindings.length > MAX_AGENT_FINDINGS) {
     throw new Error(
@@ -6238,6 +8792,36 @@ async function main() {
   const finalize =
     process.argv.includes("--finalize") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_FINALIZE, false);
+  const prepareConfirmation =
+    process.argv.includes("--prepare-confirmation") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_PREPARE_CONFIRMATION,
+      false
+    );
+  const finalizeConfirmation =
+    process.argv.includes("--finalize-confirmation") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_FINALIZE_CONFIRMATION,
+      false
+    );
+  const prepareRemediationVerify =
+    process.argv.includes("--prepare-remediation-verification") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_PREPARE_REMEDIATION_VERIFICATION,
+      false
+    );
+  const validateRemediationVerifyInput =
+    process.argv.includes("--validate-remediation-verification-input") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_VALIDATE_REMEDIATION_VERIFICATION_INPUT,
+      false
+    );
+  const finalizeRemediationVerify =
+    process.argv.includes("--finalize-remediation-verification") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_FINALIZE_REMEDIATION_VERIFICATION,
+      false
+    );
   const extractGame =
     process.argv.includes("--extract-game") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_EXTRACT_GAME, false);
@@ -6250,6 +8834,12 @@ async function main() {
   const verifyFixArtifact =
     process.argv.includes("--verify-fix-artifact") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_VERIFY_FIX_ARTIFACT, false);
+  const verifyFixArtifactAtHead =
+    process.argv.includes("--verify-fix-artifact-at-head") ||
+    parseBoolean(
+      process.env.UPSTREAM_REVIEW_VERIFY_FIX_ARTIFACT_AT_HEAD,
+      false
+    );
   const renderFixPr =
     process.argv.includes("--render-fix-pr") ||
     parseBoolean(process.env.UPSTREAM_REVIEW_RENDER_FIX_PR, false);
@@ -6282,10 +8872,16 @@ async function main() {
     [
       collectOnly,
       finalize,
+      prepareConfirmation,
+      finalizeConfirmation,
+      prepareRemediationVerify,
+      validateRemediationVerifyInput,
+      finalizeRemediationVerify,
       extractGame,
       prepareFix,
       finalizeFix,
       verifyFixArtifact,
+      verifyFixArtifactAtHead,
       renderFixPr,
       preparePrReview,
       finalizePrReview,
@@ -6299,6 +8895,26 @@ async function main() {
   }
   if (finalize) {
     await finalizeAgenticReview();
+    return;
+  }
+  if (prepareConfirmation) {
+    await prepareFindingConfirmation();
+    return;
+  }
+  if (finalizeConfirmation) {
+    await finalizeFindingConfirmation();
+    return;
+  }
+  if (prepareRemediationVerify) {
+    await prepareRemediationVerification();
+    return;
+  }
+  if (validateRemediationVerifyInput) {
+    await validateRemediationVerificationArtifactInput();
+    return;
+  }
+  if (finalizeRemediationVerify) {
+    await finalizeRemediationVerification();
     return;
   }
   if (extractGame) {
@@ -6315,6 +8931,10 @@ async function main() {
   }
   if (verifyFixArtifact) {
     await verifyAgenticFixArtifact();
+    return;
+  }
+  if (verifyFixArtifactAtHead) {
+    await verifyAgenticFixArtifactAtHead();
     return;
   }
   if (renderFixPr) {
@@ -6388,7 +9008,7 @@ async function main() {
   );
 
   const collectedReport = {
-    schema_version: 2,
+    schema_version: 3,
     mode: "collect_only",
     generated_at: generatedAt,
     api_base_url: apiBaseUrl,
@@ -6428,31 +9048,48 @@ export {
   buildAgenticFixInput,
   buildAgenticPrReviewInput,
   buildAgenticPrReworkInput,
+  buildGameDataset,
+  buildRemediationVerificationInput,
   extractGameReviewInput,
   finalizeAgenticFix,
   finalizeAgenticPrReview,
   finalizeAgenticPrRework,
   finalizeAgenticReview,
+  finalizeFindingConfirmation,
   finalizeRemediationIssue,
+  finalizeRemediationVerification,
   getFixBranch,
+  getFindingFingerprint,
+  getFindingKey,
   parseAgentReview,
+  parseFindingConfirmationOutput,
   parseAgentFixOutput,
   parseAgentPrReviewOutput,
   parseAgentPrReworkOutput,
+  parseRemediationVerificationOutput,
   prepareAgenticFix,
+  prepareFindingConfirmation,
   prepareAgenticPrReview,
   prepareAgenticPrRework,
+  prepareRemediationVerification,
   renderFixPrBody,
   renderIssueBody,
   renderPrReviewBody,
   renderPrReviewRequest,
   syncIssue,
+  validateAgenticFixInput,
   validateAgenticPrReviewInput,
   validateAgenticPrReviewResult,
   validateAgenticPrReworkInput,
   validateCollectedReviewInput,
+  validateFindingConfirmationInput,
+  validateFindingConfirmationPlan,
+  validateRemediationVerificationArtifactInput,
+  validateRemediationVerificationBinding,
+  validateRemediationVerificationInput,
   validateFixManifest,
   validatePrReworkManifest,
   verifyAgenticFixArtifact,
+  verifyAgenticFixArtifactAtHead,
   verifyAgenticPrReworkArtifact,
 };

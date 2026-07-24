@@ -135,7 +135,9 @@ Upstream-fetch hygiene:
 
 ## Verification Checklist
 
-No automated test suite is currently configured. Before opening a PR, prefer:
+Automated safeguard tests are available. Before opening a PR, prefer:
+- `pnpm test:upstream-review`
+- `pnpm test:game-parsers`
 - `pnpm typecheck`
 - `pnpm build`
 - Manual smoke checks:

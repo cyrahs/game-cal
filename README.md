@@ -174,63 +174,81 @@ pnpm --filter @game-cal/api start
 自动定时执行；需要时可在 GitHub Actions 页面从默认分支手动触发；非默认分支不会
 运行，以免未合并的 workflow 代码接触 Secrets。
 
-workflow 由相互隔离的审查、修复、复审和合并阶段组成：
+workflow 由相互隔离的发现、确认、修复、复审、终态重放和合并阶段组成：
 
-- `preflight`：在接触仓库或调用模型前检查五个 Secrets，确认最终 reviewer token
-  属于不同于 `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支会让
-  新提交后的旧批准失效。
-- `collect`：启动本地 Node API，抓取六个游戏的原始公告与当前
-  `/api/events/:game` 输出，过滤已过期项和 reviewer-input suppression。
-- `review`：用六游戏 matrix 在相互隔离的 runner 中分别发起 Responses agent
-  会话。每个 Codex 只读仓库和对应游戏的紧凑 JSON shard，没有 Issue 写权限；
-  单个 shard 最多返回 8 条 findings，六份合计不超过 48 条。
-- `publish`：在第三个 runner 中严格校验结构化结果、再次应用 suppression，再由
-  确定性脚本对每条 finding 生成 semantic key，并从本轮结果中扣除所有 Open 托管
-  Issue 已覆盖的 key。若本轮集合已被旧 Issue 的并集包含，则不修改旧 Issue、不开
-  新 Issue，也不启动 repair；若只有部分重叠，则仅为不重叠的补集创建新 Issue。
-  Closed Issue 永不参与覆盖或 reopen，相同补集再次出现时会创建新的 regression
-  Issue。这个 job 不接触 OpenAI Secrets，并生成只含补集 findings、匹配证据和静态
-  parser 白名单的紧凑修复请求。
-- `repair`：仅在存在 findings 且当前 remediation cycle 没有 Open PR 时，再发起
-  **一个** workspace-write Codex 会话。它没有 GitHub 写权限，只能修改受影响游戏
-  对应的 `apps/api/src/games/<game>.ts`；补丁、base SHA、路径和 SHA-256 会由可信
-  脚本重新导出并校验。
-- `validate_patch`：在全新、无 Secrets、无 GitHub 写权限的 runner 中复验 artifact，
-  应用补丁并运行 `pnpm test:upstream-review`、`pnpm typecheck` 和 `pnpm build`。
-- `open_pr`：只接收上一步验证过的补丁，再次核对 base SHA、digest、路径和默认分支
-  tip，然后用固定 commit/PR 文案非强制推送绑定 fingerprint 与 Issue cycle 的分支
-  并创建 Draft PR。全部 findings 均被修复时，PR 正文使用 `Closes #N`；仍有
-  `not_fixed` 时只使用 `Refs #N`。渲染结果及 GitHub API 返回的 PR 正文还必须匹配
-  同一个 SHA-256。这个 job 不安装依赖，也不执行被修改的 parser 代码。
-- `review_pr`：在新的只读 runner 中把 PR 的 base、head、单一 parent 和 tree 与已验证
-  patch 精确比对，再发起**一个**独立 Codex review 会话；这个 job 没有 GitHub 写
-  权限，也拿不到最终 reviewer token。
-- `validate_pr_review`：在另一台无 OpenAI Secrets、无 GitHub 写权限的 runner 中重建
-  同一 PR snapshot，严格校验 review JSON；只有无 P1/P2 时才能生成 `APPROVE`，
-  存在 P1/P2 时只能生成 `REQUEST_CHANGES`。
-- `submit_pr_review`：不 checkout 或执行 PR 代码，仅下载经过校验且带 SHA-256 的
-  review request，复验分支保护和 PR head 后，用独立身份把 review 绑定到精确
-  `commit_id` 提交；若提交期间 head 发生变化，会立即撤销刚创建的 review 并失败。
-  PR 在最终结果确定前保持 Draft。
-- `rework_round_1` / `rework_round_2` / `rework_round_3`：只有上一轮经过校验并成功
-  提交的结果为
-  `REQUEST_CHANGES` 时才进入下一轮。每轮由独立的 `repair`、`validate`、`push`、
-  `review`、`validate_review` 和 `submit` job 组成；返工 agent 只能修改静态 parser
-  白名单，随后在无 Secrets 的新 runner 中复验并运行完整测试，再由只具备
-  `contents: write` 的 job 更新原 Draft PR，最后重新执行完整 PR review。
-- `finalize_approved_pr`：初审或任一返工轮次成功提交 `APPROVE` 后，集中选择唯一的
-  终态 head。这个 job 不 checkout 或执行 PR 代码；它用独立 reviewer token 只读
-  复核精确 commit 上的最新批准，再用 job-scoped `GITHUB_TOKEN` 复验 PR 作者、
-  PR 正文 digest、base/head、默认分支 tip、分支保护和 squash 配置，将 Draft 转为
-  Ready，并通过带 head SHA 条件的 API 自动 squash merge。Ready 后任一校验或合并
-  失败时会尽力恢复为 Draft。
-- `finalize_remediation_issue`：仅在 GitHub 已确认 squash merge 后运行，重新验证
-  repository、Issue、fingerprint、cycle、PR 正文 digest、merge commit，以及原始
-  review/fix/manifest/patch artifacts。全量修复时确认对应 Issue 已按 `Closes #N`
-  关闭；初审直接通过的部分修复会让 `Refs #N` 对应的 Issue 保持 Open，并把其机器
-  coverage 和正文缩小到 `not_fixed` findings，避免已修复项以后回归时被旧 Issue
-  遮蔽。若 PR 经历过返工，则不再拿初始 fix 输出推断最终逐项状态，而是保守保留原
-  coverage，等待下一次巡检按当前上游数据重新做集合差。
+- `preflight`：调用模型前检查五个 Secrets，确认 reviewer token 属于不同于
+  `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支保护会让新
+  commit 上的旧批准失效。
+- `collect` / `review`：采集六个游戏的原始公告和当前 `/api/events/:game` 输出，
+  过滤已过期项及 reviewer-input suppression；随后用六游戏 matrix 在隔离 runner
+  中发起六个只读 Responses agent 会话。每个会话只看到对应游戏的紧凑 shard，
+  单游戏最多返回 8 条候选 finding。
+- `confirmation_plan` / `confirm`：初审 finding 只视为候选。可信脚本为有候选的
+  游戏生成 digest-bound 输入；候选在这个可信 plan 阶段再次应用 suppression，再由
+  新的只读 Codex 会话独立确认。没有候选的游戏不调用确认模型。只有初审和确认结果
+  都不为 `low`、且确认 verdict 为 `confirmed` 的 finding 才进入发布，
+  `rejected` / `ambiguous` / 低置信度结果只保留在审计 artifact 中。
+- `publish`：把确认结果与已应用 suppression 的冻结 plan 严格绑定，然后从所有 Open
+  托管 Issue 的 coverage 并集中扣除已覆盖 finding。若新集合完全被包含，则保留旧
+  Issue、不新建 Issue；其中若本轮集合与单个 current-identity Issue 完全一致，就复用
+  该 cycle，并分页检查全部历史 PR；仅当不存在关联 PR 时，才把它视为曾在提 PR 前
+  中断的 orphan 并恢复修复。已有 Open、merged 或 closed-unmerged PR 时都不会重复
+  修复。子集、超集、多个 Issue 的并集或旧 identity coverage 仍只视为已跟踪，不自动
+  猜测恢复。若只有部分重叠，则只为不重叠的补集新建一个 Issue。这个 job 不接触
+  OpenAI Secrets，后续 fix input、fingerprint、分支和 PR 也只绑定被创建或精确复用的
+  scope。
+- `repair` / `validate_patch`：仅在待修 scope 非空，且按分支或
+  issue/fingerprint/cycle marker 都找不到关联 Open PR 时发起一个 workspace-write
+  fix agent。它没有 GitHub 写权限，只能修改目标游戏
+  parser 和 agent-owned 回归测试；可信脚本重新导出并校验 base SHA、路径、patch
+  与 SHA-256。新 runner 在无 Secrets、无写权限环境中应用补丁，使用
+  `pnpm install --frozen-lockfile` 按已提交的 lockfile 安装依赖，再运行
+  `pnpm test:upstream-review`、`pnpm test:game-parsers`、`pnpm typecheck` 和
+  `pnpm build`。
+- `open_pr`：只接收已验证补丁，复验默认分支 tip 和所有 digest 后创建 Draft PR。
+  初始 fix agent 声明全部修复时正文使用 `Closes #N`，否则使用 `Refs #N`；这只
+  决定 PR 文案，不再作为 identity-v3 Issue 的最终关闭依据。此 job 不执行修改后的
+  parser。
+- `review_pr` / `validate_pr_review` / `submit_pr_review`：把 PR 的 base、单一
+  parent、tree、head 与已验证 patch 精确绑定，交给独立只读 Codex review；可信
+  runner 将无 P1/P2 映射为 `APPROVE`，否则映射为 `REQUEST_CHANGES`，最后由独立
+  GitHub 身份把 review 提交到精确 `commit_id`。提交期间 head 漂移会撤销刚创建的
+  review 并失败。
+- `rework_round_1` / `rework_round_2` / `rework_round_3`：仅在上一轮
+  `REQUEST_CHANGES` 时运行。每轮均重新执行 repair、无 Secrets 验证、受 lease
+  约束的 push 和完整 PR review；最多三轮，耗尽后 PR 保持 Draft，留给人工处理。
+
+批准后的路径拆成四个信任边界明确的 job：
+
+1. `resolve_approved_snapshot` 只选择唯一获批 stage，核对 reviewer、分支保护、
+   PR 身份、精确 head 和累计 patch artifact；不 checkout 或执行获批代码。
+2. `collect_approved_runtime_input` 使用两个彼此独立、无 Secrets、无写 token 的
+   locked-down Docker 容器执行精确获批 head。第一个一次性测试容器从只读 bind
+   mount 复制代码到临时文件系统，以 `pnpm install --frozen-lockfile` 安装依赖并同时
+   运行 trusted 与 agent-owned parser 回归测试，随后销毁；第二个全新 runtime 容器
+   再以 frozen lockfile 安装依赖、启动 API，并冻结只含本次 finding 目标的 runtime
+   replay。测试和 API 不共享可写工作树。
+3. `verify_approved_runtime_input` checkout 可信默认分支代码，先把冻结输入与
+   base/head/累计 manifest/patch digest 重新绑定，再用只读 Codex verifier 对比
+   原始已确认证据和获批 head 的实际 API 输出；它拥有 OpenAI Secret，但不会执行
+   或 checkout PR 代码。
+4. `finalize_approved_pr` 仍从可信默认分支运行，重新验证 exact-head replay、
+   reviewer、PR 正文、base/head、分支保护和 merge 配置后，才把 Draft 转为 Ready
+   并用带 head SHA 条件的 API squash merge；它不会执行获批代码。
+
+`finalize_remediation_issue` 仅在 GitHub 确认 merge 后运行，并再次核对原始和终态
+artifact、PR/merge 身份及 exact verifier 结果。对 identity-v3 cycle，exact verifier
+是关闭 Issue 的权威依据：只有它确认每条原始 finding 在终态 head 已解决，PR 才能
+merge，随后 Issue 关闭为 completed；即使初始 fix agent 曾返回 `not_fixed`、PR 正文
+使用 `Refs #N`，也不会把已经由终态重放证明解决的 Issue 留在 Open。验证未解决、
+artifact 漂移或 merge 失败时不会合并，Issue 保持 Open。
+
+终态 replay 会为每个目标游戏冻结一份共享的 `patched_api_snapshots`，同一游戏的所有
+finding 都从这份获批 head API 快照判断，而不是各自依赖可能为空的局部候选列表。每份
+快照最多保存 60 条 event；若 API 报告的总数更多，快照标记为 `truncated`。需要用完整
+列表证明“不再存在”或“只剩一条”的 API-only finding（包括
+`non_event_included`、`duplicate_event`，以及没有 raw evidence 的 `other`）在快照
+截断时一律 fail closed，不能被判为 resolved，也不会进入自动合并。
 
 返工轮次在主 workflow DAG 中静态展开，硬上限为 3，不能由 review 文本、PR 内容或
 dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，在原始 base 上创建新的
@@ -243,23 +261,46 @@ dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，�
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
-采集数据、任一 Codex 输出不完整、六个游戏未全部审查或 JSON 不符合约束时，发布
-步骤会失败。没有 findings 时不会创建、关闭或修改任何历史 Issue；有 findings 时，
-workflow 用六个稳定身份字段
-（`game`、`kind`、`raw_title`、`api_title`、`start_time`、`end_time`）为每条
-finding 生成 SHA-256 key，并读取 v2 hidden cycle marker 中排序且去重的 key 集合。
-marker 的 coverage digest 由该 key 列表确定性重算，二者不一致时立即失败。
-所有 Open 托管 Issue 的 coverage 必须彼此不重叠；本轮 findings 被它们的并集完全
-包含时返回 `covered` 且不做任何 Issue 写入，部分重叠时只对集合差创建一个补集 Issue，
-并且后续 fix input、证据、文件白名单、fingerprint、分支和 PR 都只绑定这个补集。
-同一 semantic finding 被模型重复输出时会先去重。Closed Issue 不计入 coverage；
-若 Closed v2 Issue 的 coverage key 集与新补集完全相同（v1 则按整体 fingerprint），
-只会记录为 regression 来源并新开 Issue，绝不 reopen 历史记录。旧 v1 Open marker
-没有逐条 key，只在其整体
-fingerprint 可精确覆盖当前剩余集合时兼容；其他情况会 fail closed，避免猜测重叠关系。
-自动修复若越过文件白名单、创建/删除/重命名文件、改变文件模式、只改空白、生成
-二进制或超过 512 KB 的初始 patch、测试失败，均不会进入提 PR 阶段；每轮返工的增量
-和累计 patch 还分别限制为 128 KiB，且累计 patch 不得丢失上一轮已修改的 parser。
+采集数据、任一 Codex 输出不完整、确认未覆盖全部候选、六个游戏未全部初审或 JSON
+不符合约束时都会 fail closed。
+
+采集 schema v3 为每条证据同时生成两个引用：
+
+- `review_ref` 绑定本次采集中的精确 evidence snapshot，用于阻止 agent 引用不存在或
+  已被替换的证据。
+- `identity_ref` 表示跨运行稳定的主体身份。raw evidence 优先使用 `ann_id`、
+  `activity_id`、`article_id`、`notice_id`、`cid`、`id`、`url` 或 `linkUrl` 等稳定
+  来源 ID，缺失时才回退到规范化标题。Star Rail 会复用 `ann_id`，因此它的 raw
+  主体键使用 `ann_id` 加规范化标题和类型来消歧，但仍排除易变的时间窗；API evidence
+  使用规范化标题。
+
+identity-v3 finding key 由 `game`、`kind` 和排序去重后的 `subject_refs`
+确定性生成；时间窗、说明、严重度及其它模型文案不参与身份计算。集合 fingerprint
+由排序去重后的 v3 finding 身份确定，Issue marker 中的 coverage digest 也会从 key
+集合重算。这样同一个稳定主体引用的时间窗或模型说明变化不会改变 finding 身份，
+同一 finding 被模型重复输出也会先去重；Star Rail raw 标题和 API 标题本身属于上述
+主体消歧规则。
+
+所有 Open 托管 Issue 的 coverage 必须互不重叠；Closed Issue 不参与覆盖，也永不
+reopen。相同问题在历史 Issue 关闭后再次出现时会新建 regression Issue。旧
+identity-v1 Open coverage 只在逐条 legacy key 能全部精确匹配时兼容；若仍有无法
+匹配的 legacy coverage 与新 finding 并存，workflow 会 fail closed。更早、没有
+逐条 key 的 v1 marker 只能用完整 fingerprint 精确覆盖整个剩余集合，绝不猜测部分
+重叠。只有本轮 v3 finding key 集与单个 Open current-identity marker 的 key 集、
+fingerprint 和 coverage digest 全部精确相等时，才会复用原 Issue/cycle；repair
+前会按 managed marker 和 canonical branch 对全部 PR 状态做分类，并在开始 fix agent
+及创建 PR 前各复核一次。只有关联 PR 数为零时才恢复；Open PR 继续原流程，merged PR
+等待关单恢复，closed-unmerged PR 留给人工决定，不会自动另开重复 PR。
+
+自动修复的 v3 白名单只包含目标 parser 和
+`apps/api/src/games/parser-regressions.agent.test.ts`；只要修改 parser，就必须同步
+增加或更新这个 agent-owned 确定性回归测试。
+`apps/api/src/games/parser-regressions.trusted.test.ts` 是仓库维护的不可变核心测试，
+永远不会进入 agent allowlist。`pnpm test:game-parsers` 会同时运行两者。若 agent
+越过白名单、遗漏所需测试、创建/删除/重命名文件、改变文件模式、只改空白、生成
+二进制、超过 patch 上限或测试失败，补丁都不会进入提 PR 阶段；返工累计 patch 还
+不得丢失前一轮已验证修改。
+
 自动分支采用
 `codex/upstream-review-<fingerprint16>-i<issue-number>-b<base-sha12>`：同一
 base 上已有当前 cycle 的 Open PR 时停止重复创建；默认分支因部分修复合并或其他提交
@@ -268,16 +309,21 @@ base 上已有当前 cycle 的 Open PR 时停止重复创建；默认分支因�
 返工链路
 能以精确旧 head lease 替换刚审查过的自动分支，任何并发或人工 head 变化都会使操作
 失败。自动修复无补丁、验证失败、返工耗尽或合并失败时，对应 Issue 保持 Open 供人工
-跟进；只有全部 findings 都被修复并成功合并时才关闭，部分修复成功合并后继续 Open。
-初审直接通过时 coverage 会原子缩小到仍为 `not_fixed` 的 key；经历返工后则保留
-原 coverage，避免初始逐项结果被误当作最终状态。review 输出不完整、上下文 digest
-不一致、PR head 漂移或 reviewer 与 PR
+跟进。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与 PR
 作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未配置
 “新提交使旧批准失效”时，也会在调用模型前失败。不含人工重新运行 job 的单次初始
-完整运行最多调用 8 个 agent；三轮都执行时，最多为 14 个：六个游戏 reviewer、
-一个初始 fix agent、一个初始 PR review agent，以及每轮各一个 rework agent 和一个
-完整 PR review agent。运行产物和 API 日志会作为 Actions artifacts 保存，并按
-round 0/1/2/3 使用不同名称。
+运行按实际分支计费：
+
+- 干净运行固定 6 次：只有六游戏初审。
+- 出现候选、但确认后没有可发布 finding 时，为 `6 + 有候选的游戏数`，最多 12 次；
+  确认按游戏而不是按 finding 调用。
+- 成功到达对应阶段时，初始 fix、初始 PR review 和终态 verifier 各增加 1 次；每次
+  实际执行的返工再增加 1 次 rework 和 1 次完整 PR review。无有效 patch、没有获批
+  head 或中途验证失败时，后续调用不会发生。只有六个游戏都有候选、初始修复与复审
+  均执行、三轮返工及其三轮复审全部执行，并最终到达 verifier 时，才达到
+  `6 + 6 + 1 + 1 + 3 + 3 + 1 = 21` 次的上限。
+
+运行产物和 API 日志会作为 Actions artifacts 保存，并按 round 0/1/2/3 使用不同名称。
 
 需要配置五个 GitHub Actions Secrets：
 
@@ -290,21 +336,25 @@ round 0/1/2/3 使用不同名称。
 - `UPSTREAM_REVIEW_APPROVAL_TOKEN`：独立 GitHub 身份的 fine-grained PAT，只选择
   本仓库并授予 `Pull requests: Read and write` 与 `Administration: Read`。后者仅
   用于读取分支保护设置。该身份必须不同于 `github-actions[bot]`，并对仓库拥有
-  admin 权限；token 只在不 checkout 仓库的 `preflight` 身份检查、初始
-  `submit_pr_review`、每轮不 checkout 的 `submit` job，以及最终不 checkout 的
-  `finalize_approved_pr` 只读复核步骤中使用，绝不会提供给 Codex、补丁验证或执行
-  PR 代码的 job，也不会用于 Ready 或 merge 写操作。
+  admin 权限；token 只用于不执行 PR 代码的身份/保护校验、精确 commit review 提交、
+  `resolve_approved_snapshot` 和 merge 前的 reviewer 复核，绝不会提供给 Codex、
+  补丁验证或执行获批代码的容器，也不会用于 Ready 或 merge 写操作。
 
 网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
-`Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
-`.github/prompts/upstream-review.md` 与
-`.github/schemas/upstream-review-output.schema.json`；修复 agent 使用
-`.github/prompts/upstream-review-fix.md` 与
-`.github/schemas/upstream-review-fix-output.schema.json`；独立 PR reviewer 使用
-`.github/prompts/upstream-review-pr-review.md` 与
-`.github/schemas/upstream-review-pr-review-output.schema.json`；返工 agent 使用
-`.github/prompts/upstream-review-pr-rework.md` 与
-`.github/schemas/upstream-review-pr-rework-output.schema.json`。
+`Authorization: Bearer <key>`。各 agent 的 prompt / Structured Output Schema 为：
+
+- 初审：`.github/prompts/upstream-review.md` /
+  `.github/schemas/upstream-review-output.schema.json`
+- 候选确认：`.github/prompts/upstream-review-confirm.md` /
+  `.github/schemas/upstream-review-confirm-output.schema.json`
+- 初始修复：`.github/prompts/upstream-review-fix.md` /
+  `.github/schemas/upstream-review-fix-output.schema.json`
+- PR 复审：`.github/prompts/upstream-review-pr-review.md` /
+  `.github/schemas/upstream-review-pr-review-output.schema.json`
+- PR 返工：`.github/prompts/upstream-review-pr-rework.md` /
+  `.github/schemas/upstream-review-pr-rework-output.schema.json`
+- 终态验证：`.github/prompts/upstream-remediation-verify.md` /
+  `.github/schemas/upstream-remediation-verify-output.schema.json`
 
 自动创建 PR 还需要在仓库 `Settings → Actions → General → Workflow permissions`
 中启用 **Allow GitHub Actions to create and approve pull requests**。GitHub 将“创建”
@@ -335,6 +385,9 @@ required checks、未解决会话、ruleset 或其他合并限制仍由 GitHub �
 - `UPSTREAM_REVIEW_AGENT_OUTPUT_DIR`（finalize 模式读取六份 Codex JSON 的目录）
 - `UPSTREAM_REVIEW_AGENT_OUTPUT_PATH`（兼容旧版单文件 Codex JSON）
 - `UPSTREAM_REVIEW_REPORT_PATH`（finalize 模式写出的完整 JSON 报告）
+- `UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH` /
+  `UPSTREAM_REVIEW_CONFIRMATION_INPUT_DIR` /
+  `UPSTREAM_REVIEW_CONFIRMATION_OUTPUT_DIR`（候选确认 plan、分游戏输入和 agent 输出）
 - `UPSTREAM_REVIEW_FIX_INPUT_PATH`（prepare/finalize-fix 使用的紧凑修复请求）
 - `UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH`（Codex 修复结果）
 - `UPSTREAM_REVIEW_FIX_METADATA_PATH`（可信校验后的修复元数据）
@@ -356,21 +409,32 @@ required checks、未解决会话、ruleset 或其他合并限制仍由 GitHub �
   `UPSTREAM_REVIEW_PR_REWORK_PATCH_PATH`（可信返工元数据、返工 manifest 与增量 patch）
 - `UPSTREAM_REVIEW_PR_REWORK_FIX_MANIFEST_PATH` /
   `UPSTREAM_REVIEW_PR_REWORK_FIX_PATCH_PATH`（从原始 base 计算的累计 manifest 与 patch）
+- `UPSTREAM_REVIEW_APPROVED_FIX_INPUT_PATH` /
+  `UPSTREAM_REVIEW_APPROVED_FIX_MANIFEST_PATH` /
+  `UPSTREAM_REVIEW_APPROVED_FIX_PATCH_PATH`（终态获批 head 对应的累计修复 artifact）
+- `UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH` /
+  `UPSTREAM_REVIEW_REMEDIATION_VERIFY_AGENT_OUTPUT_PATH` /
+  `UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH`（终态 runtime replay、verifier 输出与
+  规范化结果）
 - `UPSTREAM_REVIEW_SUPPRESSIONS_PATH`（默认 `.github/upstream-review-suppressions.json`）
 - `UPSTREAM_REVIEW_ISSUE_NUMBER` / `UPSTREAM_REVIEW_ISSUE_URL` /
   `UPSTREAM_REVIEW_FINDING_FINGERPRINT` / `UPSTREAM_REVIEW_REMEDIATION_CYCLE`
   （合并后 Issue 收尾使用的可信 cycle 身份）
 - `UPSTREAM_REVIEW_PR_BODY_SHA256` / `UPSTREAM_REVIEW_MERGE_SHA` /
-  `UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED`
-  （合并后收尾使用的可信 PR 正文、merge commit 与完整修复状态）
+  `UPSTREAM_REVIEW_APPROVED_STAGE`（合并后收尾使用的可信 PR 正文、merge commit 与
+  获批轮次）
+- `UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED`（仅供旧 schema 收尾兼容；identity-v3
+  以 exact verifier 结果为准）
 - `UPSTREAM_REVIEW_DRY_RUN=1`（finalize 时只生成报告，不操作 GitHub Issue）
 
 `pnpm review:upstream` / `pnpm review:upstream:collect` 只执行确定性采集，不调用模型；
-`pnpm review:upstream:finalize` 校验已有 agent 输出并发布结果；
+`--prepare-confirmation` / `--finalize-confirmation` 生成并收口候选确认；
 `prepare-pr-review` / `finalize-pr-review` 对应 PR review 上下文和可信 request
 生成；`prepare-pr-rework` / `finalize-pr-rework` / `verify-pr-rework` 对应返工请求、
-增量与累计 patch 生成以及隔离复验。生产 workflow 不再调用旧的 Chat Completions
-接口。
+增量与累计 patch 生成以及隔离复验；`--prepare-remediation-verification`、
+`--validate-remediation-verification-input` 和
+`--finalize-remediation-verification` 对应终态重放的冻结、可信校验和收口。生产
+workflow 不再调用旧的 Chat Completions 接口。
 
 Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，用于屏蔽已确认合理、但模型仍可能重复上报的 finding。对于 `kind: "non_event_included"`（或未填写 `kind`）的规则，对应 API event 也会在送审前从 reviewer 输入中排除；对于 `kind: "missing_event"` 的规则，对应 raw notice 会在送审前从 reviewer 输入中排除。
 

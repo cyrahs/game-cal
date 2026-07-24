@@ -20,7 +20,7 @@
     },
     "changed_files": {
       "type": "array",
-      "maxItems": 6,
+      "maxItems": 7,
       "items": {
         "type": "string",
         "enum": [
@@ -29,7 +29,8 @@
           "apps/api/src/games/ww.ts",
           "apps/api/src/games/zzz.ts",
           "apps/api/src/games/snowbreak.ts",
-          "apps/api/src/games/endfield.ts"
+          "apps/api/src/games/endfield.ts",
+          "apps/api/src/games/parser-regressions.agent.test.ts"
         ]
       }
     },
