@@ -3031,3 +3031,56 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("final merge verifies reviewer role and squash configuration with separate tokens", async () => {
+  const workflow = await fs.readFile(
+    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    "utf8"
+  );
+  const start = workflow.indexOf(
+    "      - name: Resolve and verify the exact approved PR snapshot"
+  );
+  const end = workflow.indexOf(
+    "      - name: Mark ready and squash-merge the approved head",
+    start
+  );
+
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const approvalStep = workflow.slice(start, end);
+
+  assert.match(
+    approvalStep,
+    /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/
+  );
+  assert.match(approvalStep, /MERGE_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(
+    approvalStep,
+    /jq -e '\.permissions\.admin == true' "\$reviewer_repository_path"/
+  );
+  assert.match(
+    approvalStep,
+    /if ! gh api "repos\/\$GH_REPO" > "\$reviewer_repository_path"; then/
+  );
+  assert.match(
+    approvalStep,
+    /if ! GH_TOKEN="\$MERGE_TOKEN" gh api "repos\/\$GH_REPO" > "\$merge_repository_path"; then/
+  );
+  assert.match(
+    approvalStep,
+    /jq -e '\.allow_squash_merge == true' "\$merge_repository_path"/
+  );
+  assert.doesNotMatch(
+    approvalStep,
+    /\.allow_squash_merge == true and\s+\.permissions\.admin == true/
+  );
+  assert.deepEqual(
+    approvalStep.match(
+      /(?:GH_TOKEN="\$MERGE_TOKEN" )?gh api "repos\/\$GH_REPO" > "\$[A-Za-z_]+"/g
+    ),
+    [
+      'gh api "repos/$GH_REPO" > "$reviewer_repository_path"',
+      'GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"',
+    ]
+  );
+});

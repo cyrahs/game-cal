@@ -1455,6 +1455,7 @@ jobs:
         id: approved
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          MERGE_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
           PR_URL: ${{ needs.open_pr.outputs.pr_url }}
@@ -1558,12 +1559,24 @@ jobs:
             echo "Invalid independent reviewer identity." >&2
             exit 1
           fi
-          if ! gh api "repos/$GH_REPO" --jq '
-            .allow_squash_merge == true and
-            .permissions.admin == true
-          ' | grep -qx true
-          then
-            echo "The reviewer identity or repository squash-merge configuration changed." >&2
+
+          reviewer_repository_path="$RUNNER_TEMP/upstream-review-reviewer-repository.json"
+          if ! gh api "repos/$GH_REPO" > "$reviewer_repository_path"; then
+            echo "The reviewer repository role could not be verified." >&2
+            exit 1
+          fi
+          if ! jq -e '.permissions.admin == true' "$reviewer_repository_path" >/dev/null; then
+            echo "The approval-token identity no longer has admin access to $GH_REPO." >&2
+            exit 1
+          fi
+
+          merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
+          if ! GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"; then
+            echo "The repository merge configuration could not be verified with GITHUB_TOKEN." >&2
+            exit 1
+          fi
+          if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
+            echo "Squash merge is no longer enabled for $GH_REPO." >&2
             exit 1
           fi
 
