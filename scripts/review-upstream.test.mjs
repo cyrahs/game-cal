@@ -2293,6 +2293,7 @@ test("runs trusted and agent-owned parser regression suites", async () => {
     "Star Rail excludes external mini-program and web-service launches",
     "Endfield preserves Protocol Reconnection as a player-relative window",
     "Endfield emits Protocol Reconnection as a relative final event",
+    "ZZZ defaults every announcement request to the official static host",
   ]) {
     assert.ok(
       trustedTestSource.includes(`test("${requiredTitle}`),

@@ -10,6 +10,7 @@ import {
   fetchStarRailEvents,
   shouldIncludeStarRailAnnouncement,
 } from "./starrail.js";
+import { fetchZzzEvents } from "./zzz.js";
 
 const fateLongTermContent = [
   "<p>公告发布时间：2026/07/03 20:55:00</p>",
@@ -181,6 +182,44 @@ test("Endfield emits Protocol Reconnection as a relative final event", async () 
         end_time_text:
           "激活「协议重连」活动当天至激活起第14天的次日04:00（服务器时间）结束",
       }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ZZZ defaults every announcement request to the official static host", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: URL[] = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    requestedUrls.push(url);
+    const data = url.pathname.endsWith("/getActivityList")
+      ? { activity_list: [] }
+      : { list: [], pic_list: [] };
+    return new Response(
+      JSON.stringify({ retcode: 0, message: "OK", data }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  };
+
+  try {
+    assert.deepEqual(await fetchZzzEvents(), []);
+    assert.deepEqual(
+      requestedUrls.map((url) => url.pathname).sort(),
+      [
+        "/common/nap_cn/announcement/api/getActivityList",
+        "/common/nap_cn/announcement/api/getAnnContent",
+        "/common/nap_cn/announcement/api/getAnnList",
+      ]
+    );
+    assert.ok(
+      requestedUrls.every(
+        (url) => url.hostname === "announcement-static.mihoyo.com"
+      )
     );
   } finally {
     globalThis.fetch = originalFetch;
