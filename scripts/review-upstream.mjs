@@ -558,32 +558,43 @@ function pickStarRailContentItem(contentById, item) {
   );
 }
 
-async function fetchStarRailRawNotices() {
-  const contentUrl = process.env.STARRAIL_CONTENT_API_URL?.trim() || STARRAIL_CONTENT_API;
-  const [json, contentJson] = await Promise.all([
-    requestJson(STARRAIL_LIST_API),
-    requestJson(contentUrl).catch(() => null),
-  ]);
+function parseStarRailRawNotices(json, contentJson) {
   const categories = [];
   collectStarRailCategories(json?.data ?? null, categories);
   const items = getStarRailSelectedItems(categories);
   const contentById = new Map();
   collectStarRailContentItems(contentJson?.data ?? null, contentById);
 
-  return items.map((item) => {
+  return items.flatMap((item) => {
+    const title = normalizeWhitespace(item.title || item.subtitle || "");
+    const subtitle = normalizeWhitespace(item.subtitle || "");
+    // Some official picture cards carry an ann_id and schedule window but no
+    // textual subject. They are not stable review evidence, so ignore them
+    // instead of weakening the fail-closed identity rules below.
+    if (!title && !subtitle) return [];
+
     const content = pickStarRailContentItem(contentById, item)?.content ?? "";
-    return {
+    return [{
       ann_id: item.ann_id,
-      title: normalizeWhitespace(item.title || item.subtitle || ""),
-      subtitle: normalizeWhitespace(item.subtitle || ""),
+      title,
+      subtitle,
       start_time: String(item.start_time ?? ""),
       end_time: String(item.end_time ?? ""),
       type: item.type,
       type_label: item.type_label,
       content_time_candidates: extractTimeCandidates(content),
       snippet: stripHtml(content).slice(0, 220),
-    };
+    }];
   });
+}
+
+async function fetchStarRailRawNotices() {
+  const contentUrl = process.env.STARRAIL_CONTENT_API_URL?.trim() || STARRAIL_CONTENT_API;
+  const [json, contentJson] = await Promise.all([
+    requestJson(STARRAIL_LIST_API),
+    requestJson(contentUrl).catch(() => null),
+  ]);
+  return parseStarRailRawNotices(json, contentJson);
 }
 
 async function fetchWwRawNotices() {
@@ -9455,6 +9466,7 @@ export {
   parseAgentPrReviewOutput,
   parseAgentPrReworkOutput,
   parseRemediationVerificationOutput,
+  parseStarRailRawNotices,
   prepareAgenticFix,
   prepareFindingConfirmation,
   prepareAgenticPrReview,
