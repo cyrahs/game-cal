@@ -715,7 +715,20 @@ jobs:
             origin \
             "HEAD:refs/heads/$FIX_BRANCH"
 
-          current_pr_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          current_pr_head=""
+          for attempt in {1..15}; do
+            current_pr_head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+            if [ "$current_pr_head" = "$new_head_sha" ]; then
+              break
+            fi
+            if [ "$current_pr_head" != "$EXPECTED_HEAD_SHA" ]; then
+              echo "The PR exposed an unexpected head after the guarded replacement." >&2
+              exit 1
+            fi
+            if [ "$attempt" -lt 15 ]; then
+              sleep 2
+            fi
+          done
           if [ "$current_pr_head" != "$new_head_sha" ]; then
             echo "GitHub did not expose the exact replacement head after push." >&2
             exit 1
