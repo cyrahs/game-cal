@@ -32,6 +32,7 @@ import {
   parseAgentPrReviewOutput,
   parseAgentPrReworkOutput,
   parseRemediationVerificationOutput,
+  parseStarRailRawNotices,
   prepareFindingConfirmation,
   prepareAgenticPrRework,
   renderFixPrBody,
@@ -1320,6 +1321,59 @@ test("disambiguates Star Rail records that reuse the same ann_id", () => {
     10
   ).raw_notices[0];
   assert.equal(shiftedWindow.identity_ref, records[0].identity_ref);
+});
+
+test("ignores untitled Star Rail picture cards without dropping a titled reused ann_id", () => {
+  const records = parseStarRailRawNotices(
+    {
+      data: {
+        list: [
+          {
+            type_id: 3,
+            type_label: "资讯",
+            list: [
+              {
+                ann_id: 1309,
+                title: " \n ",
+                subtitle: "\t",
+                start_time: "2026-07-01 12:00:00",
+                end_time: "2026-08-01 12:00:00",
+                type: 3,
+                type_label: "资讯",
+              },
+              {
+                ann_id: 1309,
+                title: "有标题的同 ID 公告",
+                subtitle: "",
+                start_time: "2026-07-02 12:00:00",
+                end_time: "2026-08-02 12:00:00",
+                type: 3,
+                type_label: "资讯",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      data: {
+        list: [
+          {
+            ann_id: 1309,
+            title: "有标题的同 ID 公告",
+            content: "<p>活动时间：2026/07/02 12:00</p>",
+          },
+        ],
+      },
+    }
+  );
+
+  assert.equal(records.length, 1);
+  assert.equal(records[0].ann_id, 1309);
+  assert.equal(records[0].title, "有标题的同 ID 公告");
+  const evidence = buildGameDataset("starrail", records, [], 10).raw_notices;
+  assert.equal(evidence.length, 1);
+  assert.match(evidence[0].identity_ref, /^raw:starrail:[a-f0-9]{32}$/);
 });
 
 test("falls back to normalized titles when raw evidence has no source ID", () => {
