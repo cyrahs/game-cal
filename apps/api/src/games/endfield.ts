@@ -212,10 +212,6 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   };
 }
 
-function extractTimeRangeFromHtml(html: string): EndfieldParsedWindow {
-  return parseEndfieldWindowText(stripHtml(html));
-}
-
 function tokenizeHtmlLines(input: string | undefined): string[] {
   return (input ?? "")
     .replace(/<br\s*\/?>/gi, "\n")
@@ -227,6 +223,49 @@ function tokenizeHtmlLines(input: string | undefined): string[] {
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+}
+
+function isEndfieldTimeSectionLabel(line: string): boolean {
+  return (
+    /^(?:▼\/\/|■)\s*(?:活动时间|开放时间|开启时间|开始时间)(?:\s*[:：]\s*.*)?$/.test(
+      line
+    ) ||
+    /^(?:活动时间|开放时间|开启时间|开始时间)(?:\s*[:：]\s*.*)?$/.test(line)
+  );
+}
+
+function isEndfieldTimeSectionBoundary(line: string): boolean {
+  return (
+    /^(?:▼\/\/|■)\s*\S/.test(line) ||
+    /^※\s*(?:例|例如|示例)(?:\s*[:：]|$)/.test(line) ||
+    /^(?:例|例如|示例)\s*[:：]/.test(line) ||
+    /^(?:参与条件|开放条件|活动说明|活动内容|活动奖励|活动规则|注意事项|玩法说明)\s*[:：]?$/.test(
+      line
+    )
+  );
+}
+
+function extractTimeRangeFromHtml(html: string): EndfieldParsedWindow {
+  const lines = tokenizeHtmlLines(html);
+  let foundTimeSection = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isEndfieldTimeSectionLabel(lines[i]!)) continue;
+    foundTimeSection = true;
+
+    const sectionLines = [lines[i]!];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j]!;
+      if (isEndfieldTimeSectionBoundary(line)) break;
+      sectionLines.push(line);
+    }
+
+    const window = parseEndfieldWindowText(sectionLines.join(" "));
+    if (window.start || window.end || window.endText) return window;
+  }
+
+  if (foundTimeSection) return { start: null, end: null };
+  return parseEndfieldWindowText(stripHtml(html));
 }
 
 function parseExplicitDateRanges(input: string): Array<{ start: string; end: string }> {
@@ -361,6 +400,33 @@ function isEndfieldVersionMaintenancePreview(item: HypergryphAggregateItem): boo
   return title.includes("版本更新维护预告");
 }
 
+export function isEndfieldVersionNoticeCandidate(
+  title: string | undefined,
+  header: string | undefined
+): boolean {
+  const item = { title, header };
+  return isEndfieldVersionNotice(item) || isEndfieldVersionMaintenancePreview(item);
+}
+
+export function getEndfieldVersionNoticePriority(
+  title: string | undefined,
+  header: string | undefined
+): number {
+  return isEndfieldVersionNotice({ title, header }) ? 1 : 0;
+}
+
+export function compareEndfieldVersionNoticeOrder(
+  a: { version: string; priority: number; maintenanceEndOrder: number },
+  b: { version: string; priority: number; maintenanceEndOrder: number }
+): number {
+  if (a.version === b.version) {
+    const priorityOrder = b.priority - a.priority;
+    if (priorityOrder !== 0) return priorityOrder;
+  }
+
+  return b.maintenanceEndOrder - a.maintenanceEndOrder;
+}
+
 function extractEndfieldVersionLabel(item: HypergryphAggregateItem): string | null {
   const combinedTitle = normalizeTitle(`${item.header ?? ""} ${item.title ?? ""}`);
   const titleMatch = /「([^」]+)」版本/.exec(combinedTitle);
@@ -399,10 +465,23 @@ function toEndfieldVersionNotice(item: HypergryphAggregateItem): EndfieldVersion
 function pickCurrentEndfieldVersionNotice(items: HypergryphAggregateItem[]): EndfieldVersionNotice | null {
   const nowMs = Date.now();
   const notices = items
-    .filter(isEndfieldVersionNotice)
+    .filter((item) => isEndfieldVersionNoticeCandidate(item.title, item.header))
     .map(toEndfieldVersionNotice)
     .filter((notice): notice is EndfieldVersionNotice => notice != null)
-    .sort((a, b) => Date.parse(b.maintenanceEndIso) - Date.parse(a.maintenanceEndIso));
+    .sort((a, b) =>
+      compareEndfieldVersionNoticeOrder(
+        {
+          version: a.version,
+          priority: getEndfieldVersionNoticePriority(a.item.title, a.item.header),
+          maintenanceEndOrder: Date.parse(a.maintenanceEndIso),
+        },
+        {
+          version: b.version,
+          priority: getEndfieldVersionNoticePriority(b.item.title, b.item.header),
+          maintenanceEndOrder: Date.parse(b.maintenanceEndIso),
+        }
+      )
+    );
 
   return (
     notices.find((notice) => Date.parse(notice.maintenanceEndIso) <= nowMs) ??

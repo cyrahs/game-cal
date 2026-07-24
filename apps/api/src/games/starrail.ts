@@ -57,6 +57,7 @@ type StarRailParsedTimeRange = {
   startIso: string | null;
   endIso: string | null;
   endText?: string;
+  unresolvedVersionStart?: boolean;
 };
 
 const STARRAIL_DEFAULT_LIST_API =
@@ -65,6 +66,8 @@ const STARRAIL_DEFAULT_LIST_API =
 const STARRAIL_DEFAULT_CONTENT_API =
   "https://hkrpg-api-static.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnContent?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn&platform=pc&region=prod_gf_cn&level=30&uid=11111111";
 const STARRAIL_SOURCE_TZ_OFFSET = "+08:00";
+const STARRAIL_VERSION_CADENCE_DAYS = 42;
+const STARRAIL_MAX_INFERRED_VERSION_DISTANCE = 3;
 const STARRAIL_DATE_TIME_PATTERN =
   String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -254,6 +257,69 @@ function extractRelativeVersionLabel(input: string): string | null {
   return null;
 }
 
+function parseNumericVersionLabel(
+  input: string
+): { major: number; minor: number } | null {
+  const match = /^(\d+)\.(\d+)$/.exec(input.trim());
+  if (!match) return null;
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor)) return null;
+  return { major, minor };
+}
+
+function inferEarlierVersionMaintenanceEndIso(
+  versionLabel: string,
+  versionMaintenanceEndByLabel: Map<string, string>
+): string | null {
+  const target = parseNumericVersionLabel(versionLabel);
+  if (!target) return null;
+
+  const anchors = [...versionMaintenanceEndByLabel.entries()]
+    .map(([label, endIso]) => {
+      const version = parseNumericVersionLabel(label);
+      const endMs = Date.parse(endIso);
+      if (!version || version.major !== target.major || !Number.isFinite(endMs)) {
+        return null;
+      }
+      return {
+        ...version,
+        endMs,
+        versionDistance: version.minor - target.minor,
+      };
+    })
+    .filter(
+      (
+        anchor
+      ): anchor is {
+        major: number;
+        minor: number;
+        endMs: number;
+        versionDistance: number;
+      } =>
+        anchor != null &&
+        anchor.versionDistance > 0 &&
+        anchor.versionDistance <= STARRAIL_MAX_INFERRED_VERSION_DISTANCE
+    )
+    .sort((a, b) => a.versionDistance - b.versionDistance);
+  const currentAnchor = anchors[0];
+  if (!currentAnchor) return null;
+
+  const inferredMs =
+    currentAnchor.endMs -
+    currentAnchor.versionDistance *
+      STARRAIL_VERSION_CADENCE_DAYS *
+      24 *
+      60 *
+      60 *
+      1000;
+  return unixSecondsToIsoWithSourceOffset(
+    Math.round(inferredMs / 1000),
+    STARRAIL_SOURCE_TZ_OFFSET
+  );
+}
+
 function resolveRelativeVersionStartIso(
   input: string,
   opts: {
@@ -263,7 +329,13 @@ function resolveRelativeVersionStartIso(
 ): string | null {
   const relativeVersionLabel = extractRelativeVersionLabel(input);
   if (relativeVersionLabel) {
-    return opts.versionMaintenanceEndByLabel.get(relativeVersionLabel) ?? null;
+    return (
+      opts.versionMaintenanceEndByLabel.get(relativeVersionLabel) ??
+      inferEarlierVersionMaintenanceEndIso(
+        relativeVersionLabel,
+        opts.versionMaintenanceEndByLabel
+      )
+    );
   }
 
   return /版本(?:更新后|开启后|期间)/.test(input)
@@ -429,9 +501,19 @@ export function extractStarRailTimeRangeFromContent(
 
   const dates = collectDateTimeCandidates(section);
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
+  const explicitLongTermRange = longTermFallback(section);
+
+  if (explicitLongTermRange.startIso && explicitLongTermRange.endText) {
+    return explicitLongTermRange;
+  }
 
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length > 0) {
-    if (!relativeStartIso) return longTermFallback(section);
+    if (!relativeStartIso) {
+      const fallback = longTermFallback(section);
+      return fallback.startIso
+        ? fallback
+        : { ...fallback, unresolvedVersionStart: true };
+    }
 
     const rawEndIso = toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET);
     return {
@@ -448,7 +530,10 @@ export function extractStarRailTimeRangeFromContent(
       };
     }
 
-    return longTermFallback(section);
+    const fallback = longTermFallback(section);
+    return fallback.startIso
+      ? fallback
+      : { ...fallback, unresolvedVersionStart: true };
   }
 
   if (dates.length >= 2) {
@@ -923,7 +1008,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
-  return [...filteredWithContent, ...contentOnlyItems].map((item): CalendarEvent => {
+  return [...filteredWithContent, ...contentOnlyItems].flatMap((item): CalendarEvent[] => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
@@ -937,6 +1022,8 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       singleVersionMaintenanceEndIso,
       listEndIso,
     });
+    if (contentRange.unresolvedVersionStart) return [];
+
     const resolvedStartIso = contentRange.startIso ?? listStartIso;
     const resolvedEndIso = contentRange.endIso ?? listEndIso;
     const sMs = Date.parse(resolvedStartIso);
@@ -948,7 +1035,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       Number.isFinite(Date.parse(contentRange.startIso)) &&
       relativeEndText != null;
 
-    return {
+    return [{
       id: `starrail:${makeAnnItemKey(item)}`,
       title,
       start_time: hasValidRelativeContentRange
@@ -967,7 +1054,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,
       content,
-    };
+    }];
   });
 }
 
