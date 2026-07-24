@@ -140,6 +140,18 @@ function isOperationalResourceUpdateNotice(
   );
 }
 
+function isExternalServiceLaunchNotice(
+  title: string,
+  content: string | undefined
+): boolean {
+  const text = `${title}\n${stripHtml(content)}`;
+  return (
+    /(?:小程序|企业微信|企微)/.test(text) &&
+    /正式上线/.test(text) &&
+    /(?:首次绑定|绑定账号|每版本)/.test(text)
+  );
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&nbsp;/g, " ")
@@ -373,14 +385,31 @@ function extractStarRailTimeRangeFromContent(
     listEndIso: string;
   }
 ): StarRailParsedTimeRange {
+  const text = stripHtml(content);
+  const longTermFallback = (source: string): StarRailParsedTimeRange => {
+    const longTermRe = new RegExp(
+      `(${STARRAIL_DATE_TIME_PATTERN})\\s*(?:后|起)(长期开放|永久开放|持续开放)`
+    );
+    const longTerm = longTermRe.exec(source);
+    if (longTerm?.[1] && longTerm[2]) {
+      return {
+        startIso: toStarRailSourceIso(longTerm[1]),
+        endIso: null,
+        endText: longTerm[2],
+      };
+    }
+
+    return { startIso: null, endIso: null };
+  };
+
   const section = extractStarRailTimeSection(content);
-  if (!section) return { startIso: null, endIso: null };
+  if (!section) return longTermFallback(text);
 
   const dates = collectDateTimeCandidates(section);
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
 
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length > 0) {
-    if (!relativeStartIso) return { startIso: null, endIso: null };
+    if (!relativeStartIso) return longTermFallback(section);
 
     const rawEndIso = toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET);
     return {
@@ -390,10 +419,14 @@ function extractStarRailTimeRangeFromContent(
   }
 
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length === 0) {
-    return {
-      startIso: relativeStartIso,
-      endIso: relativeStartIso ? opts.listEndIso : null,
-    };
+    if (relativeStartIso) {
+      return {
+        startIso: relativeStartIso,
+        endIso: opts.listEndIso,
+      };
+    }
+
+    return longTermFallback(section);
   }
 
   if (dates.length >= 2) {
@@ -412,7 +445,7 @@ function extractStarRailTimeRangeFromContent(
     };
   }
 
-  return { startIso: null, endIso: null };
+  return longTermFallback(section);
 }
 
 function isRecord(value: unknown): value is JsonObject {
@@ -786,7 +819,11 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
   const filteredWithContent = filtered.filter((item) => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
-    return !isOperationalResourceUpdateNotice(title, contentItem?.content ?? item.content);
+    const content = contentItem?.content ?? item.content;
+    return (
+      !isOperationalResourceUpdateNotice(title, content) &&
+      !isExternalServiceLaunchNotice(title, content)
+    );
   });
 
   const versionMaintenanceEndByLabel = new Map<string, string>();
@@ -830,6 +867,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       if (IGNORE_ANN_IDS.has(contentItem.ann_id)) continue;
       if (!shouldKeepStarRailEventTitle(title)) continue;
       if (isOperationalResourceUpdateNotice(title, contentItem.content)) continue;
+      if (isExternalServiceLaunchNotice(title, contentItem.content)) continue;
 
       const key = `${contentItem.ann_id}|${normalizeTitle(title)}`;
       if (filteredKeys.has(key)) continue;
