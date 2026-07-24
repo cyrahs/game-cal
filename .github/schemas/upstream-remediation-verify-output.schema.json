@@ -11,24 +11,12 @@
         "type": "string"
       }
     },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "summary": {
       "type": "string"
-    },
-    "changed_files": {
-      "type": "array",
-      "maxItems": 7,
-      "items": {
-        "type": "string",
-        "enum": [
-          "apps/api/src/games/genshin.ts",
-          "apps/api/src/games/starrail.ts",
-          "apps/api/src/games/ww.ts",
-          "apps/api/src/games/zzz.ts",
-          "apps/api/src/games/snowbreak.ts",
-          "apps/api/src/games/endfield.ts",
-          "apps/api/src/games/parser-regressions.agent.test.ts"
-        ]
-      }
     },
     "outcomes": {
       "type": "array",
@@ -43,8 +31,17 @@
           "status": {
             "type": "string",
             "enum": [
-              "fixed",
-              "not_fixed"
+              "resolved",
+              "unresolved",
+              "indeterminate"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
             ]
           },
           "reason": {
@@ -54,6 +51,7 @@
         "required": [
           "finding_id",
           "status",
+          "confidence",
           "reason"
         ],
         "additionalProperties": false
@@ -63,8 +61,8 @@
   "required": [
     "complete",
     "errors",
+    "input_sha256",
     "summary",
-    "changed_files",
     "outcomes"
   ],
   "additionalProperties": false

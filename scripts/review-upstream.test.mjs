@@ -11,17 +11,25 @@ import {
   buildAgenticFixInput,
   buildAgenticPrReviewInput,
   buildAgenticPrReworkInput,
+  buildGameDataset,
+  buildRemediationVerificationInput,
   extractGameReviewInput,
+  finalizeFindingConfirmation,
   finalizeRemediationIssue,
   finalizeAgenticFix,
   finalizeAgenticPrReview,
   finalizeAgenticPrRework,
   finalizeAgenticReview,
   getFixBranch,
+  getFindingFingerprint,
+  getFindingKey,
   parseAgentReview,
+  parseFindingConfirmationOutput,
   parseAgentFixOutput,
   parseAgentPrReviewOutput,
   parseAgentPrReworkOutput,
+  parseRemediationVerificationOutput,
+  prepareFindingConfirmation,
   prepareAgenticPrRework,
   renderFixPrBody,
   renderIssueBody,
@@ -29,12 +37,18 @@ import {
   renderPrReviewBody,
   renderPrReviewRequest,
   syncIssue,
+  validateAgenticFixInput,
   validateAgenticPrReviewInput,
   validateAgenticPrReworkInput,
   validateCollectedReviewInput,
+  validateFindingConfirmationInput,
+  validateFindingConfirmationPlan,
+  validateRemediationVerificationBinding,
+  validateRemediationVerificationInput,
   validateFixManifest,
   validatePrReworkManifest,
   verifyAgenticFixArtifact,
+  verifyAgenticFixArtifactAtHead,
   verifyAgenticPrReworkArtifact,
 } from "./review-upstream.mjs";
 
@@ -105,6 +119,20 @@ function cycleMarkerV2(
   return `<!-- upstream-review-cycle:v2 fingerprint=${cycleFingerprint} cycle=${cycle} coverage=${coverageFingerprint} keys=${findingKeys(findings).join(",")} -->`;
 }
 
+function cycleMarkerV3(
+  findings,
+  {
+    findingFingerprint: cycleFingerprint = getFindingFingerprint(findings),
+    cycle = remediationCycle,
+  } = {}
+) {
+  const keys = [...new Set(findings.map(getFindingKey))].sort();
+  const coverageFingerprint = sha256Text(
+    `upstream-review-coverage:v3\n${JSON.stringify(keys)}`
+  );
+  return `<!-- upstream-review-cycle:v2 fingerprint=${cycleFingerprint} cycle=${cycle} coverage=${coverageFingerprint} keys=${keys.join(",")} -->`;
+}
+
 function parseRequestBody(init = {}) {
   if (init.body == null || init.body === "") return null;
   return typeof init.body === "string" ? JSON.parse(init.body) : init.body;
@@ -121,6 +149,11 @@ function managedIssue({
   const marker =
     version === "v1"
       ? cycleMarker(findingFingerprint(cycleFindings), cycle)
+      : version === "v3"
+        ? cycleMarkerV3(findings, {
+            findingFingerprint: getFindingFingerprint(cycleFindings),
+            cycle,
+          })
       : cycleMarkerV2(findings, {
           findingFingerprint: findingFingerprint(cycleFindings),
           coverageFingerprint: findingCoverageFingerprint(findings),
@@ -136,7 +169,42 @@ function managedIssue({
   };
 }
 
-function syncIssueRequest(issues, { createdIssueNumber = 90 } = {}) {
+function managedPullRequest({
+  number = 77,
+  findings,
+  issue = issueNumber,
+  cycle = remediationCycle,
+  baseSha = reviewBaseSha,
+  state = "open",
+  merged = false,
+  body = null,
+}) {
+  const fingerprint = getFindingFingerprint(findings);
+  return {
+    number,
+    html_url: `https://github.com/${repository}/pull/${number}`,
+    state,
+    merged_at: merged ? "2026-07-23T13:00:00Z" : null,
+    body:
+      body ??
+      `<!-- upstream-review-pr:v1 issue=${issue} fingerprint=${fingerprint} cycle=${cycle} -->\n\nManaged PR.\n`,
+    user: { login: "github-actions[bot]" },
+    base: {
+      ref: "main",
+      sha: baseSha,
+      repo: { full_name: repository },
+    },
+    head: {
+      ref: getFixBranch(fingerprint, issue, baseSha),
+      repo: { full_name: repository },
+    },
+  };
+}
+
+function syncIssueRequest(
+  issues,
+  { createdIssueNumber = 90, pullRequests = [] } = {}
+) {
   const calls = [];
   const request = async (pathname, init = {}) => {
     const method = String(init.method ?? "GET").toUpperCase();
@@ -147,6 +215,15 @@ function syncIssueRequest(issues, { createdIssueNumber = 90 } = {}) {
       pathname.startsWith(`/repos/${repository}/issues?`)
     ) {
       return issues;
+    }
+    if (
+      method === "GET" &&
+      pathname.startsWith(`/repos/${repository}/pulls?`)
+    ) {
+      const page = Number(
+        new URL(`https://fixture.invalid${pathname}`).searchParams.get("page")
+      );
+      return page === 1 ? pullRequests : [];
     }
     if (method === "GET") {
       const match = new RegExp(
@@ -183,6 +260,9 @@ function remediationFinalizationFixture({
   findingFingerprint = "d".repeat(64),
   cycle = remediationCycle,
   pullRequestBody = null,
+  headSha = "b".repeat(40),
+  mergeParentSha = reviewBaseSha,
+  mergeTreeSha = "0".repeat(40),
 } = {}) {
   const pullRequestNumber = 77;
   const pullRequestUrl =
@@ -229,10 +309,16 @@ function remediationFinalizationFixture({
       },
     },
     head: {
+      sha: headSha,
       repo: {
         full_name: repository,
       },
     },
+  };
+  const mergeCommit = {
+    sha: mergeSha,
+    parents: [{ sha: mergeParentSha }],
+    tree: { sha: mergeTreeSha },
   };
   const calls = [];
   const request = async (pathname, init = {}) => {
@@ -250,6 +336,12 @@ function remediationFinalizationFixture({
       pathname === `/repos/${repository}/issues/${issueNumber}`
     ) {
       return issue;
+    }
+    if (
+      method === "GET" &&
+      pathname === `/repos/${repository}/git/commits/${mergeSha}`
+    ) {
+      return mergeCommit;
     }
     if (
       method === "PATCH" &&
@@ -277,6 +369,7 @@ function remediationFinalizationFixture({
       prBodySha256,
       mergeSha,
       allFindingsAddressed,
+      baseSha: reviewBaseSha,
     },
     calls,
   };
@@ -334,6 +427,36 @@ function collectedInput() {
   };
 }
 
+function collectedInputV3() {
+  const input = collectedInput();
+  const buildDataset = (game) =>
+    buildGameDataset(
+      game,
+      [
+        {
+          ann_id: games.indexOf(game) + 1,
+          title: `${game} raw notice`,
+          start_time: "2026-07-23T10:00:00+08:00",
+          end_time: "2026-08-01T10:00:00+08:00",
+        },
+      ],
+      [
+        {
+          title: `${game} API event`,
+          start_time: "2026-07-23T10:00:00+08:00",
+          end_time: "2026-08-01T10:00:00+08:00",
+        },
+      ],
+      input.max_items
+    );
+  return {
+    ...input,
+    schema_version: 3,
+    datasets: games.map(buildDataset),
+    review_datasets: games.map(buildDataset),
+  };
+}
+
 function finding(game, overrides = {}) {
   return {
     game,
@@ -347,6 +470,311 @@ function finding(game, overrides = {}) {
     end_time: "",
     reason: "Missing from the API.",
     ...overrides,
+  };
+}
+
+function sha256Text(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function confirmationInput(candidates) {
+  const context = {
+    schema_version: 1,
+    mode: "confirm_findings",
+    generated_at: "2026-07-23T12:00:00.000Z",
+    target_game: "genshin",
+    notes: "Confirm each candidate against the cited evidence.",
+    candidates,
+  };
+  return {
+    ...context,
+    input_sha256: sha256Text(JSON.stringify(context)),
+  };
+}
+
+function rehashConfirmationInput(input) {
+  return confirmationInput(input.candidates);
+}
+
+function rehashFindingConfirmationInput(input) {
+  const context = structuredClone(input);
+  delete context.input_sha256;
+  return {
+    ...context,
+    input_sha256: sha256Text(JSON.stringify(context)),
+  };
+}
+
+function rehashFindingConfirmationPlan(plan) {
+  const context = structuredClone(plan);
+  delete context.plan_sha256;
+  return {
+    ...context,
+    plan_sha256: sha256Text(JSON.stringify(context)),
+  };
+}
+
+async function findingConfirmationFixture() {
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "game-cal-upstream-confirmation-")
+  );
+  const inputPath = path.join(tempDir, "input.json");
+  const agentDir = path.join(tempDir, "agent-reviews");
+  const confirmationDir = path.join(tempDir, "confirmation");
+  const planPath = path.join(
+    confirmationDir,
+    "upstream-review-confirmation-plan.json"
+  );
+  const input = collectedInputV3();
+  const targetDataset = buildGameDataset(
+    "genshin",
+    [
+      { ann_id: 101, title: "First Confirmation Event" },
+      { ann_id: 102, title: "Second Confirmation Event" },
+    ],
+    [{ title: "Existing API Event" }],
+    input.max_items
+  );
+  const targetIndex = games.indexOf("genshin");
+  input.datasets[targetIndex] = targetDataset;
+  input.review_datasets[targetIndex] = targetDataset;
+  const targetFindings = targetDataset.raw_notices.map((item) =>
+    finding("genshin", {
+      title: item.title,
+      raw_title: item.title,
+      raw_refs: [item.review_ref],
+      api_refs: [],
+    })
+  );
+
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.writeFile(inputPath, JSON.stringify(input), "utf8");
+  await Promise.all(
+    games.map((game) =>
+      fs.writeFile(
+        path.join(agentDir, `upstream-review-agent-${game}.json`),
+        JSON.stringify(
+          gameReview(game, {
+            findings: game === "genshin" ? targetFindings : [],
+          })
+        ),
+        "utf8"
+      )
+    )
+  );
+  const plan = await prepareFindingConfirmation({
+    inputPath,
+    agentOutputDir: agentDir,
+    planPath,
+    outputDir: confirmationDir,
+    suppressionsPath: path.join(tempDir, "missing-suppressions.json"),
+    baseSha: reviewBaseSha,
+  });
+  return {
+    tempDir,
+    confirmationDir,
+    planPath,
+    plan,
+    gameInputPath: path.join(
+      confirmationDir,
+      plan.games[0].filename
+    ),
+  };
+}
+
+function remediationVerificationInput({
+  headSha = "b".repeat(40),
+  rawSnapshotStatuses = ["unchanged", "unchanged"],
+} = {}) {
+  const evidenceItems = ["genshin", "starrail"].map((game, index) =>
+    buildGameDataset(
+      game,
+      [
+        {
+          ann_id: index + 101,
+          title: `${game} remediation evidence`,
+        },
+      ],
+      [],
+      10
+    ).raw_notices[0]
+  );
+  const findings = evidenceItems.map((item, index) => ({
+    finding_id: `finding-${String(index + 1).padStart(3, "0")}`,
+    ...finding(index === 0 ? "genshin" : "starrail", {
+      title: item.title,
+      raw_title: item.title,
+      raw_refs: [item.review_ref],
+      api_refs: [],
+      subject_refs: [item.identity_ref],
+    }),
+  }));
+  const patchedApiItems = findings.map((item) =>
+    buildGameDataset(
+      item.game,
+      [],
+      [
+        {
+          title: item.raw_title,
+          start_time: "2026-07-24T12:00:00+08:00",
+          end_time: null,
+          end_time_kind: "relative",
+          end_time_text: "长期开放",
+          is_gacha: false,
+        },
+      ],
+      1
+    ).api_events[0]
+  );
+  const evidence = findings.map((item, index) => ({
+    finding_id: item.finding_id,
+    game: item.game,
+    notes: "Verify the exact patched head against current evidence.",
+    raw_snapshot_status: rawSnapshotStatuses[index],
+    raw_before: [evidenceItems[index]],
+    raw_current: [evidenceItems[index]],
+    api_before: [],
+    api_patched: [patchedApiItems[index]],
+  }));
+  const context = {
+    schema_version: 1,
+    mode: "verify_remediation",
+    base_sha: "a".repeat(40),
+    head_sha: headSha,
+    finding_fingerprint: getFindingFingerprint(findings),
+    remediation_cycle: remediationCycle,
+    patch_sha256: "d".repeat(64),
+    fix_input_sha256: "e".repeat(64),
+    fix_manifest_sha256: "f".repeat(64),
+    findings,
+    evidence,
+    patched_api_snapshots: findings.map((item, index) => ({
+      game: item.game,
+      status: "complete",
+      api_event_count: 1,
+      api_events: [patchedApiItems[index]],
+    })),
+  };
+  return {
+    ...context,
+    input_sha256: sha256Text(JSON.stringify(context)),
+  };
+}
+
+function boundRemediationVerificationInput(
+  fixInput,
+  manifest,
+  { headSha = "b".repeat(40) } = {}
+) {
+  const sourceEvidenceByGame = new Map(
+    fixInput.evidence.map((entry) => [entry.game, entry])
+  );
+  const patchedApiByGame = new Map(
+    fixInput.target_games.map((game) => [game, []])
+  );
+  const evidence = fixInput.findings.map((item) => {
+    const source = sourceEvidenceByGame.get(item.game);
+    const rawBefore = source.matching_raw_notices.filter((candidate) =>
+      item.raw_refs.includes(candidate.review_ref)
+    );
+    const apiBefore = source.matching_api_events.filter((candidate) =>
+      item.api_refs.includes(candidate.review_ref)
+    );
+    let apiPatched = apiBefore;
+    if (item.kind === "missing_event" && apiPatched.length === 0) {
+      apiPatched = buildGameDataset(
+        item.game,
+        [],
+        [
+          {
+            title: item.raw_title || item.title,
+            start_time: "2026-07-24T12:00:00+08:00",
+            end_time: null,
+            end_time_kind: "relative",
+            end_time_text: "长期开放",
+            is_gacha: false,
+          },
+        ],
+        1
+      ).api_events;
+    } else if (item.kind === "non_event_included") {
+      apiPatched = [];
+    } else if (item.kind === "duplicate_event") {
+      apiPatched = apiPatched.slice(0, 1);
+    }
+    const patchedForGame = patchedApiByGame.get(item.game);
+    for (const candidate of apiPatched) {
+      if (
+        !patchedForGame.some(
+          (existing) => existing.review_ref === candidate.review_ref
+        )
+      ) {
+        patchedForGame.push(candidate);
+      }
+    }
+    return {
+      finding_id: item.finding_id,
+      game: item.game,
+      notes: buildGameDataset(item.game, [], [], 1).notes,
+      raw_snapshot_status:
+        rawBefore.length > 0 ? "unchanged" : "not_applicable",
+      raw_before: rawBefore,
+      raw_current: rawBefore,
+      api_before: apiBefore,
+      api_patched: apiPatched,
+    };
+  });
+  const context = {
+    schema_version: 1,
+    mode: "verify_remediation",
+    base_sha: manifest.base_sha,
+    head_sha: headSha,
+    finding_fingerprint: fixInput.finding_fingerprint,
+    remediation_cycle: fixInput.source_report.remediation_cycle,
+    patch_sha256: manifest.patch_sha256,
+    fix_input_sha256: sha256Text(JSON.stringify(fixInput)),
+    fix_manifest_sha256: sha256Text(JSON.stringify(manifest)),
+    findings: fixInput.findings,
+    evidence,
+    patched_api_snapshots: fixInput.target_games.map((game) => {
+      const apiEvents = patchedApiByGame.get(game);
+      return {
+        game,
+        status: "complete",
+        api_event_count: apiEvents.length,
+        api_events: apiEvents,
+      };
+    }),
+  };
+  return {
+    ...context,
+    input_sha256: sha256Text(JSON.stringify(context)),
+  };
+}
+
+function resolvedRemediationVerificationResult(input) {
+  return parseRemediationVerificationOutput(
+    JSON.stringify({
+      complete: true,
+      errors: [],
+      input_sha256: input.input_sha256,
+      summary: "Every original finding is resolved on the approved head.",
+      outcomes: input.findings.map((item) => ({
+        finding_id: item.finding_id,
+        status: "resolved",
+        confidence: "high",
+        reason: "The approved runtime no longer reproduces this finding.",
+      })),
+    }),
+    input
+  );
+}
+
+function rehashRemediationVerificationInput(input) {
+  const { input_sha256: _inputSha256, ...context } = input;
+  return {
+    ...context,
+    input_sha256: sha256Text(JSON.stringify(context)),
   };
 }
 
@@ -387,6 +815,49 @@ function agenticReviewReport(
       finding_fingerprint: findingFingerprint(findings),
       coverage_fingerprint: findingCoverageFingerprint(findings),
       finding_keys: findingKeys(findings),
+      remediation_cycle: remediationCycle,
+    },
+  };
+}
+
+function agenticReviewReportV3(game = "starrail") {
+  const targetGames = Array.isArray(game) ? game : [game];
+  const input = collectedInputV3();
+  const reportFindings = targetGames.map((targetGame) => {
+    const dataset = input.review_datasets.find(
+      (item) => item.game === targetGame
+    );
+    const rawEvidence = dataset.raw_notices[0];
+    return finding(targetGame, {
+      title: rawEvidence.title,
+      raw_title: rawEvidence.title,
+      raw_refs: [rawEvidence.review_ref],
+      api_refs: [],
+      subject_refs: [rawEvidence.identity_ref],
+    });
+  });
+
+  return {
+    schema_version: 3,
+    finding_identity_version: 3,
+    mode: "agentic_review",
+    generated_at: input.generated_at,
+    finalized_at: "2026-07-23T12:05:00.000Z",
+    base_sha: reviewBaseSha,
+    api_base_url: input.api_base_url,
+    datasets: input.datasets,
+    review_datasets: input.review_datasets,
+    review: {
+      model: "Codex via Responses API",
+      summary: `${reportFindings.length} finding(s) detected.`,
+      findings: reportFindings,
+    },
+    issue: {
+      action: "created",
+      issue_number: issueNumber,
+      issue_url: issueUrl,
+      finding_fingerprint: getFindingFingerprint(reportFindings),
+      finding_keys: reportFindings.map(getFindingKey).sort(),
       remediation_cycle: remediationCycle,
     },
   };
@@ -435,6 +906,7 @@ function fixManifest(fixInput, changedFiles, patch, overrides = {}) {
     changed_files: changedFiles,
     patch_sha256: createHash("sha256").update(patch).digest("hex"),
     patch_bytes: patch.length,
+    result_tree: "0".repeat(40),
     ...overrides,
   };
 }
@@ -529,6 +1001,233 @@ function prReworkContext(overrides = {}) {
 
 test("accepts a complete six-game collector input", () => {
   assert.equal(validateCollectedReviewInput(collectedInput()).mode, "collect_only");
+});
+
+test("builds deterministic snapshot and identity refs for raw and API evidence", () => {
+  const rawNotice = {
+    ann_id: 101,
+    title: "Example Event",
+    start_time: "2026-07-23T10:00:00+08:00",
+    end_time: "2026-08-01T10:00:00+08:00",
+  };
+  const apiEvent = {
+    title: "Example Event",
+    start_time: "2026-07-23T10:00:00+08:00",
+    end_time: "2026-08-01T10:00:00+08:00",
+  };
+  const first = buildGameDataset(
+    "genshin",
+    [rawNotice],
+    [apiEvent],
+    10
+  );
+  const repeated = buildGameDataset(
+    "genshin",
+    [{ ...rawNotice }],
+    [{ ...apiEvent }],
+    10
+  );
+
+  assert.deepEqual(
+    first.raw_notices.map(({ review_ref, identity_ref }) => ({
+      review_ref,
+      identity_ref,
+    })),
+    repeated.raw_notices.map(({ review_ref, identity_ref }) => ({
+      review_ref,
+      identity_ref,
+    }))
+  );
+  assert.deepEqual(
+    first.api_events.map(({ review_ref, identity_ref }) => ({
+      review_ref,
+      identity_ref,
+    })),
+    repeated.api_events.map(({ review_ref, identity_ref }) => ({
+      review_ref,
+      identity_ref,
+    }))
+  );
+  assert.match(
+    first.raw_notices[0].review_ref,
+    /^raw:genshin:[a-f0-9]{32}$/
+  );
+  assert.match(
+    first.api_events[0].identity_ref,
+    /^api:genshin:[a-f0-9]{32}$/
+  );
+
+  const changedWindow = buildGameDataset(
+    "genshin",
+    [
+      {
+        ...rawNotice,
+        start_time: "2026-07-24T10:00:00+08:00",
+        end_time: "2026-08-02T10:00:00+08:00",
+      },
+    ],
+    [
+      {
+        ...apiEvent,
+        start_time: "2026-07-24T10:00:00+08:00",
+        end_time: "2026-08-02T10:00:00+08:00",
+      },
+    ],
+    10
+  );
+  assert.notEqual(
+    changedWindow.raw_notices[0].review_ref,
+    first.raw_notices[0].review_ref
+  );
+  assert.notEqual(
+    changedWindow.api_events[0].review_ref,
+    first.api_events[0].review_ref
+  );
+  assert.equal(
+    changedWindow.raw_notices[0].identity_ref,
+    first.raw_notices[0].identity_ref
+  );
+  assert.equal(
+    changedWindow.api_events[0].identity_ref,
+    first.api_events[0].identity_ref
+  );
+});
+
+test("keeps raw evidence identity stable when a source ID title drifts", () => {
+  const original = buildGameDataset(
+    "genshin",
+    [{ ann_id: 101, title: "Example Event" }],
+    [],
+    10
+  ).raw_notices[0];
+  const renamed = buildGameDataset(
+    "genshin",
+    [{ ann_id: 101, title: "Example Event — Updated Details" }],
+    [],
+    10
+  ).raw_notices[0];
+
+  assert.equal(renamed.identity_ref, original.identity_ref);
+  assert.notEqual(renamed.review_ref, original.review_ref);
+});
+
+test("disambiguates Star Rail records that reuse the same ann_id", () => {
+  const records = buildGameDataset(
+    "starrail",
+    [
+      {
+        ann_id: 1300,
+        title: "Fate[UBW] 联动跃迁说明",
+        start_time: "2026-07-03 20:55:00",
+        end_time: "2036-07-03 00:00:00",
+        type: 3,
+        type_label: "资讯",
+      },
+      {
+        ann_id: 1300,
+        title: "Fate[UBW] 联动更新公告",
+        start_time: "2026-07-24 12:00:00",
+        end_time: "2036-07-24 12:00:00",
+        type: 3,
+        type_label: "资讯",
+      },
+    ],
+    [],
+    10
+  ).raw_notices;
+
+  assert.notEqual(records[0].identity_ref, records[1].identity_ref);
+
+  const shiftedWindow = buildGameDataset(
+    "starrail",
+    [
+      {
+        ann_id: 1300,
+        title: "Fate[UBW] 联动跃迁说明",
+        start_time: "2026-07-24 12:00:00",
+        end_time: "9999-12-31 23:59:59",
+        type: 3,
+        type_label: "资讯",
+      },
+    ],
+    [],
+    10
+  ).raw_notices[0];
+  assert.equal(shiftedWindow.identity_ref, records[0].identity_ref);
+});
+
+test("falls back to normalized titles when raw evidence has no source ID", () => {
+  const original = buildGameDataset(
+    "genshin",
+    [{ title: "Example Event" }],
+    [],
+    10
+  ).raw_notices[0];
+  const equivalentTitle = buildGameDataset(
+    "genshin",
+    [{ title: "  EXAMPLE： event!  " }],
+    [],
+    10
+  ).raw_notices[0];
+  const differentTitle = buildGameDataset(
+    "genshin",
+    [{ title: "Another Event" }],
+    [],
+    10
+  ).raw_notices[0];
+
+  assert.equal(equivalentTitle.identity_ref, original.identity_ref);
+  assert.notEqual(differentTitle.identity_ref, original.identity_ref);
+});
+
+test("keys v3 findings by stable subjects and kind instead of prose or windows", () => {
+  const evidence = buildGameDataset(
+    "genshin",
+    [
+      { ann_id: 101, title: "Example Event" },
+      { ann_id: 102, title: "Another Event" },
+    ],
+    [],
+    10
+  ).raw_notices;
+  const original = finding("genshin", {
+    raw_refs: [evidence[0].review_ref],
+    api_refs: [],
+    subject_refs: [evidence[0].identity_ref],
+    start_time: "2026-07-23 10:00",
+    end_time: "2026-08-01 10:00",
+    reason: "The first explanation.",
+  });
+  const rewritten = {
+    ...original,
+    start_time: "July 24 after maintenance",
+    end_time: "Until the event page closes",
+    reason: "Different prose describing the same subject.",
+  };
+  const differentSubject = {
+    ...original,
+    raw_refs: [evidence[1].review_ref],
+    subject_refs: [evidence[1].identity_ref],
+  };
+  const differentKind = {
+    ...original,
+    kind: "wrong_time_window",
+  };
+
+  assert.equal(getFindingKey(rewritten), getFindingKey(original));
+  assert.notEqual(getFindingKey(differentSubject), getFindingKey(original));
+  assert.notEqual(getFindingKey(differentKind), getFindingKey(original));
+});
+
+test("fails closed when a v3 collected dataset lacks stable evidence refs", () => {
+  const input = collectedInputV3();
+  assert.equal(validateCollectedReviewInput(input).schema_version, 3);
+
+  delete input.review_datasets[0].raw_notices[0].identity_ref;
+  assert.throws(
+    () => validateCollectedReviewInput(input),
+    /lacks stable evidence refs/
+  );
 });
 
 test("rejects an incomplete collector input", () => {
@@ -724,6 +1423,746 @@ test("rejects malformed finding fields after schema output", () => {
   );
 });
 
+test("strictly validates complete ordered finding confirmation decisions", () => {
+  const rawEvidence = buildGameDataset(
+    "genshin",
+    [
+      { ann_id: 101, title: "First Event" },
+      { ann_id: 102, title: "Second Event" },
+      { ann_id: 103, title: "Third Event" },
+    ],
+    [],
+    10
+  ).raw_notices;
+  const candidates = rawEvidence.map((item, index) => {
+    const candidateFinding = finding("genshin", {
+      title: item.title,
+      raw_title: item.title,
+      raw_refs: [item.review_ref],
+      api_refs: [],
+      subject_refs: [item.identity_ref],
+    });
+    return {
+      finding_id: `finding-${String(index + 1).padStart(3, "0")}`,
+      finding_key: getFindingKey(candidateFinding),
+      finding: candidateFinding,
+      raw_evidence: [item],
+      api_evidence: [],
+    };
+  });
+  const input = confirmationInput(candidates);
+  assert.equal(validateFindingConfirmationInput(input), input);
+
+  const decisions = [
+    {
+      finding_id: "finding-001",
+      verdict: "confirmed",
+      confidence: "high",
+      reason: "The mismatch is reproduced.",
+    },
+    {
+      finding_id: "finding-002",
+      verdict: "rejected",
+      confidence: "high",
+      reason: "The parser behavior is intentional.",
+    },
+    {
+      finding_id: "finding-003",
+      verdict: "ambiguous",
+      confidence: "medium",
+      reason: "The cited evidence is inconclusive.",
+    },
+  ];
+  const output = {
+    complete: true,
+    errors: [],
+    input_sha256: input.input_sha256,
+    decisions,
+  };
+  assert.deepEqual(
+    parseFindingConfirmationOutput(JSON.stringify(output), input).map(
+      ({ finding_id, verdict }) => ({ finding_id, verdict })
+    ),
+    [
+      { finding_id: "finding-001", verdict: "confirmed" },
+      { finding_id: "finding-002", verdict: "rejected" },
+      { finding_id: "finding-003", verdict: "ambiguous" },
+    ]
+  );
+
+  assert.throws(
+    () =>
+      parseFindingConfirmationOutput(
+        JSON.stringify({
+          ...output,
+          input_sha256: "f".repeat(64),
+        }),
+        input
+      ),
+    /incomplete/
+  );
+  assert.throws(
+    () =>
+      parseFindingConfirmationOutput(
+        JSON.stringify({
+          ...output,
+          decisions: decisions.slice(0, -1),
+        }),
+        input
+      ),
+    /incomplete/
+  );
+  assert.throws(
+    () =>
+      parseFindingConfirmationOutput(
+        JSON.stringify({
+          ...output,
+          decisions: [decisions[1], decisions[0], decisions[2]],
+        }),
+        input
+      ),
+    /decision at index 0/
+  );
+  assert.throws(
+    () =>
+      parseFindingConfirmationOutput(
+        JSON.stringify({
+          ...output,
+          decisions: [
+            { ...decisions[0], verdict: "maybe" },
+            decisions[1],
+            decisions[2],
+          ],
+        }),
+        input
+      ),
+    /decision at index 0/
+  );
+});
+
+test("rejects a confirmation candidate that cites a fabricated evidence ref", () => {
+  const rawEvidence = buildGameDataset(
+    "genshin",
+    [{ ann_id: 101, title: "Example Event" }],
+    [],
+    10
+  ).raw_notices[0];
+  const candidateFinding = finding("genshin", {
+    raw_refs: [rawEvidence.review_ref],
+    api_refs: [],
+    subject_refs: [rawEvidence.identity_ref],
+  });
+  const valid = confirmationInput([
+    {
+      finding_id: "finding-001",
+      finding_key: getFindingKey(candidateFinding),
+      finding: candidateFinding,
+      raw_evidence: [rawEvidence],
+      api_evidence: [],
+    },
+  ]);
+  const forged = structuredClone(valid);
+  forged.candidates[0].finding.raw_refs = [
+    `raw:genshin:${"f".repeat(32)}`,
+  ];
+  const rehashed = rehashConfirmationInput(forged);
+
+  assert.throws(
+    () => validateFindingConfirmationInput(rehashed),
+    /evidence mismatch/
+  );
+});
+
+test("binds confirmation plan candidates and game metadata to the draft report", async () => {
+  const fixture = await findingConfirmationFixture();
+  try {
+    assert.equal(validateFindingConfirmationPlan(fixture.plan), fixture.plan);
+    assert.equal(fixture.plan.candidates.length, 2);
+    assert.equal(fixture.plan.games.length, 1);
+
+    const mutatedGameEntry = JSON.parse(JSON.stringify(fixture.plan));
+    mutatedGameEntry.games[0].input_sha256 = "f".repeat(64);
+    assert.throws(
+      () =>
+        validateFindingConfirmationPlan(
+          rehashFindingConfirmationPlan(mutatedGameEntry)
+        ),
+      /plan games do not match/
+    );
+
+    const reorderedCandidates = JSON.parse(JSON.stringify(fixture.plan));
+    reorderedCandidates.candidates.reverse();
+    assert.throws(
+      () =>
+        validateFindingConfirmationPlan(
+          rehashFindingConfirmationPlan(reorderedCandidates)
+        ),
+      /plan candidates do not match/
+    );
+
+    const substitutedCandidate = JSON.parse(JSON.stringify(fixture.plan));
+    substitutedCandidate.candidates[0].finding.reason =
+      "A substituted reason under the same stable finding key.";
+    assert.equal(
+      getFindingKey(substitutedCandidate.candidates[0].finding),
+      substitutedCandidate.candidates[0].finding_key
+    );
+    assert.throws(
+      () =>
+        validateFindingConfirmationPlan(
+          rehashFindingConfirmationPlan(substitutedCandidate)
+        ),
+      /plan candidates do not match/
+    );
+  } finally {
+    await fs.rm(fixture.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects reordered or substituted per-game confirmation input", async () => {
+  const fixture = await findingConfirmationFixture();
+  try {
+    const originalInput = JSON.parse(
+      await fs.readFile(fixture.gameInputPath, "utf8")
+    );
+    const mutations = [
+      (input) => {
+        input.candidates.reverse();
+      },
+      (input) => {
+        input.candidates[0].finding.reason =
+          "A substituted candidate payload with a still-valid stable key.";
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const mutatedInput = structuredClone(originalInput);
+      mutate(mutatedInput);
+      const rehashedInput = rehashFindingConfirmationInput(mutatedInput);
+      assert.equal(
+        validateFindingConfirmationInput(rehashedInput),
+        rehashedInput
+      );
+      await fs.writeFile(
+        fixture.gameInputPath,
+        JSON.stringify(rehashedInput),
+        "utf8"
+      );
+      await assert.rejects(
+        () =>
+          finalizeFindingConfirmation({
+            planPath: fixture.planPath,
+            outputDir: path.join(fixture.tempDir, "confirmation-results"),
+            reportPath: path.join(fixture.tempDir, "report.json"),
+          }),
+        /input does not match its trusted plan/
+      );
+    }
+  } finally {
+    await fs.rm(fixture.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("keeps a low-confidence rejection deferred instead of treating it as disproved", async () => {
+  const fixture = await findingConfirmationFixture();
+  const outputDir = path.join(
+    fixture.tempDir,
+    "confirmation-results"
+  );
+  const reportPath = path.join(fixture.tempDir, "report.json");
+  const previousDryRun = process.env.UPSTREAM_REVIEW_DRY_RUN;
+  const previousLog = console.log;
+  try {
+    await fs.mkdir(outputDir, { recursive: true });
+    const input = JSON.parse(
+      await fs.readFile(fixture.gameInputPath, "utf8")
+    );
+    await fs.writeFile(
+      path.join(
+        outputDir,
+        "upstream-review-confirm-agent-genshin.json"
+      ),
+      JSON.stringify({
+        complete: true,
+        errors: [],
+        input_sha256: input.input_sha256,
+        decisions: input.candidates.map((candidate, index) => ({
+          finding_id: candidate.finding_id,
+          verdict: "rejected",
+          confidence: index === 0 ? "low" : "high",
+          reason:
+            index === 0
+              ? "The evidence is too uncertain to reject confidently."
+              : "The supplied evidence disproves this candidate.",
+        })),
+      }),
+      "utf8"
+    );
+    process.env.UPSTREAM_REVIEW_DRY_RUN = "1";
+    console.log = () => {};
+    const report = await finalizeFindingConfirmation({
+      planPath: fixture.planPath,
+      outputDir,
+      reportPath,
+    });
+
+    assert.equal(report.review.confirmation.rejected_count, 1);
+    assert.equal(report.review.confirmation.deferred_count, 1);
+    assert.equal(
+      report.review.deferred_findings[0].decision.confidence,
+      "low"
+    );
+  } finally {
+    console.log = previousLog;
+    if (previousDryRun == null) {
+      delete process.env.UPSTREAM_REVIEW_DRY_RUN;
+    } else {
+      process.env.UPSTREAM_REVIEW_DRY_RUN = previousDryRun;
+    }
+    await fs.rm(fixture.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("accepts fully resolved verification and reports unresolved outcomes", () => {
+  const input = remediationVerificationInput();
+  assert.equal(validateRemediationVerificationInput(input), input);
+  const resolvedOutcomes = input.findings.map((item) => ({
+    finding_id: item.finding_id,
+    status: "resolved",
+    confidence: "high",
+    reason: "The exact patched head resolves this finding.",
+  }));
+  const resolvedOutput = {
+    complete: true,
+    errors: [],
+    input_sha256: input.input_sha256,
+    summary: "All findings are resolved at the exact patched head.",
+    outcomes: resolvedOutcomes,
+  };
+
+  const resolved = parseRemediationVerificationOutput(
+    JSON.stringify(resolvedOutput),
+    input
+  );
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.head_sha, input.head_sha);
+  assert.deepEqual(
+    resolved.outcomes.map(({ finding_id, status }) => ({
+      finding_id,
+      status,
+    })),
+    [
+      { finding_id: "finding-001", status: "resolved" },
+      { finding_id: "finding-002", status: "resolved" },
+    ]
+  );
+
+  const unresolved = parseRemediationVerificationOutput(
+    JSON.stringify({
+      ...resolvedOutput,
+      summary: "One finding remains unresolved.",
+      outcomes: [
+        resolvedOutcomes[0],
+        {
+          ...resolvedOutcomes[1],
+          status: "unresolved",
+          reason: "The patched API still reproduces the mismatch.",
+        },
+      ],
+    }),
+    input
+  );
+  assert.equal(unresolved.status, "unresolved");
+  assert.equal(unresolved.outcomes[1].status, "unresolved");
+});
+
+test("rejects incomplete, reordered, or replayed verification outcomes", () => {
+  const input = remediationVerificationInput();
+  const outcomes = input.findings.map((item) => ({
+    finding_id: item.finding_id,
+    status: "resolved",
+    confidence: "high",
+    reason: "Resolved at the exact patched head.",
+  }));
+  const output = {
+    complete: true,
+    errors: [],
+    input_sha256: input.input_sha256,
+    summary: "All findings are resolved.",
+    outcomes,
+  };
+
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(
+        JSON.stringify({
+          ...output,
+          outcomes: outcomes.slice(0, -1),
+        }),
+        input
+      ),
+    /incomplete/
+  );
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(
+        JSON.stringify({
+          ...output,
+          outcomes: [outcomes[1], outcomes[0]],
+        }),
+        input
+      ),
+    /outcome at index 0/
+  );
+
+  const replayedInput = remediationVerificationInput({
+    headSha: "e".repeat(40),
+  });
+  assert.notEqual(replayedInput.input_sha256, input.input_sha256);
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(
+        JSON.stringify({
+          ...output,
+          input_sha256: replayedInput.input_sha256,
+        }),
+        input
+      ),
+    /incomplete/
+  );
+});
+
+test("rejects a resolved claim when the raw remediation snapshot drifted", () => {
+  const input = remediationVerificationInput({
+    rawSnapshotStatuses: ["drifted", "unchanged"],
+  });
+  const outcomes = input.findings.map((item) => ({
+    finding_id: item.finding_id,
+    status: "resolved",
+    confidence: "high",
+    reason: "The model claims this finding is resolved.",
+  }));
+  const output = {
+    complete: true,
+    errors: [],
+    input_sha256: input.input_sha256,
+    summary: "Verification completed.",
+    outcomes,
+  };
+
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(JSON.stringify(output), input),
+    /Drifted raw evidence must be indeterminate/
+  );
+
+  const indeterminate = parseRemediationVerificationOutput(
+    JSON.stringify({
+      ...output,
+      outcomes: [
+        {
+          ...outcomes[0],
+          status: "indeterminate",
+          reason: "The raw snapshot drift prevents a closed-set conclusion.",
+        },
+        outcomes[1],
+      ],
+    }),
+    input
+  );
+  assert.equal(indeterminate.status, "indeterminate");
+});
+
+test("rejects a resolved missing event without patched API evidence", () => {
+  const input = remediationVerificationInput();
+  input.evidence[0].api_patched = [];
+  const reboundInput = rehashRemediationVerificationInput(input);
+  const outcomes = reboundInput.findings.map((item) => ({
+    finding_id: item.finding_id,
+    status: "resolved",
+    confidence: "high",
+    reason: "The model claims this finding is resolved.",
+  }));
+
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(
+        JSON.stringify({
+          complete: true,
+          errors: [],
+          input_sha256: reboundInput.input_sha256,
+          summary: "Verification completed.",
+          outcomes,
+        }),
+        reboundInput
+      ),
+    /lacks patched API evidence/
+  );
+});
+
+test("binds remediation verification findings and patch to the approved artifact", () => {
+  const report = agenticReviewReportV3();
+  const fixInput = buildAgenticFixInput(report);
+  const patch = Buffer.from("approved cumulative v3 patch");
+  const changedFiles = [
+    "apps/api/src/games/starrail.ts",
+    "apps/api/src/games/parser-regressions.agent.test.ts",
+  ];
+  const manifest = validateFixManifest(
+    fixManifest(fixInput, changedFiles, patch),
+    fixInput,
+    patch,
+    reviewBaseSha
+  );
+  const headSha = "b".repeat(40);
+  const input = boundRemediationVerificationInput(
+    fixInput,
+    manifest,
+    { headSha }
+  );
+
+  assert.equal(
+    validateRemediationVerificationBinding(
+      input,
+      fixInput,
+      manifest,
+      headSha
+    ),
+    input
+  );
+
+  const substituted = structuredClone(input);
+  substituted.findings[0].reason = "Substituted verification scope.";
+  substituted.finding_fingerprint = getFindingFingerprint(
+    substituted.findings
+  );
+  assert.throws(
+    () =>
+      validateRemediationVerificationBinding(
+        rehashRemediationVerificationInput(substituted),
+        fixInput,
+        manifest,
+        headSha
+      ),
+    /not bound to the trusted fix artifact/
+  );
+
+  const differentPatch = rehashRemediationVerificationInput({
+    ...input,
+    patch_sha256: "9".repeat(64),
+  });
+  assert.throws(
+    () =>
+      validateRemediationVerificationBinding(
+        differentPatch,
+        fixInput,
+        manifest,
+        headSha
+      ),
+    /not bound to the trusted fix artifact/
+  );
+
+  const substitutedEvidence = structuredClone(input);
+  substitutedEvidence.evidence[0].raw_before[0].title =
+    "Substituted pre-fix evidence";
+  assert.throws(
+    () =>
+      validateRemediationVerificationBinding(
+        rehashRemediationVerificationInput(substitutedEvidence),
+        fixInput,
+        manifest,
+        headSha
+      ),
+    /evidence is not bound/
+  );
+
+  const falseSnapshotStatus = structuredClone(input);
+  falseSnapshotStatus.evidence[0].raw_snapshot_status = "drifted";
+  assert.throws(
+    () =>
+      validateRemediationVerificationBinding(
+        rehashRemediationVerificationInput(falseSnapshotStatus),
+        fixInput,
+        manifest,
+        headSha
+      ),
+    /evidence is not bound/
+  );
+
+  assert.throws(
+    () =>
+      validateRemediationVerificationBinding(
+        input,
+        fixInput,
+        manifest,
+        "c".repeat(40)
+      ),
+    /does not match the approved head/
+  );
+});
+
+test("shares a complete patched API snapshot so API-only findings cannot hide by renaming", () => {
+  const report = agenticReviewReportV3("starrail");
+  const sourceDataset = buildGameDataset(
+    "starrail",
+    [],
+    [
+      {
+        title: "Permanent mini-program launch",
+        start_time: "2026-07-15T14:00:00+08:00",
+        end_time: "2036-07-15T14:00:00+08:00",
+      },
+    ],
+    60
+  );
+  const datasetIndex = games.indexOf("starrail");
+  report.datasets[datasetIndex] = sourceDataset;
+  report.review_datasets[datasetIndex] = sourceDataset;
+  const originalApi = sourceDataset.api_events[0];
+  report.review.findings = [
+    finding("starrail", {
+      kind: "non_event_included",
+      title: originalApi.title,
+      raw_title: "",
+      api_title: originalApi.title,
+      raw_refs: [],
+      api_refs: [originalApi.review_ref],
+      subject_refs: [originalApi.identity_ref],
+    }),
+  ];
+  report.issue.finding_fingerprint = getFindingFingerprint(
+    report.review.findings
+  );
+  report.issue.finding_keys = report.review.findings
+    .map(getFindingKey)
+    .sort();
+  const fixInput = buildAgenticFixInput(report);
+  const patch = Buffer.from("rename-only candidate patch");
+  const manifest = fixManifest(
+    fixInput,
+    [
+      "apps/api/src/games/starrail.ts",
+      "apps/api/src/games/parser-regressions.agent.test.ts",
+    ],
+    patch
+  );
+  const renamedDataset = buildGameDataset(
+    "starrail",
+    [],
+    [
+      {
+        title: "Completely different calendar title",
+        start_time: "2026-07-15T14:00:00+08:00",
+        end_time: "2036-07-15T14:00:00+08:00",
+      },
+    ],
+    60
+  );
+  const input = buildRemediationVerificationInput(
+    fixInput,
+    manifest,
+    "b".repeat(40),
+    [renamedDataset]
+  );
+
+  assert.deepEqual(input.evidence[0].api_patched, []);
+  assert.equal(input.patched_api_snapshots[0].status, "complete");
+  assert.equal(
+    input.patched_api_snapshots[0].api_events[0].title,
+    "Completely different calendar title"
+  );
+
+  const truncatedDataset = buildGameDataset(
+    "starrail",
+    [],
+    Array.from({ length: 61 }, (_, index) => ({
+      title: `Calendar event ${index + 1}`,
+      start_time: "2026-07-15T14:00:00+08:00",
+      end_time: "2026-07-16T14:00:00+08:00",
+    })),
+    60
+  );
+  const truncatedInput = buildRemediationVerificationInput(
+    fixInput,
+    manifest,
+    "b".repeat(40),
+    [truncatedDataset]
+  );
+  assert.equal(
+    truncatedInput.patched_api_snapshots[0].status,
+    "truncated"
+  );
+  assert.throws(
+    () =>
+      parseRemediationVerificationOutput(
+        JSON.stringify({
+          complete: true,
+          errors: [],
+          input_sha256: truncatedInput.input_sha256,
+          summary: "The API-only finding is resolved.",
+          outcomes: [
+            {
+              finding_id: "finding-001",
+              status: "resolved",
+              confidence: "high",
+              reason: "The old title is absent.",
+            },
+          ],
+        }),
+        truncatedInput
+      ),
+    /complete patched API snapshot/
+  );
+});
+
+test("preserves and validates more than four v3 evidence refs for one game", () => {
+  const report = agenticReviewReportV3("starrail");
+  const targetDataset = buildGameDataset(
+    "starrail",
+    Array.from({ length: 5 }, (_, index) => ({
+      ann_id: 2000 + index,
+      title: `Star Rail missing event ${index + 1}`,
+      type: 2,
+      type_label: "活动",
+    })),
+    [],
+    10
+  );
+  const datasetIndex = games.indexOf("starrail");
+  report.datasets[datasetIndex] = targetDataset;
+  report.review_datasets[datasetIndex] = targetDataset;
+  report.review.findings = targetDataset.raw_notices.map((item) =>
+    finding("starrail", {
+      title: item.title,
+      raw_title: item.title,
+      raw_refs: [item.review_ref],
+      api_refs: [],
+      subject_refs: [item.identity_ref],
+    })
+  );
+  report.review.summary = "Five distinct Star Rail findings.";
+  report.issue.finding_fingerprint = getFindingFingerprint(
+    report.review.findings
+  );
+  report.issue.finding_keys = report.review.findings
+    .map(getFindingKey)
+    .sort();
+
+  const fixInput = buildAgenticFixInput(report);
+  assert.equal(
+    fixInput.evidence[0].matching_raw_notices.length,
+    5
+  );
+  assert.equal(validateAgenticFixInput(fixInput), fixInput);
+
+  const truncated = structuredClone(fixInput);
+  truncated.evidence[0].matching_raw_notices.pop();
+  assert.throws(
+    () => validateAgenticFixInput(truncated),
+    /incomplete raw evidence/
+  );
+});
+
 test("builds a compact, stable fix request from unsuppressed findings", () => {
   const report = agenticReviewReport([
     finding("starrail"),
@@ -779,6 +2218,98 @@ test("builds a compact, stable fix request from unsuppressed findings", () => {
   );
   assert.equal(reordered.finding_fingerprint, input.finding_fingerprint);
   assert.deepEqual(reordered.findings, input.findings);
+});
+
+test("keeps trusted parser regressions outside fix and rework allowlists", () => {
+  const agentTestFile =
+    "apps/api/src/games/parser-regressions.agent.test.ts";
+  const trustedTestFile =
+    "apps/api/src/games/parser-regressions.trusted.test.ts";
+  const parserFile = "apps/api/src/games/starrail.ts";
+  const fixInput = buildAgenticFixInput(agenticReviewReportV3());
+
+  assert.deepEqual(fixInput.allowed_files, [parserFile, agentTestFile]);
+  assert.deepEqual(fixInput.required_test_files, [agentTestFile]);
+  assert.equal(fixInput.allowed_files.includes(trustedTestFile), false);
+  assert.throws(
+    () =>
+      parseAgentFixOutput(
+        JSON.stringify(agentFixOutput(fixInput, [parserFile])),
+        fixInput,
+        [parserFile]
+      ),
+    /must include a deterministic parser regression test/
+  );
+  assert.doesNotThrow(() =>
+    parseAgentFixOutput(
+      JSON.stringify(agentFixOutput(fixInput, [parserFile, agentTestFile])),
+      fixInput,
+      [parserFile, agentTestFile]
+    )
+  );
+
+  const validReworkContext = prReworkContext({
+    allowed_files: [parserFile, agentTestFile],
+    changed_files: [agentTestFile, parserFile],
+  });
+  assert.deepEqual(
+    buildAgenticPrReworkInput(validReworkContext).allowed_files,
+    [parserFile, agentTestFile]
+  );
+  assert.throws(
+    () =>
+      buildAgenticPrReworkInput({
+        ...validReworkContext,
+        allowed_files: [parserFile, trustedTestFile],
+        changed_files: [trustedTestFile, parserFile],
+      }),
+    /allowed_files/
+  );
+});
+
+test("runs trusted and agent-owned parser regression suites", async () => {
+  const trustedTestFile =
+    "apps/api/src/games/parser-regressions.trusted.test.ts";
+  const agentTestFile =
+    "apps/api/src/games/parser-regressions.agent.test.ts";
+  const apiPackage = JSON.parse(
+    await fs.readFile(
+      new URL("../apps/api/package.json", import.meta.url),
+      "utf8"
+    )
+  );
+
+  assert.equal(
+    apiPackage.scripts["test:game-parsers"],
+    "node --import tsx --test src/games/parser-regressions.trusted.test.ts src/games/parser-regressions.agent.test.ts"
+  );
+  const trustedTestSource = await fs.readFile(
+    new URL(`../${trustedTestFile}`, import.meta.url),
+    "utf8"
+  );
+  for (const requiredTitle of [
+    "Star Rail uses a title-scoped long-term window",
+    "Star Rail emits the title-scoped long-term window in the final event",
+    "Star Rail excludes external mini-program and web-service launches",
+    "Endfield preserves Protocol Reconnection as a player-relative window",
+    "Endfield emits Protocol Reconnection as a relative final event",
+  ]) {
+    assert.ok(
+      trustedTestSource.includes(`test("${requiredTitle}`),
+      `missing trusted parser regression: ${requiredTitle}`
+    );
+  }
+  await fs.access(new URL(`../${agentTestFile}`, import.meta.url));
+
+  for (const schemaFile of [
+    "../.github/schemas/upstream-review-fix-output.schema.json",
+    "../.github/schemas/upstream-review-pr-review-output.schema.json",
+    "../.github/schemas/upstream-review-pr-rework-output.schema.json",
+  ]) {
+    const schema = await fs.readFile(new URL(schemaFile, import.meta.url), "utf8");
+    assert.match(schema, /parser-regressions\.agent\.test\.ts/);
+    assert.doesNotMatch(schema, /parser-regressions\.trusted\.test\.ts/);
+  }
 });
 
 test("deduplicates semantic findings before fingerprinting and repair", () => {
@@ -1468,6 +2999,35 @@ test("validates PR rework model output against context, outcomes, and actual pat
   );
 });
 
+test("accepts a v3 parser rework with its required companion regression test", () => {
+  const parserFile = "apps/api/src/games/starrail.ts";
+  const agentTestFile =
+    "apps/api/src/games/parser-regressions.agent.test.ts";
+  const input = buildAgenticPrReworkInput(
+    prReworkContext({
+      allowed_files: [parserFile, agentTestFile],
+      changed_files: [agentTestFile, parserFile],
+    })
+  );
+  const changedFiles = [agentTestFile, parserFile];
+  const parsed = parseAgentPrReworkOutput(
+    JSON.stringify(agentPrReworkOutput(input, changedFiles)),
+    input,
+    changedFiles
+  );
+  assert.deepEqual(parsed.changed_files, changedFiles);
+
+  assert.throws(
+    () =>
+      parseAgentPrReworkOutput(
+        JSON.stringify(agentPrReworkOutput(input, [parserFile])),
+        input,
+        [parserFile]
+      ),
+    /must update the regression test/
+  );
+});
+
 test("rejects a rework that drops a previously changed parser", () => {
   const fixInput = buildAgenticFixInput(
     agenticReviewReport([finding("genshin"), finding("starrail")])
@@ -1503,6 +3063,7 @@ test("rejects a rework that drops a previously changed parser", () => {
       .update(cumulativePatch)
       .digest("hex"),
     patch_bytes: cumulativePatch.length,
+    result_tree: "3".repeat(40),
   };
   const manifest = {
     schema_version: 2,
@@ -1615,6 +3176,17 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
       result.manifest.patch_sha256,
       createHash("sha256").update(patch).digest("hex")
     );
+    assert.match(result.manifest.result_tree, /^[a-f0-9]{40}$/);
+    assert.throws(
+      () =>
+        validateFixManifest(
+          { ...result.manifest, result_tree: "" },
+          input,
+          patch,
+          baseSha
+        ),
+      /Invalid agentic fix manifest/
+    );
 
     await fs.writeFile(sourcePath, "export const value = 1;\n", "utf8");
     const verifiedManifest = await verifyAgenticFixArtifact({
@@ -1645,6 +3217,29 @@ test("finalizes an allowed tracked parser modification into a bounded patch", as
       { cwd: repoDir, encoding: "utf8" }
     );
     const headSha = headStdout.trim();
+    const exactHeadManifest = await verifyAgenticFixArtifactAtHead({
+      cwd: repoDir,
+      inputPath,
+      manifestPath,
+      patchPath,
+      expectedBaseSha: baseSha,
+      headSha,
+      githubOutputPath: "",
+    });
+    assert.equal(exactHeadManifest.result_tree, result.manifest.result_tree);
+    await assert.rejects(
+      () =>
+        verifyAgenticFixArtifactAtHead({
+          cwd: repoDir,
+          inputPath,
+          manifestPath,
+          patchPath,
+          expectedBaseSha: baseSha,
+          headSha: "f".repeat(40),
+          githubOutputPath: "",
+        }),
+      /checkout mismatch/
+    );
     const reviewInput = await prepareAgenticPrReview({
       cwd: repoDir,
       outputPath: reviewInputPath,
@@ -1996,6 +3591,10 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
       rework.rework_manifest.patch_sha256
     );
     assert.ok(rework.rework_manifest.patch_bytes <= 128 * 1024);
+    assert.equal(
+      rework.fix_manifest.result_tree,
+      rework.rework_manifest.result_tree
+    );
 
     await execFileAsync("git", ["reset", "--hard", "-q", baseSha], {
       cwd: repoDir,
@@ -2071,6 +3670,28 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
     );
     assert.equal(
       appliedTreeStdout.trim(),
+      rework.rework_manifest.result_tree
+    );
+    await execFileAsync("git", ["commit", "-qm", "replacement fix"], {
+      cwd: repoDir,
+    });
+    const { stdout: replacementHeadStdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "HEAD"],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    const replacementHeadSha = replacementHeadStdout.trim();
+    const exactReplacementManifest = await verifyAgenticFixArtifactAtHead({
+      cwd: repoDir,
+      inputPath: fixInputPath,
+      manifestPath: cumulativeManifestPath,
+      patchPath: cumulativePatchPath,
+      expectedBaseSha: baseSha,
+      headSha: replacementHeadSha,
+      githubOutputPath: "",
+    });
+    assert.equal(
+      exactReplacementManifest.result_tree,
       rework.rework_manifest.result_tree
     );
 
@@ -2206,6 +3827,144 @@ test("skips a finding set already contained in one open managed Issue", async ()
   assert.deepEqual(fixInput.allowed_files, []);
   assert.equal(fixInput.fix_branch, "");
   assert.equal(fixInput.source_report.issue_number, 0);
+});
+
+test("resumes an exact current-identity Open Issue for repair", async () => {
+  const report = agenticReviewReportV3();
+  const trackedFinding = report.review.findings[0];
+  delete report.issue;
+  const issue = managedIssue({
+    number: issueNumber,
+    findings: [trackedFinding],
+    cycle: "8".repeat(64),
+    version: "v3",
+  });
+  const { request, calls } = syncIssueRequest([issue]);
+
+  const result = await syncIssue(report, {
+    request,
+    repository,
+    defaultBranch: "main",
+    runId: "12345",
+    runAttempt: "2",
+    dryRun: false,
+  });
+
+  assert.equal(result.action, "resume_orphan");
+  assert.equal(result.issue_number, issueNumber);
+  assert.equal(result.issue_url, issue.html_url);
+  assert.equal(
+    result.finding_fingerprint,
+    getFindingFingerprint([trackedFinding])
+  );
+  assert.deepEqual(result.finding_keys, [getFindingKey(trackedFinding)]);
+  assert.equal(result.remediation_cycle, "8".repeat(64));
+  assert.equal(
+    calls.some((call) => ["POST", "PATCH"].includes(call.method)),
+    false
+  );
+
+  report.issue = result;
+  const fixInput = buildAgenticFixInput(report);
+  assert.equal(fixInput.findings.length, 1);
+  assert.deepEqual(fixInput.target_games, ["starrail"]);
+  assert.equal(fixInput.source_report.issue_number, issueNumber);
+  assert.equal(fixInput.source_report.remediation_cycle, "8".repeat(64));
+});
+
+test("does not resume an exact Issue that already has a related PR", async () => {
+  for (const fixture of [
+    { state: "open", merged: false, expected: "active_pr" },
+    {
+      state: "closed",
+      merged: true,
+      expected: "merged_pr_pending_finalization",
+    },
+    {
+      state: "closed",
+      merged: false,
+      expected: "closed_pr_requires_manual_recovery",
+    },
+  ]) {
+    const report = agenticReviewReportV3();
+    const trackedFinding = report.review.findings[0];
+    delete report.issue;
+    const cycle = "8".repeat(64);
+    const issue = managedIssue({
+      number: issueNumber,
+      findings: [trackedFinding],
+      cycle,
+      version: "v3",
+    });
+    const pullRequest = managedPullRequest({
+      findings: [trackedFinding],
+      cycle,
+      state: fixture.state,
+      merged: fixture.merged,
+    });
+    const { request } = syncIssueRequest([issue], {
+      pullRequests: [pullRequest],
+    });
+
+    const result = await syncIssue(report, {
+      request,
+      repository,
+      defaultBranch: "main",
+      runId: "12345",
+      runAttempt: "2",
+      dryRun: false,
+    });
+
+    assert.equal(result.action, "covered");
+    assert.equal(result.recovery.status, fixture.expected);
+    assert.equal(result.recovery.pull_request_number, pullRequest.number);
+    report.issue = result;
+    assert.deepEqual(buildAgenticFixInput(report).findings, []);
+  }
+});
+
+test("fails closed for conflicting or duplicate PRs on an exact Issue cycle", async () => {
+  const report = agenticReviewReportV3();
+  const trackedFinding = report.review.findings[0];
+  delete report.issue;
+  const cycle = "8".repeat(64);
+  const issue = managedIssue({
+    number: issueNumber,
+    findings: [trackedFinding],
+    cycle,
+    version: "v3",
+  });
+  const validPullRequest = managedPullRequest({
+    findings: [trackedFinding],
+    cycle,
+  });
+  const conflict = managedPullRequest({
+    findings: [trackedFinding],
+    cycle,
+    body:
+      `<!-- upstream-review-pr:v1 issue=${issueNumber} ` +
+      `fingerprint=${getFindingFingerprint([trackedFinding])} ` +
+      `cycle=${"7".repeat(64)} -->\n\nConflicting PR.\n`,
+  });
+
+  for (const pullRequests of [
+    [validPullRequest, { ...validPullRequest, number: 78, html_url: `https://github.com/${repository}/pull/78` }],
+    [conflict],
+  ]) {
+    const { request } = syncIssueRequest([issue], { pullRequests });
+    await assert.rejects(
+      () =>
+        syncIssue(report, {
+          request,
+          repository,
+          defaultBranch: "main",
+          runId: "12345",
+          runAttempt: "2",
+          dryRun: false,
+        }),
+      /More than one pull request|Conflicting pull request/
+    );
+  }
 });
 
 test("uses the union of non-overlapping open Issues before skipping repair", async () => {
@@ -2473,6 +4232,53 @@ test("supports an exact legacy open cycle but fails closed for unknown legacy ov
   );
 });
 
+test("does not create a duplicate beside unmatched identity-v1 Issue coverage", async () => {
+  const legacyFinding = finding("starrail");
+  const legacyIdentityIssue = managedIssue({
+    number: 40,
+    findings: [legacyFinding],
+  });
+
+  const exactReport = agenticReviewReportV3("starrail");
+  delete exactReport.issue;
+  const exactFixture = syncIssueRequest([legacyIdentityIssue]);
+  const exactResult = await syncIssue(exactReport, {
+    request: exactFixture.request,
+    repository,
+    runId: "12345",
+    runAttempt: "1",
+    dryRun: false,
+  });
+  assert.equal(exactResult.action, "covered");
+  assert.deepEqual(exactResult.covered_by_issue_numbers, [40]);
+
+  const driftedReport = agenticReviewReportV3("starrail");
+  delete driftedReport.issue;
+  driftedReport.review.findings[0] = {
+    ...driftedReport.review.findings[0],
+    title: "Revised Star Rail notice wording",
+    raw_title: "Revised Star Rail notice wording",
+  };
+  const driftedFixture = syncIssueRequest([legacyIdentityIssue]);
+  await assert.rejects(
+    () =>
+      syncIssue(driftedReport, {
+        request: driftedFixture.request,
+        repository,
+        runId: "12345",
+        runAttempt: "2",
+        dryRun: false,
+      }),
+    /legacy identity-v1 Open managed Issue coverage is unmatched/
+  );
+  assert.equal(
+    driftedFixture.calls.some((call) =>
+      ["POST", "PATCH"].includes(call.method)
+    ),
+    false
+  );
+});
+
 test("creates a new remediation Issue instead of reopening a closed cycle", async () => {
   const findings = [finding("starrail")];
   const report = agenticReviewReport(findings);
@@ -2579,6 +4385,70 @@ test("closes an exact all-addressed remediation Issue after its PR merges", asyn
   assert.equal(updates[0].body.state_reason, "completed");
 });
 
+test("rejects remediation finalization when the squash commit is off-base", async () => {
+  const fixture = remediationFinalizationFixture({
+    mergeParentSha: "e".repeat(40),
+  });
+
+  await assert.rejects(
+    () => finalizeRemediationIssue(fixture.args),
+    /does not match the trusted base and result tree/
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+});
+
+test("rejects remediation finalization when the squash tree differs from the verified patch", async () => {
+  const findings = [finding("starrail")];
+  const report = agenticReviewReport(findings);
+  const fixInput = buildAgenticFixInput(report);
+  const patch = Buffer.from("verified tree-bound patch");
+  const changedFiles = ["apps/api/src/games/starrail.ts"];
+  const fixOutput = agentFixOutput(fixInput, changedFiles);
+  const manifest = fixManifest(fixInput, changedFiles, patch);
+  const metadata = parseAgentFixOutput(
+    JSON.stringify(fixOutput),
+    fixInput,
+    changedFiles
+  );
+  const pullRequestBody = renderFixPrBody(metadata, manifest, {
+    repository,
+    runId: "12345",
+    patchSha256: manifest.patch_sha256,
+    issueUrl,
+  });
+  const fixture = remediationFinalizationFixture({
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    mergeTreeSha: "e".repeat(40),
+    issueBody:
+      `${cycleMarkerV2(findings, {
+        findingFingerprint: fixInput.finding_fingerprint,
+      })}\n\nIssue body.\n`,
+  });
+
+  await assert.rejects(
+    () =>
+      finalizeRemediationIssue({
+        ...fixture.args,
+        runId: "12345",
+        fixInput,
+        fixAgentOutput: fixOutput,
+        fixManifest: manifest,
+        fixPatch: patch,
+        report,
+        approvedStage: "initial-review",
+      }),
+    /does not match the trusted base and result tree/
+  );
+  assert.equal(
+    fixture.calls.some((call) => call.method === "PATCH"),
+    false
+  );
+});
+
 test("closes a v2 Issue from verified artifact file paths", async () => {
   const findings = [finding("starrail")];
   const report = agenticReviewReport(findings);
@@ -2672,6 +4542,89 @@ test("keeps a partially addressed remediation Issue open after merge", async () 
     fixture.calls.some((call) => call.method === "PATCH"),
     false
   );
+});
+
+test("closes a v3 Issue when exact-head verification resolves an initially partial fix", async () => {
+  const report = agenticReviewReportV3(["starrail", "genshin"]);
+  const fixInput = buildAgenticFixInput(report);
+  const changedFiles = [
+    "apps/api/src/games/starrail.ts",
+    "apps/api/src/games/parser-regressions.agent.test.ts",
+  ];
+  const initialPatch = Buffer.from("initial partial v3 patch");
+  const initialManifest = validateFixManifest(
+    fixManifest(fixInput, changedFiles, initialPatch),
+    fixInput,
+    initialPatch,
+    reviewBaseSha
+  );
+  const fixOutput = agentFixOutput(fixInput, changedFiles);
+  const metadata = parseAgentFixOutput(
+    JSON.stringify(fixOutput),
+    fixInput,
+    changedFiles
+  );
+  assert.equal(
+    metadata.outcomes.some((outcome) => outcome.status === "not_fixed"),
+    true
+  );
+  const pullRequestBody = renderFixPrBody(metadata, initialManifest, {
+    repository,
+    runId: "12345",
+    patchSha256: initialManifest.patch_sha256,
+    issueUrl,
+  });
+
+  const terminalPatch = Buffer.from("terminal cumulative v3 rework patch");
+  const terminalManifest = validateFixManifest(
+    fixManifest(fixInput, changedFiles, terminalPatch, {
+      result_tree: "1".repeat(40),
+    }),
+    fixInput,
+    terminalPatch,
+    reviewBaseSha
+  );
+  const headSha = "b".repeat(40);
+  const verificationInput = boundRemediationVerificationInput(
+    fixInput,
+    terminalManifest,
+    { headSha }
+  );
+  const verificationResult =
+    resolvedRemediationVerificationResult(verificationInput);
+  const fixture = remediationFinalizationFixture({
+    allFindingsAddressed: false,
+    findingFingerprint: fixInput.finding_fingerprint,
+    pullRequestBody,
+    headSha,
+    mergeTreeSha: terminalManifest.result_tree,
+    issueBody:
+      `${cycleMarkerV3(report.review.findings, {
+        findingFingerprint: fixInput.finding_fingerprint,
+      })}\n\nIssue body.\n`,
+  });
+
+  const result = await finalizeRemediationIssue({
+    ...fixture.args,
+    runId: "12345",
+    baseSha: reviewBaseSha,
+    approvedStage: "rework-round-1",
+    fixInput,
+    fixAgentOutput: fixOutput,
+    fixManifest: initialManifest,
+    fixPatch: initialPatch,
+    report,
+    approvedFixInput: fixInput,
+    approvedFixManifest: terminalManifest,
+    approvedFixPatch: terminalPatch,
+    verificationInput,
+    verificationResult,
+  });
+
+  assert.equal(result.action, "closed");
+  const update = fixture.calls.find((call) => call.method === "PATCH");
+  assert.equal(update.body.state, "closed");
+  assert.equal(update.body.state_reason, "completed");
 });
 
 test("shrinks v2 Issue coverage to unresolved findings after a partial merge", async () => {
@@ -3032,11 +4985,216 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
   }
 });
 
-test("final merge verifies reviewer role and squash configuration with separate tokens", async () => {
+test("final merge isolates approved-head runtime and commits merge outputs before finalization", async () => {
   const workflow = await fs.readFile(
     new URL("../.github/workflows/upstream-review.yml", import.meta.url),
     "utf8"
   );
+  const resolveJobStart = workflow.indexOf("\n  resolve_approved_snapshot:\n");
+  const collectJobStart = workflow.indexOf(
+    "\n  collect_approved_runtime_input:\n",
+    resolveJobStart
+  );
+  const verifyJobStart = workflow.indexOf(
+    "\n  verify_approved_runtime_input:\n",
+    collectJobStart
+  );
+  const mergeJobStart = workflow.indexOf(
+    "\n  finalize_approved_pr:\n",
+    verifyJobStart
+  );
+  const finalIssueJobStart = workflow.indexOf(
+    "\n  finalize_remediation_issue:\n",
+    mergeJobStart
+  );
+  const initialCollectStart = workflow.indexOf("\n  collect:\n");
+  const initialReviewStart = workflow.indexOf(
+    "\n  review:\n",
+    initialCollectStart
+  );
+
+  assert.notEqual(resolveJobStart, -1);
+  assert.notEqual(collectJobStart, -1);
+  assert.notEqual(verifyJobStart, -1);
+  assert.notEqual(mergeJobStart, -1);
+  assert.notEqual(finalIssueJobStart, -1);
+  assert.notEqual(initialCollectStart, -1);
+  assert.notEqual(initialReviewStart, -1);
+
+  const initialCollectJob = workflow.slice(
+    initialCollectStart,
+    initialReviewStart
+  );
+  const resolveJob = workflow.slice(resolveJobStart, collectJobStart);
+  const collectJob = workflow.slice(collectJobStart, verifyJobStart);
+  const verifyJob = workflow.slice(verifyJobStart, mergeJobStart);
+  const mergeJob = workflow.slice(mergeJobStart, finalIssueJobStart);
+
+  assert.match(initialCollectJob, /pnpm install --frozen-lockfile/);
+  assert.doesNotMatch(initialCollectJob, /pnpm install --no-lockfile/);
+  assert.match(
+    workflow,
+    /- name: Refuse stale review publication[\s\S]*?current_tip[\s\S]*?no Issue will be changed/
+  );
+
+  assert.match(
+    resolveJob,
+    /permissions:\n      contents: read\n      pull-requests: read/
+  );
+  assert.match(
+    resolveJob,
+    /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/
+  );
+  assert.doesNotMatch(resolveJob, /uses: actions\/checkout@/);
+  assert.doesNotMatch(resolveJob, /secrets\.OPENAI_/);
+
+  assert.match(
+    collectJob,
+    /permissions:\n      actions: read\n      contents: read/
+  );
+  assert.match(
+    collectJob,
+    /- name: Check out the trusted base[\s\S]*?ref: \$\{\{ github\.sha \}\}[\s\S]*?persist-credentials: false/
+  );
+  assert.match(
+    collectJob,
+    /- name: Check out the exact approved head in an isolated subdirectory[\s\S]*?ref: \$\{\{ needs\.resolve_approved_snapshot\.outputs\.head_sha \}\}[\s\S]*?path: approved-head[\s\S]*?persist-credentials: false/
+  );
+  assert.match(
+    collectJob,
+    /verifyAgenticFixArtifactAtHead\(\{\s+cwd: process\.env\.APPROVED_WORKSPACE/
+  );
+  assert.match(
+    collectJob,
+    /prepareRemediationVerification\(\{\s+cwd: process\.env\.APPROVED_WORKSPACE/
+  );
+  const allowlistVerification = collectJob.indexOf(
+    "verifyAgenticFixArtifactAtHead"
+  );
+  const dependencyInstall = collectJob.indexOf(
+    "npm install --global --prefix /work/pnpm pnpm@9.9.0"
+  );
+  assert.notEqual(allowlistVerification, -1);
+  assert.notEqual(dependencyInstall, -1);
+  assert.ok(allowlistVerification < dependencyInstall);
+  assert.match(collectJob, /--user 1000:1000/);
+  assert.match(collectJob, /--read-only/);
+  assert.match(collectJob, /--cap-drop ALL/);
+  assert.match(collectJob, /--security-opt no-new-privileges=true/);
+  assert.match(collectJob, /--pids-limit 256/);
+  assert.match(collectJob, /--memory 2g/);
+  assert.match(
+    collectJob,
+    /--mount "type=bind,src=\$APPROVED_WORKSPACE,dst=\/approved,readonly"/
+  );
+  assert.equal(collectJob.match(/^\s+--mount /gm)?.length, 2);
+  const testContainerStart = collectJob.indexOf(
+    "      - name: Test the approved head in a disposable locked-down container"
+  );
+  const runtimeContainerStart = collectJob.indexOf(
+    "      - name: Start the approved API from a fresh locked-down container"
+  );
+  const healthStepStart = collectJob.indexOf(
+    "      - name: Wait for approved API health"
+  );
+  assert.notEqual(testContainerStart, -1);
+  assert.notEqual(runtimeContainerStart, -1);
+  assert.notEqual(healthStepStart, -1);
+  const testContainerStep = collectJob.slice(
+    testContainerStart,
+    runtimeContainerStart
+  );
+  const runtimeContainerStep = collectJob.slice(
+    runtimeContainerStart,
+    healthStepStart
+  );
+  assert.match(testContainerStep, /docker run \\\n            --rm/);
+  assert.match(
+    testContainerStep,
+    /\/work\/pnpm\/bin\/pnpm test:game-parsers/
+  );
+  assert.doesNotMatch(
+    testContainerStep,
+    /--filter @game-cal\/api exec tsx src\/index\.ts/
+  );
+  assert.match(runtimeContainerStep, /docker run \\\n            --detach/);
+  assert.match(
+    runtimeContainerStep,
+    /exec \/work\/pnpm\/bin\/pnpm --filter @game-cal\/api exec tsx src\/index\.ts/
+  );
+  assert.doesNotMatch(runtimeContainerStep, /test:game-parsers/);
+  assert.equal(testContainerStep.match(/^\s+--mount /gm)?.length, 1);
+  assert.equal(runtimeContainerStep.match(/^\s+--mount /gm)?.length, 1);
+  assert.match(
+    collectJob,
+    /UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: artifacts\/upstream-remediation-verify-input\.json/
+  );
+  assert.doesNotMatch(
+    collectJob,
+    /UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: [^\n]*approved-head/
+  );
+  assert.match(
+    collectJob,
+    /- name: Stop and remove the approved runtime container\n        if: always\(\)[\s\S]*?docker rm --force/
+  );
+  assert.doesNotMatch(
+    collectJob,
+    /run: pnpm install|run: pnpm test:game-parsers|nohup pnpm/
+  );
+  assert.doesNotMatch(collectJob, /secrets\./);
+  assert.doesNotMatch(collectJob, /contents: write|pull-requests: write/);
+
+  assert.match(
+    verifyJob,
+    /permissions:\n      actions: read\n      contents: read/
+  );
+  assert.match(verifyJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(
+    verifyJob,
+    /openai-api-key: \$\{\{ secrets\.OPENAI_API_KEY \}\}/
+  );
+  assert.doesNotMatch(
+    verifyJob,
+    /UPSTREAM_REVIEW_APPROVAL_TOKEN|github\.token|contents: write|pull-requests: write/
+  );
+  assert.doesNotMatch(
+    verifyJob,
+    /pnpm install|pnpm test:game-parsers|Start the approved local API/
+  );
+
+  assert.match(mergeJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(mergeJob, /contents: write\n      pull-requests: write/);
+  assert.match(
+    mergeJob,
+    /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/
+  );
+  assert.match(mergeJob, /MERGE_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(mergeJob, /secrets\.OPENAI_/);
+  assert.doesNotMatch(
+    mergeJob,
+    /pnpm install|pnpm test:game-parsers|Start the approved local API/
+  );
+  const mergeStepStart = mergeJob.indexOf(
+    "      - name: Mark ready and squash-merge the approved head"
+  );
+  assert.notEqual(mergeStepStart, -1);
+  const mergeStep = mergeJob.slice(mergeStepStart);
+  const mergeResponseValidation = mergeStep.indexOf(".merged == true");
+  const mergedOutput = mergeStep.indexOf(
+    'echo "merged=true" >> "$GITHUB_OUTPUT"'
+  );
+  assert.notEqual(mergeResponseValidation, -1);
+  assert.notEqual(mergedOutput, -1);
+  assert.ok(mergeResponseValidation < mergedOutput);
+  assert.doesNotMatch(
+    mergeStep.slice(mergedOutput),
+    /gh api|exit 1/
+  );
+  assert.doesNotMatch(
+    mergeStep,
+    /upstream-review-merge-commit|upstream-review-merged-pr/
+  );
+
   const start = workflow.indexOf(
     "      - name: Resolve and verify the exact approved PR snapshot"
   );
@@ -3080,6 +5238,7 @@ test("final merge verifies reviewer role and squash configuration with separate 
     ),
     [
       'gh api "repos/$GH_REPO" > "$reviewer_repository_path"',
+      'GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"',
       'GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"',
     ]
   );

@@ -81,6 +81,24 @@
           "api_title": {
             "type": "string"
           },
+          "raw_refs": {
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "api_refs": {
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "start_time": {
             "type": "string"
           },
@@ -99,9 +117,76 @@
           "title",
           "raw_title",
           "api_title",
+          "raw_refs",
+          "api_refs",
           "start_time",
           "end_time",
           "reason"
+        ],
+        "anyOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "missing_event"
+              },
+              "raw_refs": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "non_event_included"
+              },
+              "api_refs": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "duplicate_event"
+              },
+              "api_refs": {
+                "minItems": 2
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "wrong_time_window"
+              },
+              "raw_refs": {
+                "minItems": 1
+              },
+              "api_refs": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other"
+              },
+              "raw_refs": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other"
+              },
+              "api_refs": {
+                "minItems": 1
+              }
+            }
+          }
         ],
         "additionalProperties": false
       }

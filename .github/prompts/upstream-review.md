@@ -54,6 +54,21 @@ Review rules:
 - Every finding must use `target_game`, cite the most relevant raw/API titles, and
   explain the concrete mismatch. Leave a title field as an empty string when that side
   does not exist.
+- Every finding must include `raw_refs` and `api_refs`. Each value must be copied
+  exactly from the corresponding item's `review_ref` in
+  `review_dataset.raw_notices` or `review_dataset.api_events`. Never copy a ref from
+  the other side, derive one from a title or ID, alter one, or invent one. Use an empty
+  array when that side has no cited evidence. Each array may contain at most four
+  distinct references.
+- The minimum evidence references depend on `kind`:
+  - `missing_event`: at least one `raw_refs` item
+  - `non_event_included`: at least one `api_refs` item
+  - `duplicate_event`: at least two distinct `api_refs` items
+  - `wrong_time_window`: at least one `raw_refs` item and one `api_refs` item
+  - `other`: at least one item in either `raw_refs` or `api_refs`
+- Do not report a candidate if the required evidence items lack `review_ref`, cannot
+  be cited unambiguously, or otherwise cannot satisfy these requirements. Never
+  fabricate a reference merely to report a finding.
 - Use `findings: []` when nothing is clearly wrong.
 - Return at most 8 findings. Keep `summary` at 2,000 characters or fewer, each title
   field at 500 characters or fewer, each time field at 100 characters or fewer, and

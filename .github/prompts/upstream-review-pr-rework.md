@@ -30,7 +30,12 @@ feedback without undoing the original upstream fix.
 Workspace rules:
 
 - You may modify only the exact paths in `allowed_files`.
-- Do not modify workflows, prompts, schemas, tests, scripts, documentation,
+- If you change a game parser, also update the allowed agent-owned deterministic parser
+  regression test with a no-network case for the corrected behavior.
+- The trusted baseline suite
+  `apps/api/src/games/parser-regressions.trusted.test.ts` is immutable and must never
+  appear in or be added to `allowed_files`.
+- Do not modify workflows, prompts, schemas, unrelated tests, scripts, documentation,
   package manifests, lockfiles, generated artifacts, or any other file.
 - Do not create, delete, rename, or change the mode of a file.
 - Do not use the network, package managers, or repository build/test scripts. A

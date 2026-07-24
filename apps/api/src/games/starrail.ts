@@ -377,7 +377,7 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
   return null;
 }
 
-function extractStarRailTimeRangeFromContent(
+export function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
     title: string;
@@ -403,11 +403,18 @@ function extractStarRailTimeRangeFromContent(
     return { startIso: null, endIso: null };
   };
 
-  const titleSubject = opts.title.replace(/\s+/g, "").replace(/(?:活动)?说明$/, "");
+  const normalizeSubjectForMatch = (source: string): string =>
+    source
+      .replace(/\s+/g, "")
+      .replace(/[「」『』《》【】［］\[\]（）()"'“”‘’]/g, "");
+  const titleSubject = normalizeSubjectForMatch(opts.title).replace(
+    /(?:活动)?说明$/,
+    ""
+  );
   const titleLongTermRange = titleSubject
     ? text
         .split("\n")
-        .map((line) => line.replace(/\s+/g, ""))
+        .map(normalizeSubjectForMatch)
         .filter((line) => line.includes(titleSubject))
         .map((line) => {
           const subjectEnd = line.indexOf(titleSubject) + titleSubject.length;
@@ -776,6 +783,17 @@ function shouldKeepStarRailEventTitle(title: string): boolean {
   return !shouldIgnoreStarRailTitle(title);
 }
 
+export function shouldIncludeStarRailAnnouncement(
+  title: string,
+  content: string | undefined
+): boolean {
+  return (
+    shouldKeepStarRailEventTitle(title) &&
+    !isOperationalResourceUpdateNotice(title, content) &&
+    !isExternalServiceLaunchNotice(title, content)
+  );
+}
+
 function isValidTimeRange(range: { startIso: string | null; endIso: string | null }): range is {
   startIso: string;
   endIso: string;
@@ -835,10 +853,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
-    return (
-      !isOperationalResourceUpdateNotice(title, content) &&
-      !isExternalServiceLaunchNotice(title, content)
-    );
+    return shouldIncludeStarRailAnnouncement(title, content);
   });
 
   const versionMaintenanceEndByLabel = new Map<string, string>();
@@ -880,9 +895,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       const title = contentItem.title?.trim() || contentItem.subtitle?.trim() || "";
       if (!title) continue;
       if (IGNORE_ANN_IDS.has(contentItem.ann_id)) continue;
-      if (!shouldKeepStarRailEventTitle(title)) continue;
-      if (isOperationalResourceUpdateNotice(title, contentItem.content)) continue;
-      if (isExternalServiceLaunchNotice(title, contentItem.content)) continue;
+      if (!shouldIncludeStarRailAnnouncement(title, contentItem.content)) continue;
 
       const key = `${contentItem.ann_id}|${normalizeTitle(title)}`;
       if (filteredKeys.has(key)) continue;

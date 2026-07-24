@@ -462,6 +462,9 @@ jobs:
       - name: Test upstream-review safeguards
         run: pnpm test:upstream-review
 
+      - name: Test game parser regressions
+        run: pnpm test:game-parsers
+
       - name: Typecheck
         run: pnpm typecheck
 

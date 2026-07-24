@@ -150,7 +150,7 @@ function extractRelativeEndText(input: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
+export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   const text = normalizeTitle(input);
   if (!text) return { start: null, end: null };
 

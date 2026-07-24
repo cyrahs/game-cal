@@ -45,6 +45,7 @@ jobs:
           GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
           GH_REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "Missing required workflow secret: UPSTREAM_REVIEW_APPROVAL_TOKEN" >&2
@@ -75,6 +76,13 @@ jobs:
             echo "Enable at least one required approval plus stale-review dismissal or last-push approval." >&2
             exit 1
           fi
+          current_tip="$(
+            gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha
+          )"
+          if [ "$current_tip" != "$BASE_SHA" ]; then
+            echo "The default branch advanced while this run was queued; trigger a fresh review." >&2
+            exit 1
+          fi
           echo "Independent PR reviewer identity: $reviewer_login" >> "$GITHUB_STEP_SUMMARY"
 
   collect:
@@ -99,7 +107,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --no-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Start local API
         run: nohup pnpm --filter @game-cal/api exec tsx src/index.ts > "$RUNNER_TEMP/api.log" 2>&1 &
@@ -192,21 +200,15 @@ jobs:
           path: artifacts/upstream-review-agent-${{ matrix.game }}.json
           if-no-files-found: error
 
-  publish:
+  confirmation_plan:
     needs: review
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      has_findings: ${{ steps.prepare_fix.outputs.has_findings }}
-      finding_count: ${{ steps.prepare_fix.outputs.finding_count }}
-      finding_fingerprint: ${{ steps.prepare_fix.outputs.finding_fingerprint }}
-      fix_branch: ${{ steps.prepare_fix.outputs.fix_branch }}
-      issue_number: ${{ steps.prepare_fix.outputs.issue_number }}
-      issue_url: ${{ steps.prepare_fix.outputs.issue_url }}
-      remediation_cycle: ${{ steps.prepare_fix.outputs.remediation_cycle }}
+      has_candidates: ${{ steps.prepare_confirmation.outputs.has_candidates }}
+      matrix: ${{ steps.prepare_confirmation.outputs.matrix }}
     permissions:
       contents: read
-      issues: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -223,24 +225,159 @@ jobs:
           name: upstream-review-input
           path: artifacts
 
-      - name: Download Codex review
+      - name: Download Codex reviews
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: upstream-review-agent-*
           path: artifacts/agent-reviews
           merge-multiple: true
 
-      - name: Validate result and sync issue
+      - name: Prepare finding confirmation plan
+        id: prepare_confirmation
+        env:
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+          UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_INPUT_DIR: artifacts/confirmation
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+        run: node scripts/review-upstream.mjs --prepare-confirmation
+
+      - name: Upload finding confirmation plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-confirmation-plan
+          path: artifacts/confirmation
+          if-no-files-found: error
+
+  confirm:
+    needs: confirmation_plan
+    if: >-
+      needs.confirmation_plan.result == 'success' &&
+      needs.confirmation_plan.outputs.has_candidates == 'true'
+    name: Confirm ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.confirmation_plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download finding confirmation plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-confirmation-plan
+          path: artifacts/confirmation
+
+      - name: Place single-game confirmation input
+        run: |
+          cp \
+            "artifacts/confirmation/upstream-review-confirm-input-${{ matrix.game }}.json" \
+            artifacts/upstream-review-confirm-input.json
+
+      - name: Confirm candidate findings with Codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-confirm.md
+          output-schema-file: .github/schemas/upstream-review-confirm-output.schema.json
+          output-file: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - name: Upload Codex finding confirmation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-confirm-agent-${{ matrix.game }}
+          path: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - confirmation_plan
+      - confirm
+    if: >-
+      always() &&
+      needs.confirmation_plan.result == 'success' &&
+      (
+        needs.confirmation_plan.outputs.has_candidates == 'false' ||
+        needs.confirm.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_findings: ${{ steps.prepare_fix.outputs.has_findings }}
+      finding_count: ${{ steps.prepare_fix.outputs.finding_count }}
+      finding_fingerprint: ${{ steps.prepare_fix.outputs.finding_fingerprint }}
+      fix_branch: ${{ steps.prepare_fix.outputs.fix_branch }}
+      issue_number: ${{ steps.prepare_fix.outputs.issue_number }}
+      issue_url: ${{ steps.prepare_fix.outputs.issue_url }}
+      remediation_cycle: ${{ steps.prepare_fix.outputs.remediation_cycle }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download finding confirmation plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-confirmation-plan
+          path: artifacts/confirmation
+
+      - name: Download Codex finding confirmations
+        if: needs.confirmation_plan.outputs.has_candidates == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: upstream-review-confirm-agent-*
+          path: artifacts/confirmation-results
+          merge-multiple: true
+
+      - name: Refuse stale review publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          current_tip="$(
+            gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha
+          )"
+          if [ "$current_tip" != "$BASE_SHA" ]; then
+            echo "The default branch advanced during review; no Issue will be changed." >&2
+            exit 1
+          fi
+
+      - name: Finalize confirmations and sync issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
-          UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_OUTPUT_DIR: artifacts/confirmation-results
           UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
           UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: node scripts/review-upstream.mjs --finalize
+        run: node scripts/review-upstream.mjs --finalize-confirmation
 
       - name: Prepare automatic fix request
         id: prepare_fix
@@ -279,22 +416,69 @@ jobs:
           GH_REPO: ${{ github.repository }}
           FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ISSUE_NUMBER: ${{ needs.publish.outputs.issue_number }}
+          FINDING_FINGERPRINT: ${{ needs.publish.outputs.finding_fingerprint }}
+          REMEDIATION_CYCLE: ${{ needs.publish.outputs.remediation_cycle }}
         run: |
-          existing_url="$(
-            gh pr list \
-              --repo "$GH_REPO" \
-              --state open \
-              --base "$DEFAULT_BRANCH" \
-              --head "$FIX_BRANCH" \
-              --limit 100 \
-              --json isCrossRepository,url \
-              --jq '[.[] | select(.isCrossRepository == false)][0].url // ""'
+          managed_marker="<!-- upstream-review-pr:v1 issue=$ISSUE_NUMBER fingerprint=$FINDING_FINGERPRINT cycle=$REMEDIATION_CYCLE -->"
+          branch_prefix="codex/upstream-review-${FINDING_FINGERPRINT:0:16}-i${ISSUE_NUMBER}-b"
+          gh api \
+            --paginate \
+            --slurp \
+            "repos/$GH_REPO/pulls?state=all&base=$DEFAULT_BRANCH&per_page=100" \
+            > "$RUNNER_TEMP/upstream-review-pull-pages.json"
+          jq \
+            --arg repo "$GH_REPO" \
+            --arg branch "$FIX_BRANCH" \
+            --arg branch_prefix "$branch_prefix" \
+            --arg marker "$managed_marker" \
+            '
+              (add // []) |
+              [
+                .[] |
+                select(
+                  .base.repo.full_name == $repo and
+                  (
+                    (
+                      .head.repo.full_name == $repo and
+                      (
+                        .head.ref == $branch or
+                        (.head.ref | startswith($branch_prefix))
+                      )
+                    ) or
+                    (
+                      .user.login == "github-actions[bot]" and
+                      ((.body // "") | startswith($marker))
+                    )
+                  )
+                )
+              ]
+            ' \
+            "$RUNNER_TEMP/upstream-review-pull-pages.json" \
+            > "$RUNNER_TEMP/upstream-review-related-prs.json"
+          related_count="$(
+            jq 'length' "$RUNNER_TEMP/upstream-review-related-prs.json"
           )"
-          if [ -n "$existing_url" ]; then
+          if [ "$related_count" -gt 1 ]; then
+            echo "More than one pull request is associated with this remediation Issue cycle." >&2
+            exit 1
+          fi
+          if [ "$related_count" = "1" ]; then
+            existing_url="$(
+              jq -r '.[0].html_url' "$RUNNER_TEMP/upstream-review-related-prs.json"
+            )"
+            existing_status="$(
+              jq -r '
+                if .[0].merged_at != null then "merged"
+                elif .[0].state == "open" then "open"
+                else "closed-unmerged"
+                end
+              ' "$RUNNER_TEMP/upstream-review-related-prs.json"
+            )"
             echo "should_repair=false" >> "$GITHUB_OUTPUT"
             echo "existing_pr_url=$existing_url" >> "$GITHUB_OUTPUT"
-            echo "An open automatic PR already exists for this remediation attempt: $existing_url" >> "$GITHUB_STEP_SUMMARY"
-            echo "This run stops before starting another fix agent; continue that draft PR manually or close it before retrying the same base." >> "$GITHUB_STEP_SUMMARY"
+            echo "A $existing_status automatic PR already exists for this remediation Issue cycle: $existing_url" >> "$GITHUB_STEP_SUMMARY"
+            echo "This run stops before starting another fix agent. Merged PRs wait for Issue finalization; closed-unmerged PRs require manual recovery." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "should_repair=true" >> "$GITHUB_OUTPUT"
             echo "existing_pr_url=" >> "$GITHUB_OUTPUT"
@@ -554,6 +738,9 @@ jobs:
       - name: Test upstream-review safeguards
         run: pnpm test:upstream-review
 
+      - name: Test game parser regressions
+        run: pnpm test:game-parsers
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -724,6 +911,9 @@ jobs:
           BASE_SHA: ${{ github.sha }}
           HEAD_SHA: ${{ steps.commit_fix.outputs.head_sha }}
           EXPECTED_PR_BODY_SHA256: ${{ steps.render_pr.outputs.pr_body_sha256 }}
+          ISSUE_NUMBER: ${{ needs.publish.outputs.issue_number }}
+          FINDING_FINGERPRINT: ${{ needs.publish.outputs.finding_fingerprint }}
+          REMEDIATION_CYCLE: ${{ needs.publish.outputs.remediation_cycle }}
         run: |
           actual_local_body_sha256="$(
             /usr/bin/sha256sum "$RUNNER_TEMP/upstream-review-pr-body.md" |
@@ -733,19 +923,46 @@ jobs:
             echo "The deterministic PR body changed before PR creation." >&2
             exit 1
           fi
-          repo_owner="${GH_REPO%%/*}"
+          managed_marker="<!-- upstream-review-pr:v1 issue=$ISSUE_NUMBER fingerprint=$FINDING_FINGERPRINT cycle=$REMEDIATION_CYCLE -->"
+          branch_prefix="codex/upstream-review-${FINDING_FINGERPRINT:0:16}-i${ISSUE_NUMBER}-b"
           gh api \
-            --method GET \
-            "repos/$GH_REPO/pulls" \
-            -f state=open \
-            -f head="$repo_owner:$FIX_BRANCH" \
-            -f base="$DEFAULT_BRANCH" \
-            -f per_page=100 \
-            > "$RUNNER_TEMP/upstream-review-matching-prs.json"
-          matching_pr_count="$(
-            jq 'length' "$RUNNER_TEMP/upstream-review-matching-prs.json"
+            --paginate \
+            --slurp \
+            "repos/$GH_REPO/pulls?state=all&base=$DEFAULT_BRANCH&per_page=100" \
+            > "$RUNNER_TEMP/upstream-review-pull-pages.json"
+          jq \
+            --arg repo "$GH_REPO" \
+            --arg branch "$FIX_BRANCH" \
+            --arg branch_prefix "$branch_prefix" \
+            --arg marker "$managed_marker" \
+            '
+              (add // []) |
+              [
+                .[] |
+                select(
+                  .base.repo.full_name == $repo and
+                  (
+                    (
+                      .head.repo.full_name == $repo and
+                      (
+                        .head.ref == $branch or
+                        (.head.ref | startswith($branch_prefix))
+                      )
+                    ) or
+                    (
+                      .user.login == "github-actions[bot]" and
+                      ((.body // "") | startswith($marker))
+                    )
+                  )
+                )
+              ]
+            ' \
+            "$RUNNER_TEMP/upstream-review-pull-pages.json" \
+            > "$RUNNER_TEMP/upstream-review-related-prs.json"
+          related_pr_count="$(
+            jq 'length' "$RUNNER_TEMP/upstream-review-related-prs.json"
           )"
-          if [ "$matching_pr_count" = "0" ]; then
+          if [ "$related_pr_count" = "0" ]; then
             pr_url="$(
               gh pr create \
                 --repo "$GH_REPO" \
@@ -756,16 +973,22 @@ jobs:
                 --body-file "$RUNNER_TEMP/upstream-review-pr-body.md"
             )"
             pr_number="${pr_url##*/}"
-          elif [ "$matching_pr_count" = "1" ]; then
+          elif \
+            [ "$related_pr_count" = "1" ] &&
+            jq -e \
+              --arg branch "$FIX_BRANCH" \
+              '.[0].state == "open" and .[0].head.ref == $branch' \
+              "$RUNNER_TEMP/upstream-review-related-prs.json" >/dev/null
+          then
             pr_number="$(
-              jq -r '.[0].number' "$RUNNER_TEMP/upstream-review-matching-prs.json"
+              jq -r '.[0].number' "$RUNNER_TEMP/upstream-review-related-prs.json"
             )"
             pr_url="$(
-              jq -r '.[0].html_url' "$RUNNER_TEMP/upstream-review-matching-prs.json"
+              jq -r '.[0].html_url' "$RUNNER_TEMP/upstream-review-related-prs.json"
             )"
             echo "Reusing the exact draft PR after a prior post-creation failure."
           else
-            echo "More than one open pull request uses the automatic remediation branch." >&2
+            echo "A conflicting or completed pull request already belongs to this remediation Issue cycle." >&2
             exit 1
           fi
           if ! [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
@@ -1402,7 +1625,7 @@ jobs:
             echo "The PR remains draft and blocked for manual follow-up. No further agent round was started."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  finalize_approved_pr:
+  resolve_approved_snapshot:
     needs:
       - publish
       - open_pr
@@ -1444,12 +1667,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      merged: ${{ steps.merge.outputs.merged }}
-      merge_sha: ${{ steps.merge.outputs.merge_sha }}
       approved_stage: ${{ steps.approved.outputs.approved_stage }}
+      head_sha: ${{ steps.approved.outputs.head_sha }}
+      reviewer_login: ${{ steps.approved.outputs.reviewer_login }}
+      fix_artifact_name: ${{ steps.approved.outputs.fix_artifact_name }}
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
     steps:
       - name: Resolve and verify the exact approved PR snapshot
         id: approved
@@ -1483,6 +1707,7 @@ jobs:
           candidate_count=0
           approved_stage=""
           approved_head_sha=""
+          approved_fix_artifact=""
 
           select_candidate() {
             stage="$1"
@@ -1490,6 +1715,7 @@ jobs:
             has_patch="$3"
             event="$4"
             head_sha="$5"
+            fix_artifact="$6"
             if [ "$result" != "success" ] || [ "$event" != "APPROVE" ]; then
               return
             fi
@@ -1500,6 +1726,7 @@ jobs:
             candidate_count=$((candidate_count + 1))
             approved_stage="$stage"
             approved_head_sha="$head_sha"
+            approved_fix_artifact="$fix_artifact"
           }
 
           if \
@@ -1511,26 +1738,30 @@ jobs:
               "$INITIAL_SUBMIT_RESULT" \
               "true" \
               "$INITIAL_EVENT" \
-              "$INITIAL_HEAD_SHA"
+              "$INITIAL_HEAD_SHA" \
+              "upstream-review-fix-verified"
           fi
           select_candidate \
             "rework-round-1" \
             "$ROUND_1_RESULT" \
             "$ROUND_1_HAS_PATCH" \
             "$ROUND_1_EVENT" \
-            "$ROUND_1_HEAD_SHA"
+            "$ROUND_1_HEAD_SHA" \
+            "upstream-review-pr-rework-verified-round-1"
           select_candidate \
             "rework-round-2" \
             "$ROUND_2_RESULT" \
             "$ROUND_2_HAS_PATCH" \
             "$ROUND_2_EVENT" \
-            "$ROUND_2_HEAD_SHA"
+            "$ROUND_2_HEAD_SHA" \
+            "upstream-review-pr-rework-verified-round-2"
           select_candidate \
             "rework-round-3" \
             "$ROUND_3_RESULT" \
             "$ROUND_3_HAS_PATCH" \
             "$ROUND_3_EVENT" \
-            "$ROUND_3_HEAD_SHA"
+            "$ROUND_3_HEAD_SHA" \
+            "upstream-review-pr-rework-verified-round-3"
 
           if [ "$candidate_count" -ne 1 ]; then
             echo "Expected exactly one approved terminal review; found $candidate_count." >&2
@@ -1660,6 +1891,403 @@ jobs:
           echo "approved_stage=$approved_stage" >> "$GITHUB_OUTPUT"
           echo "head_sha=$approved_head_sha" >> "$GITHUB_OUTPUT"
           echo "reviewer_login=$reviewer_login" >> "$GITHUB_OUTPUT"
+          echo "fix_artifact_name=$approved_fix_artifact" >> "$GITHUB_OUTPUT"
+
+  collect_approved_runtime_input:
+    needs:
+      - publish
+      - open_pr
+      - resolve_approved_snapshot
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.resolve_approved_snapshot.result == 'success' &&
+      needs.resolve_approved_snapshot.outputs.head_sha != '' &&
+      needs.resolve_approved_snapshot.outputs.fix_artifact_name != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the trusted base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the exact approved head in an isolated subdirectory
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          path: approved-head
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download the approved cumulative patch artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.resolve_approved_snapshot.outputs.fix_artifact_name }}
+          path: ${{ runner.temp }}/upstream-review-approved-fix
+
+      - name: Verify the approved patch artifact against the exact head
+        env:
+          APPROVED_WORKSPACE: ${{ github.workspace }}/approved-head
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+        run: |
+          node --input-type=module -e '
+            const { verifyAgenticFixArtifactAtHead } =
+              await import("./scripts/review-upstream.mjs");
+            await verifyAgenticFixArtifactAtHead({
+              cwd: process.env.APPROVED_WORKSPACE,
+            });
+          '
+
+      - name: Test the approved head in a disposable locked-down container
+        env:
+          APPROVED_TEST_CONTAINER: upstream-review-approved-tests
+          APPROVED_WORKSPACE: ${{ github.workspace }}/approved-head
+        run: |
+          docker run \
+            --rm \
+            --name "$APPROVED_TEST_CONTAINER" \
+            --user 1000:1000 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --pids-limit 256 \
+            --memory 2g \
+            --memory-swap 2g \
+            --cpus 2 \
+            --tmpfs /work:rw,nosuid,nodev,size=1536m,uid=1000,gid=1000,mode=0700 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=1777 \
+            --mount "type=bind,src=$APPROVED_WORKSPACE,dst=/approved,readonly" \
+            --env CI=true \
+            --env HOME=/work/home \
+            --env NPM_CONFIG_CACHE=/work/npm-cache \
+            --env XDG_CACHE_HOME=/work/cache \
+            --env XDG_DATA_HOME=/work/data \
+            node:25-alpine \
+            sh -euc '
+              mkdir -p /work/repo "$HOME"
+              cp -R /approved/. /work/repo/
+              cd /work/repo
+              npm install --global --prefix /work/pnpm pnpm@9.9.0
+              /work/pnpm/bin/pnpm install --frozen-lockfile
+              /work/pnpm/bin/pnpm test:game-parsers
+            '
+
+      - name: Start the approved API from a fresh locked-down container
+        env:
+          APPROVED_RUNTIME_CONTAINER: upstream-review-approved-runtime
+          APPROVED_WORKSPACE: ${{ github.workspace }}/approved-head
+        run: |
+          docker run \
+            --detach \
+            --name "$APPROVED_RUNTIME_CONTAINER" \
+            --user 1000:1000 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --pids-limit 256 \
+            --memory 2g \
+            --memory-swap 2g \
+            --cpus 2 \
+            --tmpfs /work:rw,nosuid,nodev,size=1536m,uid=1000,gid=1000,mode=0700 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=1777 \
+            --mount "type=bind,src=$APPROVED_WORKSPACE,dst=/approved,readonly" \
+            --publish 127.0.0.1:8787:8787 \
+            --env CI=true \
+            --env HOME=/work/home \
+            --env NPM_CONFIG_CACHE=/work/npm-cache \
+            --env XDG_CACHE_HOME=/work/cache \
+            --env XDG_DATA_HOME=/work/data \
+            --env HOST=0.0.0.0 \
+            --env PORT=8787 \
+            node:25-alpine \
+            sh -euc '
+              mkdir -p /work/repo "$HOME"
+              cp -R /approved/. /work/repo/
+              cd /work/repo
+              npm install --global --prefix /work/pnpm pnpm@9.9.0
+              /work/pnpm/bin/pnpm install --frozen-lockfile
+              exec /work/pnpm/bin/pnpm --filter @game-cal/api exec tsx src/index.ts
+            '
+
+      - name: Wait for approved API health
+        env:
+          APPROVED_RUNTIME_CONTAINER: upstream-review-approved-runtime
+        run: |
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8787/api/health >/dev/null; then
+              docker logs "$APPROVED_RUNTIME_CONTAINER"
+              exit 0
+            fi
+            if \
+              [ "$(docker inspect --format '{{.State.Running}}' "$APPROVED_RUNTIME_CONTAINER" 2>/dev/null)" != "true" ]
+            then
+              docker logs "$APPROVED_RUNTIME_CONTAINER" 2>&1 || true
+              echo "The approved runtime container exited before becoming healthy." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs "$APPROVED_RUNTIME_CONTAINER" 2>&1 || true
+          echo "The approved runtime container did not become healthy." >&2
+          exit 1
+
+      - name: Freeze target-only remediation replay
+        env:
+          APPROVED_WORKSPACE: ${{ github.workspace }}/approved-head
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: artifacts/upstream-remediation-verify-input.json
+        run: |
+          node --input-type=module -e '
+            const { prepareRemediationVerification } =
+              await import("./scripts/review-upstream.mjs");
+            await prepareRemediationVerification({
+              cwd: process.env.APPROVED_WORKSPACE,
+            });
+          '
+
+      - name: Stop and remove the approved runtime container
+        if: always()
+        env:
+          APPROVED_RUNTIME_CONTAINER: upstream-review-approved-runtime
+        run: |
+          docker rm --force "$APPROVED_RUNTIME_CONTAINER" >/dev/null 2>&1 || true
+
+      - name: Upload frozen exact-head remediation input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-remediation-input
+          path: artifacts/upstream-remediation-verify-input.json
+          if-no-files-found: error
+
+  verify_approved_runtime_input:
+    needs:
+      - resolve_approved_snapshot
+      - collect_approved_runtime_input
+    if: >-
+      needs.resolve_approved_snapshot.result == 'success' &&
+      needs.collect_approved_runtime_input.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      verification_status: ${{ steps.verify_runtime.outputs.verification_status }}
+      verified_head_sha: ${{ steps.verify_runtime.outputs.verified_head_sha }}
+      verification_input_sha256: ${{ steps.verify_runtime.outputs.verification_input_sha256 }}
+      verification_result_sha256: ${{ steps.verify_runtime.outputs.verification_result_sha256 }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download the approved cumulative patch artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.resolve_approved_snapshot.outputs.fix_artifact_name }}
+          path: ${{ runner.temp }}/upstream-review-approved-fix
+
+      - name: Download frozen exact-head remediation input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-remediation-input
+          path: artifacts
+
+      - name: Validate frozen remediation input against the approved artifact
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: artifacts/upstream-remediation-verify-input.json
+        run: node scripts/review-upstream.mjs --validate-remediation-verification-input
+
+      - name: Verify original findings against the approved runtime
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-remediation-verify.md
+          output-schema-file: .github/schemas/upstream-remediation-verify-output.schema.json
+          output-file: artifacts/upstream-remediation-verify-agent.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - name: Validate exact-head remediation replay
+        id: verify_runtime
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: artifacts/upstream-remediation-verify-input.json
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_AGENT_OUTPUT_PATH: artifacts/upstream-remediation-verify-agent.json
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH: artifacts/upstream-remediation-verify-result.json
+        run: node scripts/review-upstream.mjs --finalize-remediation-verification
+
+      - name: Upload exact-head remediation replay
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-review-remediation-verified
+          path: |
+            artifacts/upstream-remediation-verify-input.json
+            artifacts/upstream-remediation-verify-agent.json
+            artifacts/upstream-remediation-verify-result.json
+          if-no-files-found: warn
+
+  finalize_approved_pr:
+    needs:
+      - publish
+      - open_pr
+      - resolve_approved_snapshot
+      - collect_approved_runtime_input
+      - verify_approved_runtime_input
+    if: >-
+      always() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      needs.resolve_approved_snapshot.result == 'success' &&
+      needs.collect_approved_runtime_input.result == 'success' &&
+      needs.verify_approved_runtime_input.result == 'success' &&
+      needs.verify_approved_runtime_input.outputs.verification_status == 'resolved' &&
+      needs.verify_approved_runtime_input.outputs.verified_head_sha ==
+        needs.resolve_approved_snapshot.outputs.head_sha &&
+      needs.verify_approved_runtime_input.outputs.verification_input_sha256 != '' &&
+      needs.verify_approved_runtime_input.outputs.verification_result_sha256 != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+      approved_stage: ${{ needs.resolve_approved_snapshot.outputs.approved_stage }}
+      verified_head_sha: ${{ steps.verify_runtime.outputs.verified_head_sha }}
+      verification_result_sha256: ${{ steps.verify_runtime.outputs.verification_result_sha256 }}
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+
+      - name: Download the terminal approved patch artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.resolve_approved_snapshot.outputs.fix_artifact_name }}
+          path: ${{ runner.temp }}/upstream-review-approved-fix
+
+      - name: Verify the terminal patch artifact from the trusted base
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+        run: node scripts/review-upstream.mjs --verify-fix-artifact
+
+      - name: Download the verified exact-head remediation replay
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-remediation-verified
+          path: ${{ runner.temp }}/upstream-review-remediation-verified
+
+      - name: Revalidate the resolved replay against the terminal artifact
+        id: verify_runtime
+        env:
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: ${{ runner.temp }}/upstream-review-remediation-verified/upstream-remediation-verify-input.json
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-remediation-verified/upstream-remediation-verify-agent.json
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH: ${{ runner.temp }}/upstream-review-remediation-verified/upstream-remediation-verify-result.json
+        run: node scripts/review-upstream.mjs --finalize-remediation-verification
+
+      - name: Revalidate trusted reviewer and merge policy
+        id: reviewer
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          MERGE_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_REVIEWER_LOGIN: ${{ needs.resolve_approved_snapshot.outputs.reviewer_login }}
+        run: |
+          reviewer_login="$(gh api user --jq .login)"
+          if \
+            ! [[ "$reviewer_login" =~ ^[A-Za-z0-9-]{1,39}$ ]] ||
+            [ "$reviewer_login" = "github-actions[bot]" ] ||
+            [ "$reviewer_login" != "$EXPECTED_REVIEWER_LOGIN" ]
+          then
+            echo "The independent reviewer identity changed before merge." >&2
+            exit 1
+          fi
+          if ! gh api "repos/$GH_REPO" --jq '.permissions.admin == true' | grep -qx true; then
+            echo "The approval-token identity no longer has admin access to $GH_REPO." >&2
+            exit 1
+          fi
+          protection_path="$RUNNER_TEMP/upstream-review-merge-protection.json"
+          gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection_path"
+          if ! jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            )
+          ' "$protection_path" >/dev/null
+          then
+            echo "The default branch no longer protects exact-head approvals." >&2
+            exit 1
+          fi
+          merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
+          if ! GH_TOKEN="$MERGE_TOKEN" gh api "repos/$GH_REPO" > "$merge_repository_path"; then
+            echo "The repository merge configuration could not be verified with GITHUB_TOKEN." >&2
+            exit 1
+          fi
+          if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
+            echo "Squash merge is no longer enabled for $GH_REPO." >&2
+            exit 1
+          fi
+          echo "reviewer_login=$reviewer_login" >> "$GITHUB_OUTPUT"
 
       - name: Mark ready and squash-merge the approved head
         id: merge
@@ -1671,11 +2299,27 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
           BASE_SHA: ${{ github.sha }}
-          HEAD_SHA: ${{ steps.approved.outputs.head_sha }}
-          APPROVED_STAGE: ${{ steps.approved.outputs.approved_stage }}
-          REVIEWER_LOGIN: ${{ steps.approved.outputs.reviewer_login }}
+          HEAD_SHA: ${{ needs.resolve_approved_snapshot.outputs.head_sha }}
+          APPROVED_STAGE: ${{ needs.resolve_approved_snapshot.outputs.approved_stage }}
+          REVIEWER_LOGIN: ${{ steps.reviewer.outputs.reviewer_login }}
           PR_BODY_SHA256: ${{ needs.open_pr.outputs.pr_body_sha256 }}
+          VERIFICATION_STATUS: ${{ steps.verify_runtime.outputs.verification_status }}
+          VERIFIED_HEAD_SHA: ${{ steps.verify_runtime.outputs.verified_head_sha }}
+          VERIFICATION_INPUT_SHA256: ${{ steps.verify_runtime.outputs.verification_input_sha256 }}
+          VERIFICATION_RESULT_SHA256: ${{ steps.verify_runtime.outputs.verification_result_sha256 }}
+          EXPECTED_VERIFICATION_INPUT_SHA256: ${{ needs.verify_approved_runtime_input.outputs.verification_input_sha256 }}
+          EXPECTED_VERIFICATION_RESULT_SHA256: ${{ needs.verify_approved_runtime_input.outputs.verification_result_sha256 }}
         run: |
+          if \
+            [ "$VERIFICATION_STATUS" != "resolved" ] ||
+            [ "$VERIFIED_HEAD_SHA" != "$HEAD_SHA" ] ||
+            [ "$VERIFICATION_INPUT_SHA256" != "$EXPECTED_VERIFICATION_INPUT_SHA256" ] ||
+            [ "$VERIFICATION_RESULT_SHA256" != "$EXPECTED_VERIFICATION_RESULT_SHA256" ]
+          then
+            echo "The approved head lacks a matching resolved runtime replay." >&2
+            exit 1
+          fi
+
           verify_default_tip() {
             current_tip="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
             if [ "$current_tip" != "$BASE_SHA" ]; then
@@ -1808,40 +2452,10 @@ jobs:
           fi
 
           merge_sha="$(jq -r .sha "$RUNNER_TEMP/upstream-review-merge-response.json")"
-          gh api "repos/$GH_REPO/git/commits/$merge_sha" \
-            > "$RUNNER_TEMP/upstream-review-merge-commit.json"
-          if ! jq -e \
-            --arg base_sha "$BASE_SHA" \
-            '
-              (.parents | length) == 1 and
-              .parents[0].sha == $base_sha
-            ' \
-            "$RUNNER_TEMP/upstream-review-merge-commit.json" >/dev/null
-          then
-            echo "The squash commit was not created directly on the reviewed base." >&2
-            exit 1
-          fi
-
-          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" \
-            > "$RUNNER_TEMP/upstream-review-merged-pr.json"
-          if ! jq -e \
-            --arg head_sha "$HEAD_SHA" \
-            '
-              .state == "closed" and
-              .merged == true and
-              .draft == false and
-              .head.sha == $head_sha
-            ' \
-            "$RUNNER_TEMP/upstream-review-merged-pr.json" >/dev/null
-          then
-            echo "The pull request did not reach the expected merged state." >&2
-            exit 1
-          fi
-
-          ready_transitioned=false
-          trap - EXIT
           echo "merged=true" >> "$GITHUB_OUTPUT"
           echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          ready_transitioned=false
+          trap - EXIT
           {
             echo "## Approved PR merged"
             echo
@@ -1849,18 +2463,20 @@ jobs:
             echo "- Approved stage: \`$APPROVED_STAGE\`"
             echo "- Reviewed head: \`$HEAD_SHA\`"
             echo "- Squash commit: \`$merge_sha\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY" || true
 
   finalize_remediation_issue:
     needs:
       - publish
       - open_pr
+      - resolve_approved_snapshot
       - finalize_approved_pr
     if: >-
       always() &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       needs.publish.result == 'success' &&
       needs.open_pr.result == 'success' &&
+      needs.resolve_approved_snapshot.result == 'success' &&
       needs.finalize_approved_pr.result == 'success' &&
       needs.finalize_approved_pr.outputs.merged == 'true' &&
       needs.finalize_approved_pr.outputs.merge_sha != '' &&
@@ -1869,6 +2485,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       issues: write
       pull-requests: read
@@ -1895,6 +2512,18 @@ jobs:
           name: upstream-review-fix-verified
           path: ${{ runner.temp }}/upstream-review-fix-verified
 
+      - name: Download terminal approved fix artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.resolve_approved_snapshot.outputs.fix_artifact_name }}
+          path: ${{ runner.temp }}/upstream-review-approved-fix
+
+      - name: Download exact-head remediation replay
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-review-remediation-verified
+          path: ${{ runner.temp }}/upstream-review-remediation-verified
+
       - name: Finalize the merged remediation Issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1905,6 +2534,11 @@ jobs:
           UPSTREAM_REVIEW_FIX_AGENT_OUTPUT_PATH: ${{ runner.temp }}/upstream-review-fix-verified/upstream-review-fix-agent.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-fix-verified/manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-fix-verified/fix.patch
+          UPSTREAM_REVIEW_APPROVED_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-approved-fix/upstream-review-fix-input.json
+          UPSTREAM_REVIEW_APPROVED_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-approved-fix/manifest.json
+          UPSTREAM_REVIEW_APPROVED_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-approved-fix/fix.patch
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_INPUT_PATH: ${{ runner.temp }}/upstream-review-remediation-verified/upstream-remediation-verify-input.json
+          UPSTREAM_REVIEW_REMEDIATION_VERIFY_RESULT_PATH: ${{ runner.temp }}/upstream-review-remediation-verified/upstream-remediation-verify-result.json
           UPSTREAM_REVIEW_ISSUE_NUMBER: ${{ needs.publish.outputs.issue_number }}
           UPSTREAM_REVIEW_ISSUE_URL: ${{ needs.publish.outputs.issue_url }}
           UPSTREAM_REVIEW_FINDING_FINGERPRINT: ${{ needs.publish.outputs.finding_fingerprint }}
