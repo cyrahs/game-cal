@@ -174,7 +174,7 @@ pnpm --filter @game-cal/api start
 自动定时执行；需要时可在 GitHub Actions 页面从默认分支手动触发；非默认分支不会
 运行，以免未合并的 workflow 代码接触 Secrets。
 
-初始审查分成十个相互隔离的阶段：
+workflow 由相互隔离的审查、修复、复审和合并阶段组成：
 
 - `preflight`：在接触仓库或调用模型前检查五个 Secrets，确认最终 reviewer token
   属于不同于 `github-actions[bot]`、且对仓库有 admin 权限的身份，并验证默认分支会让
@@ -206,20 +206,28 @@ pnpm --filter @game-cal/api start
 - `submit_pr_review`：不 checkout 或执行 PR 代码，仅下载经过校验且带 SHA-256 的
   review request，复验分支保护和 PR head 后，用独立身份把 review 绑定到精确
   `commit_id` 提交；若提交期间 head 发生变化，会立即撤销刚创建的 review 并失败。
-  PR 仍保持 Draft，不会自动 ready 或 merge。
-- `rework_round_1` / `rework_round_2`：只有上一轮经过校验并成功提交的结果为
+  PR 在最终结果确定前保持 Draft。
+- `rework_round_1` / `rework_round_2` / `rework_round_3`：只有上一轮经过校验并成功
+  提交的结果为
   `REQUEST_CHANGES` 时才进入下一轮。每轮由独立的 `repair`、`validate`、`push`、
   `review`、`validate_review` 和 `submit` job 组成；返工 agent 只能修改静态 parser
   白名单，随后在无 Secrets 的新 runner 中复验并运行完整测试，再由只具备
   `contents: write` 的 job 更新原 Draft PR，最后重新执行完整 PR review。
+- `finalize_approved_pr`：初审或任一返工轮次成功提交 `APPROVE` 后，集中选择唯一的
+  终态 head。这个 job 不 checkout 或执行 PR 代码；它用独立 reviewer token 只读
+  复核精确 commit 上的最新批准，再用 job-scoped `GITHUB_TOKEN` 复验 PR 作者、
+  base/head、默认分支 tip、分支保护和 squash 配置，将 Draft 转为 Ready，并通过
+  带 head SHA 条件的 API 自动 squash merge。Ready 后任一校验或合并失败时会尽力
+  恢复为 Draft。
 
-返工轮次在主 workflow DAG 中静态展开，硬上限为 2，不能由 review 文本、PR 内容或
+返工轮次在主 workflow DAG 中静态展开，硬上限为 3，不能由 review 文本、PR 内容或
 dispatch 输入提高。每轮都会从原始 base 重新生成累计 patch，在原始 base 上创建新的
 单亲提交，并用绑定旧 head 的
 `--force-with-lease=refs/heads/<branch>:<old-head>` 替换同一个自动分支；因此审查覆盖
 原始 base 到最新 head 的完整差异，而不是只看本轮增量。若没有安全的有效补丁、验证
-失败、head/base 漂移、复审通过，或第 2 轮仍为 `REQUEST_CHANGES`，自动返工都会停止。
-第 2 轮耗尽时 PR 保持 Draft 和 blocked，不会启动第 3 轮、自动 ready 或 merge。
+失败、head/base 漂移、复审通过，或第 3 轮仍为 `REQUEST_CHANGES`，自动返工都会停止。
+第 3 轮耗尽时 PR 保持 Draft 和 blocked，不会自动 ready 或 merge；任一轮复审通过时
+则进入上面的精确 head 自动合并阶段。
 
 每个 matrix job 会先确定性验证完整采集文件，再原位替换为仅含一个
 `review_dataset` 的 shard，避免把约 250 KB 聚合文件一次性送进 agent 工具输出。
@@ -234,10 +242,10 @@ reopen Issue #1；无 findings 且 Issue 打开时写入干净报告并关闭；
 失败。review 输出不完整、上下文 digest 不一致、PR head 漂移或 reviewer 与 PR
 作者身份相同都会 fail closed，不会批准。默认分支未启用 required review，或未配置
 “新提交使旧批准失效”时，也会在调用模型前失败。不含人工重新运行 job 的单次初始
-完整运行最多调用 8 个 agent；两轮都执行时，最多为 12 个：六个游戏 reviewer、
+完整运行最多调用 8 个 agent；三轮都执行时，最多为 14 个：六个游戏 reviewer、
 一个初始 fix agent、一个初始 PR review agent，以及每轮各一个 rework agent 和一个
 完整 PR review agent。运行产物和 API 日志会作为 Actions artifacts 保存，并按
-round 0/1/2 使用不同名称。
+round 0/1/2/3 使用不同名称。
 
 需要配置五个 GitHub Actions Secrets：
 
@@ -251,8 +259,9 @@ round 0/1/2 使用不同名称。
   本仓库并授予 `Pull requests: Read and write` 与 `Administration: Read`。后者仅
   用于读取分支保护设置。该身份必须不同于 `github-actions[bot]`，并对仓库拥有
   admin 权限；token 只在不 checkout 仓库的 `preflight` 身份检查、初始
-  `submit_pr_review` 和每轮不 checkout 的 `submit` job 中使用，绝不会提供给
-  Codex、补丁验证或执行 PR 代码的 job。
+  `submit_pr_review`、每轮不 checkout 的 `submit` job，以及最终不 checkout 的
+  `finalize_approved_pr` 只读复核步骤中使用，绝不会提供给 Codex、补丁验证或执行
+  PR 代码的 job，也不会用于 Ready 或 merge 写操作。
 
 网关需要兼容 Responses API 的流式响应、工具调用和 Structured Outputs，并接受
 `Authorization: Bearer <key>`。审查 prompt 和输出 Schema 分别位于
@@ -269,6 +278,9 @@ round 0/1/2 使用不同名称。
 中启用 **Allow GitHub Actions to create and approve pull requests**。GitHub 将“创建”
 和“批准”合并在同一个仓库级开关里。`open_pr` 使用最小权限的 `GITHUB_TOKEN`
 创建 PR；因为 GitHub 禁止 PR 作者自审，最终 review 必须使用上面的独立 token。
+`finalize_approved_pr` 则用单独 job 中显式声明的 `pull-requests: write` 将 Draft
+转为 Ready，并用 `contents: write` 完成 squash merge，无需新增 merge token。仓库
+必须允许 workflow 请求这些写权限，并启用 squash merge。
 
 自动批准还要求默认分支启用保护规则：打开
 `Settings → Branches → Branch protection rules`，为 `main` 开启
@@ -276,7 +288,9 @@ round 0/1/2 使用不同名称。
 **Dismiss stale pull request approvals when new commits are pushed**；也可以用
 **Require approval of the most recent reviewable push** 提供同等的 fail-closed
 保证。workflow 会在开始和最终提交 review 前各复验一次，不满足时不会调用 agent
-或提交 review；每一轮返工提交 review 前也会重新复验。
+或提交 review；每一轮返工提交 review 前，以及 Ready/merge 前后也会重新复验。
+required checks、未解决会话、ruleset 或其他合并限制仍由 GitHub 最终执行；任何条件
+不满足都会让合并 job 失败，而不会绕过保护规则。
 
 可选环境变量：
 
@@ -301,7 +315,7 @@ round 0/1/2 使用不同名称。
 - `UPSTREAM_REVIEW_PR_REVIEW_RESULT_PATH`（规范化、可供下一轮验证的 review JSON）
 - `UPSTREAM_REVIEW_PR_REVIEW_REQUEST_PATH`（绑定 commit 的 GitHub review request）
 - `UPSTREAM_REVIEW_PR_REWORK_ROUND` / `UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS`
-  （当前返工轮次与固定上限；生产 workflow 的上限固定为 `2`）
+  （当前返工轮次与固定上限；生产 workflow 的上限固定为 `3`）
 - `UPSTREAM_REVIEW_PR_REWORK_INPUT_PATH` / `UPSTREAM_REVIEW_PR_REWORK_AGENT_OUTPUT_PATH`
   （digest-bound 返工请求与 Codex 输出）
 - `UPSTREAM_REVIEW_PR_REWORK_METADATA_PATH` /

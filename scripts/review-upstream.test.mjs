@@ -203,7 +203,7 @@ function agentPrReworkOutput(input, changedFiles, overrides = {}) {
 function prReworkContext(overrides = {}) {
   return {
     round: 1,
-    max_rounds: 2,
+    max_rounds: 3,
     base_sha: "a".repeat(40),
     reviewed_head_sha: "b".repeat(40),
     finding_fingerprint: "d".repeat(64),
@@ -903,13 +903,13 @@ test("enforces PR review field and finding count limits", () => {
   );
 });
 
-test("builds a strict digest-bound PR rework input for one of two rounds", () => {
+test("builds a strict digest-bound PR rework input for one of three rounds", () => {
   const context = prReworkContext();
   const input = buildAgenticPrReworkInput(context);
 
   assert.equal(input.mode, "agentic_pr_rework");
   assert.equal(input.round, 1);
-  assert.equal(input.max_rounds, 2);
+  assert.equal(input.max_rounds, 3);
   assert.match(input.context_sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(validateAgenticPrReworkInput(input, context), input);
   assert.equal(
@@ -921,12 +921,18 @@ test("builds a strict digest-bound PR rework input for one of two rounds", () =>
     round: 2,
   });
   assert.equal(secondRoundInput.round, 2);
-  assert.equal(secondRoundInput.max_rounds, 2);
+  assert.equal(secondRoundInput.max_rounds, 3);
+  const thirdRoundInput = buildAgenticPrReworkInput({
+    ...context,
+    round: 3,
+  });
+  assert.equal(thirdRoundInput.round, 3);
+  assert.equal(thirdRoundInput.max_rounds, 3);
 
   for (const changedContext of [
     { ...context, round: 0 },
-    { ...context, round: 3 },
-    { ...context, max_rounds: 3 },
+    { ...context, round: 4 },
+    { ...context, max_rounds: 2 },
     { ...context, reviewed_head_sha: "a".repeat(40) },
     { ...context, fix_branch: "codex/upstream-review-wrong" },
     {
@@ -1488,7 +1494,7 @@ test("prepares, finalizes, and verifies a bounded squash-style PR rework", async
       pullRequestNumber: 42,
       pullRequestUrl,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       githubOutputPath: "",
     });
     assert.equal(reworkInput.blocking_findings.length, 1);

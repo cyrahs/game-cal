@@ -126,7 +126,7 @@ jobs:
           UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
           UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
           UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
-          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "3"
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-previous-fix/upstream-review-fix-input.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-previous-fix/manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-previous-fix/fix.patch
@@ -139,8 +139,8 @@ jobs:
             echo "Invalid pull request number." >&2
             exit 1
           fi
-          if ! [[ "$UPSTREAM_REVIEW_PR_REWORK_ROUND" =~ ^[12]$ ]]; then
-            echo "The reusable workflow only permits rework rounds 1 and 2." >&2
+          if ! [[ "$UPSTREAM_REVIEW_PR_REWORK_ROUND" =~ ^[123]$ ]]; then
+            echo "The reusable workflow only permits rework rounds 1, 2, and 3." >&2
             exit 1
           fi
           if ! [[ "$UPSTREAM_REVIEW_BASE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
@@ -282,7 +282,7 @@ jobs:
           UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
           UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
           UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
-          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "3"
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/fix-input.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/previous-manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ steps.prepare_workspace.outputs.trusted_state_dir }}/previous-fix.patch
@@ -426,7 +426,7 @@ jobs:
           UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
           UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
           UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
-          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "3"
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/upstream-review-fix-input.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/previous-manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-candidate/previous-fix.patch
@@ -549,7 +549,7 @@ jobs:
           UPSTREAM_REVIEW_PR_URL: ${{ inputs.pr_url }}
           UPSTREAM_REVIEW_FIX_BRANCH: ${{ inputs.fix_branch }}
           UPSTREAM_REVIEW_PR_REWORK_ROUND: ${{ inputs.round }}
-          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "2"
+          UPSTREAM_REVIEW_PR_REWORK_MAX_ROUNDS: "3"
           UPSTREAM_REVIEW_FIX_INPUT_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/upstream-review-fix-input.json
           UPSTREAM_REVIEW_FIX_MANIFEST_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/previous-manifest.json
           UPSTREAM_REVIEW_FIX_PATCH_PATH: ${{ runner.temp }}/upstream-review-pr-rework-verified/previous-fix.patch

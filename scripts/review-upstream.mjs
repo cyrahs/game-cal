@@ -68,7 +68,7 @@ const MAX_ISSUE_BODY_BYTES = 60_000;
 const MAX_FIX_EVIDENCE_ITEMS = 4;
 const MAX_FIX_PATCH_BYTES = 512_000;
 const MAX_PR_REWORK_PATCH_BYTES = 128 * 1024;
-const MAX_PR_REWORK_ROUNDS = 2;
+const MAX_PR_REWORK_ROUNDS = 3;
 const MAX_PR_REVIEW_CHANGED_FILES = 20;
 const MAX_PR_REVIEW_FINDINGS = 20;
 const MAX_PR_REVIEW_SUMMARY_LENGTH = 2_000;
@@ -2743,7 +2743,7 @@ function renderFixPrBody(metadata, manifest, options = {}) {
   const lines = [
     "## Summary",
     "",
-    "Codex generated a candidate fix for the latest upstream-review findings. This PR is opened as a draft for human review.",
+    "Codex generated a candidate fix for the latest upstream-review findings. This PR remains draft while independent review and any bounded rework run.",
     "",
     "## Findings",
     "",
@@ -2776,7 +2776,7 @@ function renderFixPrBody(metadata, manifest, options = {}) {
     "",
     `Verified patch SHA-256: \`${manifest.patch_sha256}\``,
     "",
-    "_This PR was generated automatically and intentionally left as a draft._",
+    "_This PR is generated as a draft, then marked ready and squash-merged automatically only after an exact-head independent approval._",
     ""
   );
   const body = lines.join("\n");

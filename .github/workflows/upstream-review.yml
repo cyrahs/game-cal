@@ -1312,14 +1312,49 @@ jobs:
       OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
       UPSTREAM_REVIEW_APPROVAL_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
 
-  rework_limit_summary:
+  rework_round_3:
     needs:
+      - publish
       - open_pr
       - rework_round_2
     if: >-
-      always() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
       needs.rework_round_2.result == 'success' &&
+      needs.rework_round_2.outputs.has_patch == 'true' &&
+      needs.rework_round_2.outputs.head_sha != '' &&
       needs.rework_round_2.outputs.review_event == 'REQUEST_CHANGES'
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    uses: ./.github/workflows/upstream-review-pr-rework.yml
+    with:
+      round: 3
+      base_sha: ${{ github.sha }}
+      expected_head_sha: ${{ needs.rework_round_2.outputs.head_sha }}
+      pr_number: ${{ needs.open_pr.outputs.pr_number }}
+      pr_url: ${{ needs.open_pr.outputs.pr_url }}
+      fix_branch: ${{ needs.publish.outputs.fix_branch }}
+      default_branch: ${{ github.event.repository.default_branch }}
+      previous_fix_artifact: upstream-review-pr-rework-verified-round-2
+      previous_review_artifact: upstream-review-pr-review-validated-round-2
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+      UPSTREAM_REVIEW_APPROVAL_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+
+  rework_limit_summary:
+    needs:
+      - open_pr
+      - rework_round_3
+    if: >-
+      always() &&
+      needs.rework_round_3.result == 'success' &&
+      needs.rework_round_3.outputs.review_event == 'REQUEST_CHANGES'
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
@@ -1327,15 +1362,419 @@ jobs:
       - name: Report bounded rework exhaustion
         env:
           PR_URL: ${{ needs.open_pr.outputs.pr_url }}
-          HEAD_SHA: ${{ needs.rework_round_2.outputs.head_sha }}
+          HEAD_SHA: ${{ needs.rework_round_3.outputs.head_sha }}
         run: |
           {
             echo "## Automatic PR rework stopped"
             echo
-            echo "The independent reviewer still requested changes after the hard limit of 2 rework rounds."
+            echo "The independent reviewer still requested changes after the hard limit of 3 rework rounds."
             echo
             echo "- Draft PR: $PR_URL"
             echo "- Last reviewed head: \`$HEAD_SHA\`"
             echo
             echo "The PR remains draft and blocked for manual follow-up. No further agent round was started."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  finalize_approved_pr:
+    needs:
+      - publish
+      - open_pr
+      - validate_pr_review
+      - submit_pr_review
+      - rework_round_1
+      - rework_round_2
+      - rework_round_3
+    if: >-
+      always() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.publish.result == 'success' &&
+      needs.open_pr.result == 'success' &&
+      (
+        (
+          needs.validate_pr_review.result == 'success' &&
+          needs.submit_pr_review.result == 'success' &&
+          needs.validate_pr_review.outputs.review_event == 'APPROVE'
+        ) ||
+        (
+          needs.rework_round_1.result == 'success' &&
+          needs.rework_round_1.outputs.has_patch == 'true' &&
+          needs.rework_round_1.outputs.head_sha != '' &&
+          needs.rework_round_1.outputs.review_event == 'APPROVE'
+        ) ||
+        (
+          needs.rework_round_2.result == 'success' &&
+          needs.rework_round_2.outputs.has_patch == 'true' &&
+          needs.rework_round_2.outputs.head_sha != '' &&
+          needs.rework_round_2.outputs.review_event == 'APPROVE'
+        ) ||
+        (
+          needs.rework_round_3.result == 'success' &&
+          needs.rework_round_3.outputs.has_patch == 'true' &&
+          needs.rework_round_3.outputs.head_sha != '' &&
+          needs.rework_round_3.outputs.review_event == 'APPROVE'
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Resolve and verify the exact approved PR snapshot
+        id: approved
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          BASE_SHA: ${{ github.sha }}
+          INITIAL_VALIDATE_RESULT: ${{ needs.validate_pr_review.result }}
+          INITIAL_SUBMIT_RESULT: ${{ needs.submit_pr_review.result }}
+          INITIAL_EVENT: ${{ needs.validate_pr_review.outputs.review_event }}
+          INITIAL_HEAD_SHA: ${{ needs.open_pr.outputs.head_sha }}
+          ROUND_1_RESULT: ${{ needs.rework_round_1.result }}
+          ROUND_1_HAS_PATCH: ${{ needs.rework_round_1.outputs.has_patch }}
+          ROUND_1_EVENT: ${{ needs.rework_round_1.outputs.review_event }}
+          ROUND_1_HEAD_SHA: ${{ needs.rework_round_1.outputs.head_sha }}
+          ROUND_2_RESULT: ${{ needs.rework_round_2.result }}
+          ROUND_2_HAS_PATCH: ${{ needs.rework_round_2.outputs.has_patch }}
+          ROUND_2_EVENT: ${{ needs.rework_round_2.outputs.review_event }}
+          ROUND_2_HEAD_SHA: ${{ needs.rework_round_2.outputs.head_sha }}
+          ROUND_3_RESULT: ${{ needs.rework_round_3.result }}
+          ROUND_3_HAS_PATCH: ${{ needs.rework_round_3.outputs.has_patch }}
+          ROUND_3_EVENT: ${{ needs.rework_round_3.outputs.review_event }}
+          ROUND_3_HEAD_SHA: ${{ needs.rework_round_3.outputs.head_sha }}
+        run: |
+          candidate_count=0
+          approved_stage=""
+          approved_head_sha=""
+
+          select_candidate() {
+            stage="$1"
+            result="$2"
+            has_patch="$3"
+            event="$4"
+            head_sha="$5"
+            if [ "$result" != "success" ] || [ "$event" != "APPROVE" ]; then
+              return
+            fi
+            if [ "$has_patch" != "true" ]; then
+              echo "Approved $stage did not produce a validated patch." >&2
+              exit 1
+            fi
+            candidate_count=$((candidate_count + 1))
+            approved_stage="$stage"
+            approved_head_sha="$head_sha"
+          }
+
+          if \
+            [ "$INITIAL_VALIDATE_RESULT" = "success" ] &&
+            [ "$INITIAL_SUBMIT_RESULT" = "success" ]
+          then
+            select_candidate \
+              "initial-review" \
+              "$INITIAL_SUBMIT_RESULT" \
+              "true" \
+              "$INITIAL_EVENT" \
+              "$INITIAL_HEAD_SHA"
+          fi
+          select_candidate \
+            "rework-round-1" \
+            "$ROUND_1_RESULT" \
+            "$ROUND_1_HAS_PATCH" \
+            "$ROUND_1_EVENT" \
+            "$ROUND_1_HEAD_SHA"
+          select_candidate \
+            "rework-round-2" \
+            "$ROUND_2_RESULT" \
+            "$ROUND_2_HAS_PATCH" \
+            "$ROUND_2_EVENT" \
+            "$ROUND_2_HEAD_SHA"
+          select_candidate \
+            "rework-round-3" \
+            "$ROUND_3_RESULT" \
+            "$ROUND_3_HAS_PATCH" \
+            "$ROUND_3_EVENT" \
+            "$ROUND_3_HEAD_SHA"
+
+          if [ "$candidate_count" -ne 1 ]; then
+            echo "Expected exactly one approved terminal review; found $candidate_count." >&2
+            exit 1
+          fi
+          if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] ||
+             ! [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]] ||
+             ! [[ "$approved_head_sha" =~ ^[a-f0-9]{40}$ ]] ||
+             ! [[ "$FIX_BRANCH" =~ ^codex/upstream-review-[a-f0-9]{16}$ ]]
+          then
+            echo "Invalid trusted automatic PR identity." >&2
+            exit 1
+          fi
+
+          expected_pr_url="https://github.com/$GH_REPO/pull/$PR_NUMBER"
+          if [ "$PR_URL" != "$expected_pr_url" ]; then
+            echo "The automatic PR URL does not match its trusted repository and number." >&2
+            exit 1
+          fi
+
+          reviewer_login="$(gh api user --jq .login)"
+          if ! [[ "$reviewer_login" =~ ^[A-Za-z0-9-]{1,39}$ ]] ||
+             [ "$reviewer_login" = "github-actions[bot]" ]
+          then
+            echo "Invalid independent reviewer identity." >&2
+            exit 1
+          fi
+          if ! gh api "repos/$GH_REPO" --jq '
+            .allow_squash_merge == true and
+            .permissions.admin == true
+          ' | grep -qx true
+          then
+            echo "The reviewer identity or repository squash-merge configuration changed." >&2
+            exit 1
+          fi
+
+          protection_path="$RUNNER_TEMP/upstream-review-merge-protection.json"
+          gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection_path"
+          if ! jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            )
+          ' "$protection_path" >/dev/null
+          then
+            echo "The default branch no longer protects exact-head approvals." >&2
+            exit 1
+          fi
+
+          pr_path="$RUNNER_TEMP/upstream-review-approved-pr.json"
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$pr_path"
+          if ! jq -e \
+            --argjson number "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg repo "$GH_REPO" \
+            --arg base_ref "$DEFAULT_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_ref "$FIX_BRANCH" \
+            --arg head_sha "$approved_head_sha" \
+            '
+              .number == $number and
+              .html_url == $url and
+              .state == "open" and
+              .merged == false and
+              .draft == true and
+              .user.login == "github-actions[bot]" and
+              .base.repo.full_name == $repo and
+              .base.ref == $base_ref and
+              .base.sha == $base_sha and
+              .head.repo.full_name == $repo and
+              .head.ref == $head_ref and
+              .head.sha == $head_sha
+            ' \
+            "$pr_path" >/dev/null
+          then
+            echo "The approved automatic PR no longer matches its trusted snapshot." >&2
+            exit 1
+          fi
+
+          reviews_path="$RUNNER_TEMP/upstream-review-approved-reviews.json"
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" > "$reviews_path"
+          if ! jq -e \
+            --arg login "$reviewer_login" \
+            --arg commit "$approved_head_sha" \
+            '
+              [
+                .[] |
+                select(
+                  .user.login == $login and
+                  .commit_id == $commit and
+                  (.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                )
+              ] |
+              sort_by(.submitted_at, .id) |
+              last |
+              .state == "APPROVED"
+            ' \
+            "$reviews_path" >/dev/null
+          then
+            echo "The independent reviewer has not approved the exact terminal head." >&2
+            exit 1
+          fi
+
+          echo "approved_stage=$approved_stage" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$approved_head_sha" >> "$GITHUB_OUTPUT"
+          echo "reviewer_login=$reviewer_login" >> "$GITHUB_OUTPUT"
+
+      - name: Mark ready and squash-merge the approved head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.open_pr.outputs.pr_number }}
+          PR_URL: ${{ needs.open_pr.outputs.pr_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          FIX_BRANCH: ${{ needs.publish.outputs.fix_branch }}
+          BASE_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ steps.approved.outputs.head_sha }}
+          APPROVED_STAGE: ${{ steps.approved.outputs.approved_stage }}
+          REVIEWER_LOGIN: ${{ steps.approved.outputs.reviewer_login }}
+        run: |
+          verify_default_tip() {
+            current_tip="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+            if [ "$current_tip" != "$BASE_SHA" ]; then
+              echo "The default branch changed before the approved PR could be merged." >&2
+              exit 1
+            fi
+          }
+
+          verify_exact_approval() {
+            reviews_path="$1"
+            gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" > "$reviews_path"
+            if ! jq -e \
+              --arg login "$REVIEWER_LOGIN" \
+              --arg commit "$HEAD_SHA" \
+              '
+                [
+                  .[] |
+                  select(
+                    .user.login == $login and
+                    .commit_id == $commit and
+                    (.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                  )
+                ] |
+                sort_by(.submitted_at, .id) |
+                last |
+                .state == "APPROVED"
+              ' \
+              "$reviews_path" >/dev/null
+            then
+              echo "The exact-head approval changed before merge." >&2
+              exit 1
+            fi
+          }
+
+          verify_pr_state() {
+            pr_path="$1"
+            expected_draft="$2"
+            gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$pr_path"
+            jq -e \
+              --argjson number "$PR_NUMBER" \
+              --arg url "$PR_URL" \
+              --arg repo "$GH_REPO" \
+              --arg base_ref "$DEFAULT_BRANCH" \
+              --arg base_sha "$BASE_SHA" \
+              --arg head_ref "$FIX_BRANCH" \
+              --arg head_sha "$HEAD_SHA" \
+              --argjson draft "$expected_draft" \
+              '
+                .number == $number and
+                .html_url == $url and
+                .state == "open" and
+                .merged == false and
+                .draft == $draft and
+                .user.login == "github-actions[bot]" and
+                .base.repo.full_name == $repo and
+                .base.ref == $base_ref and
+                .base.sha == $base_sha and
+                .head.repo.full_name == $repo and
+                .head.ref == $head_ref and
+                .head.sha == $head_sha
+              ' \
+              "$pr_path" >/dev/null
+          }
+
+          verify_default_tip
+          verify_pr_state "$RUNNER_TEMP/upstream-review-before-ready.json" true
+          verify_exact_approval "$RUNNER_TEMP/upstream-review-before-ready-reviews.json"
+
+          jq -n \
+            --arg sha "$HEAD_SHA" \
+            '{sha: $sha, merge_method: "squash"}' \
+            > "$RUNNER_TEMP/upstream-review-merge-request.json"
+
+          ready_transitioned=false
+          restore_draft_on_failure() {
+            exit_code="$?"
+            trap - EXIT
+            if [ "$exit_code" -ne 0 ] && [ "$ready_transitioned" = "true" ]; then
+              set +e
+              gh api "repos/$GH_REPO/pulls/$PR_NUMBER" \
+                > "$RUNNER_TEMP/upstream-review-ready-failure.json"
+              if jq -e \
+                --arg head_sha "$HEAD_SHA" \
+                '
+                  .state == "open" and
+                  .merged == false and
+                  .draft == false and
+                  .head.sha == $head_sha
+                ' \
+                "$RUNNER_TEMP/upstream-review-ready-failure.json" >/dev/null
+              then
+                gh pr ready "$PR_NUMBER" --repo "$GH_REPO" --undo >/dev/null
+              fi
+            fi
+            exit "$exit_code"
+          }
+          trap restore_draft_on_failure EXIT
+
+          gh pr ready "$PR_NUMBER" --repo "$GH_REPO"
+          ready_transitioned=true
+
+          verify_pr_state "$RUNNER_TEMP/upstream-review-after-ready.json" false
+          verify_exact_approval "$RUNNER_TEMP/upstream-review-after-ready-reviews.json"
+          verify_default_tip
+          gh api \
+            --method PUT \
+            "repos/$GH_REPO/pulls/$PR_NUMBER/merge" \
+            --input "$RUNNER_TEMP/upstream-review-merge-request.json" \
+            > "$RUNNER_TEMP/upstream-review-merge-response.json"
+          if ! jq -e '
+            .merged == true and
+            (.sha | type == "string" and test("^[a-f0-9]{40}$"))
+          ' "$RUNNER_TEMP/upstream-review-merge-response.json" >/dev/null
+          then
+            echo "GitHub did not confirm the exact-head squash merge." >&2
+            exit 1
+          fi
+
+          merge_sha="$(jq -r .sha "$RUNNER_TEMP/upstream-review-merge-response.json")"
+          gh api "repos/$GH_REPO/git/commits/$merge_sha" \
+            > "$RUNNER_TEMP/upstream-review-merge-commit.json"
+          if ! jq -e \
+            --arg base_sha "$BASE_SHA" \
+            '
+              (.parents | length) == 1 and
+              .parents[0].sha == $base_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-merge-commit.json" >/dev/null
+          then
+            echo "The squash commit was not created directly on the reviewed base." >&2
+            exit 1
+          fi
+
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" \
+            > "$RUNNER_TEMP/upstream-review-merged-pr.json"
+          if ! jq -e \
+            --arg head_sha "$HEAD_SHA" \
+            '
+              .state == "closed" and
+              .merged == true and
+              .draft == false and
+              .head.sha == $head_sha
+            ' \
+            "$RUNNER_TEMP/upstream-review-merged-pr.json" >/dev/null
+          then
+            echo "The pull request did not reach the expected merged state." >&2
+            exit 1
+          fi
+
+          ready_transitioned=false
+          trap - EXIT
+          {
+            echo "## Approved PR merged"
+            echo
+            echo "- PR: $PR_URL"
+            echo "- Approved stage: \`$APPROVED_STAGE\`"
+            echo "- Reviewed head: \`$HEAD_SHA\`"
+            echo "- Squash commit: \`$merge_sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
