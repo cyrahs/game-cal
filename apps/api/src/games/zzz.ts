@@ -169,7 +169,7 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
-function extractTimeRangeFromContentHtml(html: string): ParsedTimeRange {
+export function extractZzzTimeRangeFromContent(html: string): ParsedTimeRange {
   const text = stripHtml(html);
   if (!text) return { startIso: null, endIso: null };
 
@@ -183,6 +183,16 @@ function extractTimeRangeFromContentHtml(html: string): ParsedTimeRange {
     return {
       startIso: start ? toIsoWithSourceOffset(start, ZZZ_SOURCE_TZ_OFFSET) : null,
       endIso: end ? toIsoWithSourceOffset(end, ZZZ_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  const versionRelativeRange = new RegExp(
+    `(?:\\d+(?:\\.\\d+)+\\s*)?版本更新后\\s*${ZZZ_RANGE_SEPARATOR_PATTERN}\\s*(${ZZZ_DATE_TIME_PATTERN})`
+  ).exec(text);
+  if (versionRelativeRange?.[1]) {
+    return {
+      startIso: null,
+      endIso: toSourceIsoFromDateTimeCandidate(versionRelativeRange[1]),
     };
   }
 
@@ -253,7 +263,7 @@ function parseGachaEventsFromAnnContent(
     const title = stripHtml(it.title);
     if (!isGachaEventTitle("zzz", title)) continue;
 
-    const { startIso, endIso } = extractTimeRangeFromContentHtml(it.content ?? "");
+    const { startIso, endIso } = extractZzzTimeRangeFromContent(it.content ?? "");
     const resolvedStart =
       startIso ??
       resolveVersionRelativeStartIso(it.content, {
@@ -349,7 +359,7 @@ function parseSupplementalActivityEventsFromAnnContent(
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
     const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
-    const { startIso, endIso } = extractTimeRangeFromContentHtml(contentItem?.content ?? "");
+    const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "");
     const resolvedStart =
       startIso ??
       resolveVersionRelativeStartIso(contentItem?.content, {
