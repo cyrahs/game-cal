@@ -12,6 +12,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
 } from "./starrail.js";
+import { extractZzzTimeRangeFromContent } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -325,4 +326,18 @@ test("Star Rail derives a nearby same-major version start from an explicit maint
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("ZZZ keeps a version-relative gacha end ahead of later phase dates", () => {
+  const range = extractZzzTimeRangeFromContent(
+    [
+      "<p>活动时间：3.1版本更新后 ~ 2026/09/08 14:59（服务器时间）</p>",
+      "<p>2026/08/19 11:59</p>",
+    ].join("")
+  );
+
+  assert.deepEqual(range, {
+    startIso: null,
+    endIso: "2026-09-08T14:59:00+08:00",
+  });
 });
