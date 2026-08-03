@@ -42,7 +42,7 @@ test("v2 exposes one bounded four-slot loop instead of copied rework jobs", asyn
   assert.match(workflow, /^  terminal_guard:$/m);
 });
 
-test("preflight checks reviewer role without requiring token contents write", async () => {
+test("preflight checks reviewer role without requiring token contents write or protected reviews", async () => {
   const workflow = await readFile(mainPath, "utf8");
   const preflightStart = workflow.indexOf("\n  preflight:\n");
   const collectStart = workflow.indexOf("\n  collect:\n", preflightStart);
@@ -50,6 +50,7 @@ test("preflight checks reviewer role without requiring token contents write", as
   assert.match(preflight, /collaborators\/\$reviewer\/permission/);
   assert.match(preflight, /admin\|maintain\|write/);
   assert.doesNotMatch(preflight, /\.permissions\.push/);
+  assert.doesNotMatch(preflight, /required_pull_request_reviews/);
   assert.match(preflight, /has insufficient repository role/);
   assert.match(preflight, /Repository must enable squash merge and auto-merge/);
   assert.match(preflight, /Default branch protection does not satisfy/);

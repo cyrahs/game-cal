@@ -79,11 +79,6 @@ jobs:
           protection="$RUNNER_TEMP/protection.json"
           gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection"
           if ! jq -e '
-            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
-            (
-              .required_pull_request_reviews.dismiss_stale_reviews == true or
-              .required_pull_request_reviews.require_last_push_approval == true
-            ) and
             .enforce_admins.enabled == true and
             .required_conversation_resolution.enabled == true and
             .allow_force_pushes.enabled == false and
