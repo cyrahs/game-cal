@@ -253,6 +253,12 @@ merge，随后 Issue 关闭为 completed；即使初始 fix agent 曾返回 `not
 使用 `Refs #N`，也不会把已经由终态重放证明解决的 Issue 留在 Open。验证未解决、
 artifact 漂移或 merge 失败时不会合并，Issue 保持 Open。
 
+批准后的 continuation gate 显式使用 job-level `always()`，同时逐项要求上游 job
+为 `success`，避免正常跳过的 rework 分支把 runtime 验证与 merge 链路一并跳过。
+`assert_approved_pr_finalized` 在自动 PR 已获批后始终核对 runtime collection、终态
+验证、squash merge 和 Issue 收尾；任一环节未完成都会让 workflow 明确失败，不能以
+绿色状态留下 Draft PR。
+
 终态 replay 会为每个目标游戏冻结一份共享的 `patched_api_snapshots`，同一游戏的所有
 finding 都从这份获批 head API 快照判断，而不是各自依赖可能为空的局部候选列表。每份
 快照最多保存 60 条 event；若 API 报告的总数更多，快照标记为 `truncated`。需要用完整

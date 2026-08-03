@@ -6376,3 +6376,62 @@ test("final remediation Issue job survives intentionally skipped rework branches
     /needs\.finalize_approved_pr\.outputs\.merged == 'true'/
   );
 });
+
+test("approved PR continuation gates survive skipped rework branches and reject false-green completion", async () => {
+  const workflow = await fs.readFile(
+    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    "utf8"
+  );
+  const collectStart = workflow.indexOf(
+    "\n  collect_approved_runtime_input:\n"
+  );
+  const verifyStart = workflow.indexOf(
+    "\n  verify_approved_runtime_input:\n",
+    collectStart
+  );
+  const finalizePrStart = workflow.indexOf(
+    "\n  finalize_approved_pr:\n",
+    verifyStart
+  );
+  const guardStart = workflow.indexOf(
+    "\n  assert_approved_pr_finalized:\n",
+    finalizePrStart
+  );
+
+  assert.notEqual(collectStart, -1);
+  assert.notEqual(verifyStart, -1);
+  assert.notEqual(finalizePrStart, -1);
+  assert.notEqual(guardStart, -1);
+
+  const collectJob = workflow.slice(collectStart, verifyStart);
+  const verifyJob = workflow.slice(verifyStart, finalizePrStart);
+  const guardJob = workflow.slice(guardStart);
+
+  for (const job of [collectJob, verifyJob, guardJob]) {
+    const conditionStart = job.indexOf("    if: >-\n");
+    const conditionEnd = job.indexOf("    runs-on:", conditionStart);
+    assert.notEqual(conditionStart, -1);
+    assert.notEqual(conditionEnd, -1);
+    assert.match(
+      job.slice(conditionStart, conditionEnd),
+      /^    if: >-\n      always\(\) &&\n/
+    );
+  }
+
+  assert.match(
+    guardJob,
+    /needs:\n(?:      - .*\n)*      - finalize_remediation_issue\n/
+  );
+  assert.match(guardJob, /permissions: \{\}/);
+  assert.match(
+    guardJob,
+    /COLLECT_RESULT: \$\{\{ needs\.collect_approved_runtime_input\.result \}\}/
+  );
+  assert.match(
+    guardJob,
+    /FINALIZE_ISSUE_RESULT: \$\{\{ needs\.finalize_remediation_issue\.result \}\}/
+  );
+  assert.match(guardJob, /\[ "\$MERGED" != "true" \]/);
+  assert.match(guardJob, /\^\[a-f0-9\]\{40\}\$/);
+  assert.match(guardJob, /exit 1/);
+});
