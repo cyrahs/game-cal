@@ -27,15 +27,16 @@ ends with a failing terminal guard; it cannot appear green.
 
 The default branch protection must have all of the following:
 
-- at least one approving review;
-- stale approvals dismissed or approval required after the latest push;
 - required status `upstream-agentic/validate`;
 - conversation resolution required;
 - administrators included;
 - force pushes and branch deletion disabled.
 
 Repository settings must enable squash merge and pull-request auto-merge. The workflow
-does not use administrator bypass.
+does not use administrator bypass. Branch protection intentionally does not require a
+review so a single maintainer can merge their own ordinary PRs after the required status
+passes. Agentic remediation PRs still cannot reach auto-merge until the workflow submits
+and verifies an exact-head review from the independent reviewer token.
 
 `upstream-agentic-pr-gate.yml` produces the same required
 `upstream-agentic/validate` context for every pull request into `main`. Agentic repair
@@ -52,10 +53,12 @@ not originate from the remediation workflow.
 - `UPSTREAM_REVIEW_APPROVAL_TOKEN`
 
 `UPSTREAM_REVIEW_APPROVAL_TOKEN` must belong to an identity different from
-`github-actions[bot]`, have repository push/PR review access, and be able to submit an
-approval that satisfies branch protection. It is only exposed to the review-submission
-and policy-verification steps. Repair, validation, code-review model, and runtime-review
-model jobs never receive it.
+`github-actions[bot]`, whose repository role is `write`, `maintain`, or `admin`, and be
+able to submit the exact-head approval verified by the workflow. For a fine-grained token,
+the minimal repository permissions are Administration (read), Commit statuses (read),
+Contents (read), Metadata (read), and Pull requests (write). It is only exposed to the
+review-submission and policy-verification steps. Repair, validation, code-review model,
+and runtime-review model jobs never receive it.
 
 The recommended production replacement is a short-lived installation token from a
 dedicated Reviewer GitHub App. The built-in `GITHUB_TOKEN` remains the Writer/Merger
