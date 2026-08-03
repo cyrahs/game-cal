@@ -341,3 +341,35 @@ test("ZZZ keeps a version-relative gacha end ahead of later phase dates", () => 
     endIso: "2026-09-08T14:59:00+08:00",
   });
 });
+
+test("ZZZ resolves version-relative ends for supplemental activity notices", () => {
+  const versionEndByLabel = new Map([["3.1", "2026-09-09T06:00:00+08:00"]]);
+  const notices = [
+    {
+      title: "法厄同年度大揭秘",
+      content: "【活动时间】 3.1版本更新后 ~ 3.1版本结束 【活动奖励】",
+    },
+    {
+      title: "潜能预演·狩猎游戏",
+      content: "【活动时间】 3.1版本更新后 ~ 3.1版本结束 【参与条件】",
+    },
+    {
+      title: "点映返礼",
+      content: "【活动时间】 3.1版本更新后 ~3.1版本结束 【活动奖励】",
+    },
+  ];
+
+  for (const notice of notices) {
+    const range = extractZzzTimeRangeFromContent(notice.content, {
+      versionEndByLabel,
+    });
+    assert.deepEqual(
+      range,
+      {
+        startIso: null,
+        endIso: "2026-09-09T06:00:00+08:00",
+      },
+      notice.title
+    );
+  }
+});
