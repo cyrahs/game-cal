@@ -37,6 +37,12 @@ The default branch protection must have all of the following:
 Repository settings must enable squash merge and pull-request auto-merge. The workflow
 does not use administrator bypass.
 
+`upstream-agentic-pr-gate.yml` produces the same required
+`upstream-agentic/validate` context for every pull request into `main`. Agentic repair
+PRs also receive an exact-head commit status with that context from the bounded attempt
+validator. This prevents the required status from blocking ordinary human PRs that do
+not originate from the remediation workflow.
+
 ## Required secrets
 
 - `OPENAI_API_KEY`

@@ -4,6 +4,10 @@ import test from "node:test";
 
 const mainPath = new URL("../.github/workflows/upstream-review-v2.yml", import.meta.url);
 const attemptPath = new URL("../.github/workflows/upstream-agentic-attempt.yml", import.meta.url);
+const pullRequestGatePath = new URL(
+  "../.github/workflows/upstream-agentic-pr-gate.yml",
+  import.meta.url
+);
 const archiveMainPath = new URL(
   "../.github/workflow-archive/upstream-review.v1.yml.disabled",
   import.meta.url
@@ -114,4 +118,24 @@ test("blocked or incomplete cycles make the workflow fail truthfully", async () 
   assert.match(guard, /DISPOSITION:/);
   assert.match(guard, /The workflow did not merge and intentionally reports failure/);
   assert.match(guard, /exit 1/);
+});
+
+test("every pull request into main receives the required validation context", async () => {
+  const workflow = await readFile(pullRequestGatePath, "utf8");
+  assert.match(workflow, /^name: Upstream Agentic Validation Gate$/m);
+  assert.match(workflow, /^  pull_request:$/m);
+  assert.match(workflow, /branches:\n      - main/);
+  assert.match(workflow, /^    name: upstream-agentic\/validate$/m);
+  assert.match(workflow, /permissions:\n  contents: read/);
+  assert.match(workflow, /persist-credentials: false/);
+  for (const command of [
+    "pnpm install --frozen-lockfile",
+    "pnpm test:upstream-review",
+    "pnpm test:game-parsers",
+    "pnpm typecheck",
+    "pnpm build",
+  ]) {
+    assert.ok(workflow.includes(command), `missing PR gate command: ${command}`);
+  }
+  assert.doesNotMatch(workflow, /secrets\.|contents: write|pull-requests: write/);
 });

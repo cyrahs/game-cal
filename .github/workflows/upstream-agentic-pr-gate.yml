@@ -1,0 +1,48 @@
+name: Upstream Agentic Validation Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: upstream-agentic-pr-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: upstream-agentic/validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - name: Install trusted dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test workflow safeguards
+        run: pnpm test:upstream-review
+
+      - name: Test parser regressions
+        run: pnpm test:game-parsers
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
