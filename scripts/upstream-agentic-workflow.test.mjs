@@ -51,8 +51,8 @@ test("preflight checks reviewer role without requiring token contents write or p
   assert.match(preflight, /admin\|maintain\|write/);
   assert.doesNotMatch(preflight, /\.permissions\.push/);
   assert.doesNotMatch(preflight, /required_pull_request_reviews/);
+  assert.doesNotMatch(preflight, /allow_squash_merge|allow_auto_merge/);
   assert.match(preflight, /has insufficient repository role/);
-  assert.match(preflight, /Repository must enable squash merge and auto-merge/);
   assert.match(preflight, /Default branch protection does not satisfy/);
   assert.match(preflight, /Default branch moved during preflight/);
 });

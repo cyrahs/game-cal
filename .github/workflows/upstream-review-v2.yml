@@ -69,13 +69,6 @@ jobs:
               ;;
           esac
 
-          repository="$RUNNER_TEMP/repository.json"
-          gh api "repos/$GH_REPO" > "$repository"
-          if ! jq -e '.allow_squash_merge == true and .allow_auto_merge == true' "$repository" >/dev/null; then
-            echo "Repository must enable squash merge and auto-merge" >&2
-            exit 1
-          fi
-
           protection="$RUNNER_TEMP/protection.json"
           gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection"
           if ! jq -e '
