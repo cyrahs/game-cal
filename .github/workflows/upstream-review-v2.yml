@@ -53,16 +53,32 @@ jobs:
           fi
 
           reviewer="$(gh api user --jq .login)"
-          test "$reviewer" != github-actions[bot]
+          if [ "$reviewer" = github-actions[bot] ]; then
+            echo "UPSTREAM_REVIEW_APPROVAL_TOKEN must use an independent reviewer identity" >&2
+            exit 1
+          fi
+
+          reviewer_permission="$(
+            gh api "repos/$GH_REPO/collaborators/$reviewer/permission" --jq '.permission // "none"'
+          )"
+          case "$reviewer_permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "Independent reviewer $reviewer has insufficient repository role: $reviewer_permission" >&2
+              exit 1
+              ;;
+          esac
+
           repository="$RUNNER_TEMP/repository.json"
           gh api "repos/$GH_REPO" > "$repository"
-          permission="$(jq -r '.permissions.push // false' "$repository")"
-          test "$permission" = true
-          jq -e '.allow_squash_merge == true and .allow_auto_merge == true' "$repository" >/dev/null
+          if ! jq -e '.allow_squash_merge == true and .allow_auto_merge == true' "$repository" >/dev/null; then
+            echo "Repository must enable squash merge and auto-merge" >&2
+            exit 1
+          fi
 
           protection="$RUNNER_TEMP/protection.json"
           gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection"
-          jq -e '
+          if ! jq -e '
             (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
             (
               .required_pull_request_reviews.dismiss_stale_reviews == true or
@@ -76,9 +92,17 @@ jobs:
               ((.required_status_checks.contexts // []) | index("upstream-agentic/validate")) != null or
               ([.required_status_checks.checks[]?.context] | index("upstream-agentic/validate")) != null
             )
-          ' "$protection" >/dev/null
-          test "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" = "$BASE_SHA"
-          echo "Independent reviewer: $reviewer" >> "$GITHUB_STEP_SUMMARY"
+          ' "$protection" >/dev/null; then
+            echo "Default branch protection does not satisfy the agentic merge policy" >&2
+            exit 1
+          fi
+
+          current_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+          if [ "$current_sha" != "$BASE_SHA" ]; then
+            echo "Default branch moved during preflight: expected $BASE_SHA, found $current_sha" >&2
+            exit 1
+          fi
+          echo "Independent reviewer: $reviewer ($reviewer_permission)" >> "$GITHUB_STEP_SUMMARY"
 
   collect:
     needs: preflight
