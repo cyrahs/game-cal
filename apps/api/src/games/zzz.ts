@@ -71,6 +71,11 @@ type ParsedTimeRange = {
   endIso: string | null;
 };
 
+type ZzzTimeRangeOptions = {
+  fallbackEndIso?: string | null;
+  versionEndByLabel?: Map<string, string>;
+};
+
 function pickBestCandidate(
   activityTitle: string,
   candidates: ContentCandidate[]
@@ -169,7 +174,10 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
-export function extractZzzTimeRangeFromContent(html: string): ParsedTimeRange {
+export function extractZzzTimeRangeFromContent(
+  html: string,
+  opts: ZzzTimeRangeOptions = {}
+): ParsedTimeRange {
   const text = stripHtml(html);
   if (!text) return { startIso: null, endIso: null };
 
@@ -205,7 +213,15 @@ export function extractZzzTimeRangeFromContent(html: string): ParsedTimeRange {
     seen.add(v);
     all.push(v);
   }
-  if (all.length === 0) return { startIso: null, endIso: null };
+  if (all.length === 0) {
+    return {
+      startIso: null,
+      endIso: resolveVersionRelativeEndIso(html, {
+        versionEndByLabel: opts.versionEndByLabel ?? new Map(),
+        fallbackEndIso: opts.fallbackEndIso ?? null,
+      }),
+    };
+  }
   if (all.length === 1) {
     return {
       startIso: null,
@@ -248,6 +264,24 @@ function resolveVersionRelativeStartIso(
   }
 
   return opts.fallbackStartIso;
+}
+
+function resolveVersionRelativeEndIso(
+  content: string | undefined,
+  opts: {
+    versionEndByLabel: Map<string, string>;
+    fallbackEndIso: string | null;
+  }
+): string | null {
+  const text = stripHtml(content);
+  if (!text || !/版本结束(?:前)?/.test(text)) return null;
+
+  const versionLabel = /(\d+(?:\.\d+)+)\s*版本结束(?:前)?/.exec(text)?.[1];
+  if (versionLabel) {
+    return opts.versionEndByLabel.get(versionLabel) ?? null;
+  }
+
+  return opts.fallbackEndIso;
 }
 
 function parseGachaEventsFromAnnContent(
@@ -345,7 +379,9 @@ function parseSupplementalActivityEventsFromAnnContent(
   contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>,
   opts: {
     fallbackStartIso: string | null;
+    fallbackEndIso: string | null;
     versionMaintenanceEndByLabel: Map<string, string>;
+    versionEndByLabel: Map<string, string>;
     existingTitleKeys: Set<string>;
   }
 ): CalendarEvent[] {
@@ -359,7 +395,10 @@ function parseSupplementalActivityEventsFromAnnContent(
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
     const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
-    const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "");
+    const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "", {
+      fallbackEndIso: opts.fallbackEndIso,
+      versionEndByLabel: opts.versionEndByLabel,
+    });
     const resolvedStart =
       startIso ??
       resolveVersionRelativeStartIso(contentItem?.content, {
@@ -508,6 +547,24 @@ function buildVersionMaintenanceEndByLabel(
   return out;
 }
 
+function buildVersionEndByLabel(items: MihoyoNapAnnItem[]): Map<string, string> {
+  const out = new Map<string, string>();
+
+  for (const item of items) {
+    if (!isVersionNoticeText(item.title ?? "") && !isVersionNoticeText(item.subtitle ?? "")) {
+      continue;
+    }
+    if (!item.end_time) continue;
+
+    const endIso = toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET);
+    if (!Number.isFinite(Date.parse(endIso))) continue;
+
+    for (const label of extractVersionLabels(item)) out.set(label, endIso);
+  }
+
+  return out;
+}
+
 async function fetchZzzAnnouncementCategories(env: RuntimeEnv): Promise<MihoyoNapAnnCategory[]> {
   if (env.ZZZ_SNAPSHOT_API_URL?.trim()) {
     const snapshot = await getZzzSnapshotBundle(env);
@@ -594,6 +651,9 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     categories.flatMap((category) => category.list ?? []),
     contentItemsByAnnId
   );
+  const versionEndByLabel = buildVersionEndByLabel(
+    categories.flatMap((category) => category.list ?? [])
+  );
 
   const list = activityRes.data?.activity_list ?? [];
   const normalEvents = list
@@ -639,7 +699,9 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     contentItemsByAnnId,
     {
       fallbackStartIso,
+      fallbackEndIso: versionNotice?.endIso ?? null,
       versionMaintenanceEndByLabel,
+      versionEndByLabel,
       existingTitleKeys: new Set(normalEvents.map((event) => normalizeTitleKey(event.title))),
     }
   );
