@@ -1826,12 +1826,30 @@ jobs:
             exit 1
           fi
 
-          merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
-          if ! gh api "repos/$GH_REPO" > "$merge_repository_path"; then
-            echo "The repository merge configuration could not be verified with the approval token." >&2
+          repository_owner="${GH_REPO%%/*}"
+          repository_name="${GH_REPO#*/}"
+          merge_policy_path="$RUNNER_TEMP/upstream-review-merge-policy.json"
+          if ! gh api graphql \
+            -f query='query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                squashMergeAllowed
+              }
+            }' \
+            -F owner="$repository_owner" \
+            -F name="$repository_name" \
+            > "$merge_policy_path"
+          then
+            echo "The repository merge configuration could not be queried with the approval token." >&2
             exit 1
           fi
-          if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
+          if ! jq -e '
+            (.data.repository.squashMergeAllowed | type) == "boolean"
+          ' "$merge_policy_path" >/dev/null
+          then
+            echo "The repository merge configuration response omitted squashMergeAllowed." >&2
+            exit 1
+          fi
+          if ! jq -e '.data.repository.squashMergeAllowed == true' "$merge_policy_path" >/dev/null; then
             echo "Squash merge is no longer enabled for $GH_REPO." >&2
             exit 1
           fi
@@ -2364,12 +2382,30 @@ jobs:
             echo "The default branch no longer protects exact-head approvals." >&2
             exit 1
           fi
-          merge_repository_path="$RUNNER_TEMP/upstream-review-merge-repository.json"
-          if ! gh api "repos/$GH_REPO" > "$merge_repository_path"; then
-            echo "The repository merge configuration could not be verified with the approval token." >&2
+          repository_owner="${GH_REPO%%/*}"
+          repository_name="${GH_REPO#*/}"
+          merge_policy_path="$RUNNER_TEMP/upstream-review-merge-policy.json"
+          if ! gh api graphql \
+            -f query='query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                squashMergeAllowed
+              }
+            }' \
+            -F owner="$repository_owner" \
+            -F name="$repository_name" \
+            > "$merge_policy_path"
+          then
+            echo "The repository merge configuration could not be queried with the approval token." >&2
             exit 1
           fi
-          if ! jq -e '.allow_squash_merge == true' "$merge_repository_path" >/dev/null; then
+          if ! jq -e '
+            (.data.repository.squashMergeAllowed | type) == "boolean"
+          ' "$merge_policy_path" >/dev/null
+          then
+            echo "The repository merge configuration response omitted squashMergeAllowed." >&2
+            exit 1
+          fi
+          if ! jq -e '.data.repository.squashMergeAllowed == true' "$merge_policy_path" >/dev/null; then
             echo "Squash merge is no longer enabled for $GH_REPO." >&2
             exit 1
           fi

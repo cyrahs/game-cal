@@ -376,8 +376,10 @@ base 上已有当前 cycle 的 Open PR 时停止重复创建；默认分支因�
 创建 PR；因为 GitHub 禁止 PR 作者自审，最终 review 必须使用上面的独立 token。
 `finalize_approved_pr` 则用单独 job 中显式声明的 `pull-requests: write` 将 Draft
 转为 Ready，并用 `contents: write` 完成 squash merge，无需新增 merge token。仓库
-必须允许 workflow 请求这些写权限，并启用 squash merge。最终合并前也由这个
-`GITHUB_TOKEN` 读取 merge 配置；独立 reviewer token 无需获得 Contents 权限。
+必须允许 workflow 请求这些写权限，并启用 squash merge。最终合并前由独立 reviewer
+token 通过 GraphQL 的 `squashMergeAllowed` 读取 merge 配置，避免 REST 仓库响应在
+受限 token 下省略 `allow_squash_merge`；`GITHUB_TOKEN` 只执行 Ready 和 merge 写操作，
+独立 reviewer token 无需获得 Contents 权限。
 
 自动批准还要求默认分支启用保护规则：打开
 `Settings → Branches → Branch protection rules`，为 `main` 开启

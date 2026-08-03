@@ -6314,15 +6314,27 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
   );
   assert.match(
     approvalStep,
-    /if ! gh api "repos\/\$GH_REPO" > "\$merge_repository_path"; then/
+    /if ! gh api graphql \\\s+-f query='query\(\$owner: String!, \$name: String!\)/
   );
   assert.match(
     approvalStep,
-    /jq -e '\.allow_squash_merge == true' "\$merge_repository_path"/
+    /-F owner="\$repository_owner" \\\s+-F name="\$repository_name" \\\s+> "\$merge_policy_path"/
   );
   assert.doesNotMatch(
     approvalStep,
-    /\.allow_squash_merge == true and\s+\.permissions\.admin == true/
+    /\.allow_squash_merge|merge_repository_path/
+  );
+  assert.equal(
+    approvalStep.match(
+      /\(\.data\.repository\.squashMergeAllowed \| type\) == "boolean"/g
+    )?.length,
+    2
+  );
+  assert.equal(
+    approvalStep.match(
+      /\.data\.repository\.squashMergeAllowed == true/g
+    )?.length,
+    2
   );
   assert.deepEqual(
     approvalStep.match(
@@ -6330,10 +6342,9 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
     ),
     [
       'gh api "repos/$GH_REPO" > "$reviewer_repository_path"',
-      'gh api "repos/$GH_REPO" > "$merge_repository_path"',
-      'gh api "repos/$GH_REPO" > "$merge_repository_path"',
     ]
   );
+  assert.equal(approvalStep.match(/gh api graphql/g)?.length, 2);
 });
 
 test("final remediation Issue job survives intentionally skipped rework branches", async () => {
