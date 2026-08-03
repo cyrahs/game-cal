@@ -1942,6 +1942,7 @@ jobs:
       - open_pr
       - resolve_approved_snapshot
     if: >-
+      always() &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       needs.publish.result == 'success' &&
       needs.open_pr.result == 'success' &&
@@ -2189,6 +2190,7 @@ jobs:
       - resolve_approved_snapshot
       - collect_approved_runtime_input
     if: >-
+      always() &&
       needs.resolve_approved_snapshot.result == 'success' &&
       needs.collect_approved_runtime_input.result == 'success'
     runs-on: ubuntu-latest
@@ -2672,3 +2674,64 @@ jobs:
           UPSTREAM_REVIEW_APPROVED_STAGE: ${{ needs.finalize_approved_pr.outputs.approved_stage }}
           UPSTREAM_REVIEW_ALL_FINDINGS_ADDRESSED: ${{ needs.open_pr.outputs.all_findings_addressed }}
         run: node scripts/review-upstream.mjs --finalize-remediation-issue
+
+  assert_approved_pr_finalized:
+    needs:
+      - open_pr
+      - resolve_approved_snapshot
+      - collect_approved_runtime_input
+      - verify_approved_runtime_input
+      - finalize_approved_pr
+      - finalize_remediation_issue
+    if: >-
+      always() &&
+      needs.open_pr.result == 'success' &&
+      needs.resolve_approved_snapshot.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject incomplete approved PR finalization
+        env:
+          COLLECT_RESULT: ${{ needs.collect_approved_runtime_input.result }}
+          VERIFY_RESULT: ${{ needs.verify_approved_runtime_input.result }}
+          VERIFICATION_STATUS: ${{ needs.verify_approved_runtime_input.outputs.verification_status }}
+          FINALIZE_PR_RESULT: ${{ needs.finalize_approved_pr.result }}
+          MERGED: ${{ needs.finalize_approved_pr.outputs.merged }}
+          MERGE_SHA: ${{ needs.finalize_approved_pr.outputs.merge_sha }}
+          FINALIZE_ISSUE_RESULT: ${{ needs.finalize_remediation_issue.result }}
+        run: |
+          failures=()
+          if [ "$COLLECT_RESULT" != "success" ]; then
+            failures+=("approved runtime collection: $COLLECT_RESULT")
+          fi
+          if [ "$VERIFY_RESULT" != "success" ] ||
+             [ "$VERIFICATION_STATUS" != "resolved" ]
+          then
+            failures+=("approved runtime verification: $VERIFY_RESULT/$VERIFICATION_STATUS")
+          fi
+          if [ "$FINALIZE_PR_RESULT" != "success" ] ||
+             [ "$MERGED" != "true" ] ||
+             ! [[ "$MERGE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          then
+            failures+=("approved PR merge: $FINALIZE_PR_RESULT/$MERGED/$MERGE_SHA")
+          fi
+          if [ "$FINALIZE_ISSUE_RESULT" != "success" ]; then
+            failures+=("remediation Issue finalization: $FINALIZE_ISSUE_RESULT")
+          fi
+
+          if [ "${#failures[@]}" -ne 0 ]; then
+            {
+              echo "## Approved PR finalization incomplete"
+              echo
+              printf -- "- %s\n" "${failures[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf "Approved PR finalization incomplete: %s\n" "${failures[*]}" >&2
+            exit 1
+          fi
+
+          {
+            echo "## Approved PR finalization complete"
+            echo
+            echo "- Squash commit: \`$MERGE_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
