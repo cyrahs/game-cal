@@ -32,11 +32,14 @@ The default branch protection must have all of the following:
 - administrators included;
 - force pushes and branch deletion disabled.
 
-Repository settings must enable squash merge and pull-request auto-merge. The workflow
-does not use administrator bypass. Branch protection intentionally does not require a
-review so a single maintainer can merge their own ordinary PRs after the required status
-passes. Agentic remediation PRs still cannot reach auto-merge until the workflow submits
-and verifies an exact-head review from the independent reviewer token.
+Repository settings must enable squash merge and pull-request auto-merge; finalization
+fails truthfully if GitHub rejects native auto-merge. The preflight does not infer these
+settings from the fine-grained reviewer token's repository response because those fields
+are not reliably exposed. The workflow does not use administrator bypass. Branch
+protection intentionally does not require a review so a single maintainer can merge their
+own ordinary PRs after the required status passes. Agentic remediation PRs still cannot
+reach auto-merge until the workflow submits and verifies an exact-head review from the
+independent reviewer token.
 
 `upstream-agentic-pr-gate.yml` produces the same required
 `upstream-agentic/validate` context for every pull request into `main`. Agentic repair
