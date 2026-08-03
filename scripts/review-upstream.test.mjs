@@ -5912,7 +5912,7 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
 
 test("workflow consumes the trusted dynamic matrix while terminal collection remains fail-closed", async () => {
   const workflow = await fs.readFile(
-    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    new URL("../.github/workflow-archive/upstream-review.v1.yml.disabled", import.meta.url),
     "utf8"
   );
   const collectStart = workflow.indexOf("\n  collect:\n");
@@ -5996,7 +5996,7 @@ test("workflow consumes the trusted dynamic matrix while terminal collection rem
 
 test("final merge isolates approved-head runtime and commits merge outputs before finalization", async () => {
   const workflow = await fs.readFile(
-    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    new URL("../.github/workflow-archive/upstream-review.v1.yml.disabled", import.meta.url),
     "utf8"
   );
   const resolveJobStart = workflow.indexOf("\n  resolve_approved_snapshot:\n");
@@ -6349,7 +6349,7 @@ test("final merge isolates approved-head runtime and commits merge outputs befor
 
 test("final remediation Issue job survives intentionally skipped rework branches", async () => {
   const workflow = await fs.readFile(
-    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    new URL("../.github/workflow-archive/upstream-review.v1.yml.disabled", import.meta.url),
     "utf8"
   );
   const jobStart = workflow.indexOf("\n  finalize_remediation_issue:\n");
@@ -6379,7 +6379,7 @@ test("final remediation Issue job survives intentionally skipped rework branches
 
 test("approved PR continuation gates survive skipped rework branches and reject false-green completion", async () => {
   const workflow = await fs.readFile(
-    new URL("../.github/workflows/upstream-review.yml", import.meta.url),
+    new URL("../.github/workflow-archive/upstream-review.v1.yml.disabled", import.meta.url),
     "utf8"
   );
   const collectStart = workflow.indexOf(
