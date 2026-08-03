@@ -1,0 +1,641 @@
+name: Upstream Agentic Review v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_code_attempts:
+        description: Total candidate generations, including the initial attempt
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+
+concurrency:
+  group: upstream-agentic-review-v2
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ZZZ_SNAPSHOT_API_URL: https://gamecal.nv5.me/api/upstream/zzz/snapshot
+
+jobs:
+  preflight:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Verify model configuration and independent reviewer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          missing=()
+          for name in OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL OPENAI_REASONING_EFFORT GH_TOKEN; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing required configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+
+          reviewer="$(gh api user --jq .login)"
+          test "$reviewer" != github-actions[bot]
+          repository="$RUNNER_TEMP/repository.json"
+          gh api "repos/$GH_REPO" > "$repository"
+          permission="$(jq -r '.permissions.push // false' "$repository")"
+          test "$permission" = true
+          jq -e '.allow_squash_merge == true and .allow_auto_merge == true' "$repository" >/dev/null
+
+          protection="$RUNNER_TEMP/protection.json"
+          gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$protection"
+          jq -e '
+            (.required_pull_request_reviews.required_approving_review_count // 0) >= 1 and
+            (
+              .required_pull_request_reviews.dismiss_stale_reviews == true or
+              .required_pull_request_reviews.require_last_push_approval == true
+            ) and
+            .enforce_admins.enabled == true and
+            .required_conversation_resolution.enabled == true and
+            .allow_force_pushes.enabled == false and
+            .allow_deletions.enabled == false and
+            (
+              ((.required_status_checks.contexts // []) | index("upstream-agentic/validate")) != null or
+              ([.required_status_checks.checks[]?.context] | index("upstream-agentic/validate")) != null
+            )
+          ' "$protection" >/dev/null
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" = "$BASE_SHA"
+          echo "Independent reviewer: $reviewer" >> "$GITHUB_STEP_SUMMARY"
+
+  collect:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      review_matrix: ${{ steps.collect.outputs.review_matrix }}
+      collection_status: ${{ steps.collect.outputs.collection_status }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start trusted local API
+        run: nohup pnpm --filter @game-cal/api exec tsx src/index.ts > "$RUNNER_TEMP/api.log" 2>&1 &
+
+      - name: Wait for API
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          tail -n 200 "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Freeze upstream review input
+        id: collect
+        env:
+          ZZZ_SNAPSHOT_API_URL: http://127.0.0.1:8787/api/upstream/zzz/snapshot
+          UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: pnpm review:upstream:collect
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-review-input
+          path: artifacts/upstream-review-input.json
+          if-no-files-found: error
+
+      - name: Upload collector diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-collector-log
+          path: ${{ runner.temp }}/api.log
+          if-no-files-found: warn
+
+  discover:
+    needs: collect
+    name: Discover ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.collect.outputs.review_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-agentic-review-input
+          path: artifacts
+
+      - name: Extract one game
+        env:
+          UPSTREAM_REVIEW_GAME: ${{ matrix.game }}
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: node scripts/review-upstream.mjs --extract-game
+
+      - name: Review frozen evidence with Codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review.md
+          output-schema-file: .github/schemas/upstream-review-output.schema.json
+          output-file: artifacts/upstream-review-agent-${{ matrix.game }}.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-discovery-${{ matrix.game }}
+          path: artifacts/upstream-review-agent-${{ matrix.game }}.json
+          if-no-files-found: error
+
+  confirmation_plan:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_candidates: ${{ steps.plan.outputs.has_candidates }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-agentic-review-input
+          path: artifacts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: upstream-agentic-discovery-*
+          path: artifacts/agent-reviews
+          merge-multiple: true
+
+      - name: Build bounded confirmation plan
+        id: plan
+        env:
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+          UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_INPUT_DIR: artifacts/confirmation
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+        run: node scripts/review-upstream.mjs --prepare-confirmation
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-confirmation-plan
+          path: artifacts/confirmation
+          if-no-files-found: error
+
+  confirm:
+    needs: confirmation_plan
+    if: needs.confirmation_plan.outputs.has_candidates == 'true'
+    name: Confirm ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.confirmation_plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-agentic-confirmation-plan
+          path: artifacts/confirmation
+
+      - name: Place one confirmation shard
+        run: cp "artifacts/confirmation/upstream-review-confirm-input-${{ matrix.game }}.json" artifacts/upstream-review-confirm-input.json
+
+      - name: Independently confirm findings
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-confirm.md
+          output-schema-file: .github/schemas/upstream-review-confirm-output.schema.json
+          output-file: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-confirmation-${{ matrix.game }}
+          path: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          if-no-files-found: error
+
+  publish_findings:
+    needs:
+      - confirmation_plan
+      - confirm
+    if: >-
+      always() &&
+      needs.confirmation_plan.result == 'success' &&
+      (
+        needs.confirmation_plan.outputs.has_candidates == 'false' ||
+        needs.confirm.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      has_findings: ${{ steps.fix.outputs.has_findings }}
+      issue_number: ${{ steps.fix.outputs.issue_number }}
+      fix_branch: ${{ steps.fix.outputs.fix_branch }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-agentic-confirmation-plan
+          path: artifacts/confirmation
+
+      - if: needs.confirmation_plan.outputs.has_candidates == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: upstream-agentic-confirmation-*
+          path: artifacts/confirmation-results
+          merge-multiple: true
+
+      - name: Reject stale discovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.sha }}
+        run: test "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" = "$BASE_SHA"
+
+      - name: Finalize findings and synchronize Issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_OUTPUT_DIR: artifacts/confirmation-results
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: node scripts/review-upstream.mjs --finalize-confirmation
+
+      - name: Produce immutable remediation source
+        id: fix
+        env:
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+          UPSTREAM_REVIEW_FIX_INPUT_PATH: artifacts/upstream-review-fix-input.json
+        run: node scripts/review-upstream.mjs --prepare-fix
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-agentic-source
+          path: artifacts
+          if-no-files-found: error
+
+  attempt_0:
+    needs: publish_findings
+    if: needs.publish_findings.outputs.has_findings == 'true'
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: ./.github/workflows/upstream-agentic-attempt.yml
+    with:
+      attempt: 0
+      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      base_sha: ${{ github.sha }}
+      start_sha: ${{ github.sha }}
+      source_artifact: upstream-agentic-source
+    secrets: inherit
+
+  attempt_1:
+    needs:
+      - publish_findings
+      - attempt_0
+    if: >-
+      always() &&
+      needs.attempt_0.result == 'success' &&
+      needs.attempt_0.outputs.disposition == 'retry' &&
+      fromJSON(inputs.max_code_attempts) >= 2
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: ./.github/workflows/upstream-agentic-attempt.yml
+    with:
+      attempt: 1
+      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      base_sha: ${{ github.sha }}
+      start_sha: ${{ needs.attempt_0.outputs.head_sha || github.sha }}
+      source_artifact: upstream-agentic-source
+      previous_candidate_artifact: ${{ needs.attempt_0.outputs.candidate_artifact }}
+      previous_feedback_artifact: ${{ needs.attempt_0.outputs.feedback_artifact }}
+      previous_head_sha: ${{ needs.attempt_0.outputs.head_sha }}
+      pr_number: ${{ needs.attempt_0.outputs.pr_number }}
+    secrets: inherit
+
+  attempt_2:
+    needs:
+      - publish_findings
+      - attempt_1
+    if: >-
+      always() &&
+      needs.attempt_1.result == 'success' &&
+      needs.attempt_1.outputs.disposition == 'retry' &&
+      fromJSON(inputs.max_code_attempts) >= 3
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: ./.github/workflows/upstream-agentic-attempt.yml
+    with:
+      attempt: 2
+      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      base_sha: ${{ github.sha }}
+      start_sha: ${{ needs.attempt_1.outputs.head_sha || github.sha }}
+      source_artifact: upstream-agentic-source
+      previous_candidate_artifact: ${{ needs.attempt_1.outputs.candidate_artifact }}
+      previous_feedback_artifact: ${{ needs.attempt_1.outputs.feedback_artifact }}
+      previous_head_sha: ${{ needs.attempt_1.outputs.head_sha }}
+      pr_number: ${{ needs.attempt_1.outputs.pr_number }}
+    secrets: inherit
+
+  attempt_3:
+    needs:
+      - publish_findings
+      - attempt_2
+    if: >-
+      always() &&
+      needs.attempt_2.result == 'success' &&
+      needs.attempt_2.outputs.disposition == 'retry' &&
+      fromJSON(inputs.max_code_attempts) >= 4
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: ./.github/workflows/upstream-agentic-attempt.yml
+    with:
+      attempt: 3
+      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      base_sha: ${{ github.sha }}
+      start_sha: ${{ needs.attempt_2.outputs.head_sha || github.sha }}
+      source_artifact: upstream-agentic-source
+      previous_candidate_artifact: ${{ needs.attempt_2.outputs.candidate_artifact }}
+      previous_feedback_artifact: ${{ needs.attempt_2.outputs.feedback_artifact }}
+      previous_head_sha: ${{ needs.attempt_2.outputs.head_sha }}
+      pr_number: ${{ needs.attempt_2.outputs.pr_number }}
+    secrets: inherit
+
+  resolve_terminal:
+    needs:
+      - publish_findings
+      - attempt_0
+      - attempt_1
+      - attempt_2
+      - attempt_3
+    if: always() && needs.publish_findings.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      disposition: ${{ steps.resolve.outputs.disposition }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      pr_url: ${{ steps.resolve.outputs.pr_url }}
+      attempt: ${{ steps.resolve.outputs.attempt }}
+    permissions: {}
+    steps:
+      - name: Resolve the latest actual attempt
+        id: resolve
+        env:
+          HAS_FINDINGS: ${{ needs.publish_findings.outputs.has_findings }}
+          A0_RESULT: ${{ needs.attempt_0.result }}
+          A0_DISPOSITION: ${{ needs.attempt_0.outputs.disposition }}
+          A0_HEAD: ${{ needs.attempt_0.outputs.head_sha }}
+          A0_PR: ${{ needs.attempt_0.outputs.pr_number }}
+          A0_URL: ${{ needs.attempt_0.outputs.pr_url }}
+          A1_RESULT: ${{ needs.attempt_1.result }}
+          A1_DISPOSITION: ${{ needs.attempt_1.outputs.disposition }}
+          A1_HEAD: ${{ needs.attempt_1.outputs.head_sha }}
+          A1_PR: ${{ needs.attempt_1.outputs.pr_number }}
+          A1_URL: ${{ needs.attempt_1.outputs.pr_url }}
+          A2_RESULT: ${{ needs.attempt_2.result }}
+          A2_DISPOSITION: ${{ needs.attempt_2.outputs.disposition }}
+          A2_HEAD: ${{ needs.attempt_2.outputs.head_sha }}
+          A2_PR: ${{ needs.attempt_2.outputs.pr_number }}
+          A2_URL: ${{ needs.attempt_2.outputs.pr_url }}
+          A3_RESULT: ${{ needs.attempt_3.result }}
+          A3_DISPOSITION: ${{ needs.attempt_3.outputs.disposition }}
+          A3_HEAD: ${{ needs.attempt_3.outputs.head_sha }}
+          A3_PR: ${{ needs.attempt_3.outputs.pr_number }}
+          A3_URL: ${{ needs.attempt_3.outputs.pr_url }}
+        run: |
+          if [ "$HAS_FINDINGS" != true ]; then
+            echo "disposition=no_findings" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          actual=0
+          disposition=""
+          head_sha=""
+          pr_number=""
+          pr_url=""
+          selected_attempt=""
+          approved_count=0
+          for index in 0 1 2 3; do
+            eval "result=\$A${index}_RESULT"
+            eval "candidate_disposition=\$A${index}_DISPOSITION"
+            if [ "$result" = skipped ] || [ -z "$candidate_disposition" ]; then continue; fi
+            test "$result" = success
+            actual=$((actual + 1))
+            disposition="$candidate_disposition"
+            eval "head_sha=\$A${index}_HEAD"
+            eval "pr_number=\$A${index}_PR"
+            eval "candidate_url=\$A${index}_URL"
+            if [ -n "$candidate_url" ]; then pr_url="$candidate_url"; fi
+            selected_attempt="$index"
+            if [ "$disposition" = approved ]; then approved_count=$((approved_count + 1)); fi
+          done
+          test "$actual" -ge 1
+          test "$approved_count" -le 1
+          if [ "$disposition" != approved ] && [ "$disposition" != blocked ]; then
+            echo "Attempt chain ended without approval or an explicit block: $disposition" >&2
+            exit 1
+          fi
+
+          echo "disposition=$disposition" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "attempt=$selected_attempt" >> "$GITHUB_OUTPUT"
+
+  finalize:
+    needs:
+      - publish_findings
+      - resolve_terminal
+    if: needs.resolve_terminal.outputs.disposition == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Verify exact-head independent approval and policy
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve_terminal.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve_terminal.outputs.head_sha }}
+          BASE_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          reviewer="$(gh api user --jq .login)"
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg branch "$DEFAULT_BRANCH" '
+            .state == "open" and .head.sha == $head and .base.sha == $base and .base.ref == $branch
+          ' "$RUNNER_TEMP/pr.json" >/dev/null
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" = "$BASE_SHA"
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" > "$RUNNER_TEMP/reviews.json"
+          jq -e --arg reviewer "$reviewer" --arg head "$HEAD_SHA" '
+            [ .[] | select(.user.login == $reviewer and .commit_id == $head and .state == "APPROVED") ] | length >= 1
+          ' "$RUNNER_TEMP/reviews.json" >/dev/null
+
+          gh api "repos/$GH_REPO/commits/$HEAD_SHA/status" > "$RUNNER_TEMP/status.json"
+          jq -e '
+            [ .statuses[] | select(.context == "upstream-agentic/validate" and .state == "success") ] | length >= 1
+          ' "$RUNNER_TEMP/status.json" >/dev/null
+
+      - name: Mark ready and enable native squash auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve_terminal.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve_terminal.outputs.head_sha }}
+        run: |
+          test "$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)" = "$HEAD_SHA"
+          if [ "$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .draft)" = true ]; then
+            gh pr ready "$PR_NUMBER" --repo "$GH_REPO"
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$GH_REPO" --auto --squash --delete-branch=false
+
+          for attempt in $(seq 1 120); do
+            merged_at="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.merged_at // ""')"
+            if [ -n "$merged_at" ]; then break; fi
+            sleep 10
+          done
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/merged-pr.json"
+          jq -e --arg head "$HEAD_SHA" '.merged == true and .head.sha == $head and (.merge_commit_sha | length == 40)' "$RUNNER_TEMP/merged-pr.json" >/dev/null
+          echo "Merged exact approved head $HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Finalize remediation Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.publish_findings.outputs.issue_number }}
+          PR_NUMBER: ${{ needs.resolve_terminal.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve_terminal.outputs.head_sha }}
+        run: |
+          state="$(gh api "repos/$GH_REPO/issues/$ISSUE_NUMBER" --jq .state)"
+          if [ "$state" = open ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$GH_REPO" --body "Automatically remediated by PR #$PR_NUMBER after bounded validation/review iterations. Approved head: \`$HEAD_SHA\`."
+            gh issue close "$ISSUE_NUMBER" --repo "$GH_REPO" --reason completed
+          fi
+
+  terminal_guard:
+    needs:
+      - publish_findings
+      - resolve_terminal
+      - finalize
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Enforce a truthful workflow conclusion
+        env:
+          PUBLISH_RESULT: ${{ needs.publish_findings.result }}
+          DISPOSITION: ${{ needs.resolve_terminal.outputs.disposition }}
+          FINALIZE_RESULT: ${{ needs.finalize.result }}
+          PR_URL: ${{ needs.resolve_terminal.outputs.pr_url }}
+        run: |
+          test "$PUBLISH_RESULT" = success
+          if [ "$DISPOSITION" = no_findings ]; then
+            echo "No confirmed findings required remediation." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$DISPOSITION" = approved ] && [ "$FINALIZE_RESULT" = success ]; then
+            echo "Approved candidate was merged and its Issue finalized." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Agentic remediation requires attention"
+            echo
+            echo "- Disposition: \`${DISPOSITION:-missing}\`"
+            echo "- Draft PR: ${PR_URL:-not-created}"
+            echo
+            echo "The workflow did not merge and intentionally reports failure."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "changed_files": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "type": "string",
+        "enum": [
+          "apps/api/src/games/genshin.ts",
+          "apps/api/src/games/starrail.ts",
+          "apps/api/src/games/ww.ts",
+          "apps/api/src/games/zzz.ts",
+          "apps/api/src/games/snowbreak.ts",
+          "apps/api/src/games/endfield.ts",
+          "apps/api/src/games/parser-regressions.agent.test.ts"
+        ]
+      }
+    }
+  },
+  "required": [
+    "complete",
+    "errors",
+    "summary",
+    "changed_files"
+  ],
+  "additionalProperties": false
+}
