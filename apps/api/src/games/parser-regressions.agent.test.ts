@@ -12,7 +12,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
 } from "./starrail.js";
-import { extractZzzTimeRangeFromContent } from "./zzz.js";
+import { extractZzzTimeRangeFromContent, fetchZzzEvents } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -371,5 +371,105 @@ test("ZZZ resolves version-relative ends for supplemental activity notices", () 
       },
       notice.title
     );
+  }
+});
+
+test("ZZZ prefers the explicit version end from notice content over list metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: { activity_list: [] },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1262,
+                  title: "3.1版本「漫长的告别」更新公告",
+                  content: [
+                    "【更新开始时间】2026/07/29 06:00（UTC+8）预计5个小时完成。",
+                    "3.1版本结束时间为2026/09/09 06:00（UTC+8）。",
+                  ].join(""),
+                },
+                {
+                  ann_id: 1240,
+                  title: "「法厄同年度大揭秘」活动说明",
+                  content: "【活动时间】3.1版本更新后 ~ 3.1版本结束【活动奖励】",
+                },
+                {
+                  ann_id: 1239,
+                  title: "「潜能预演·狩猎游戏」活动说明",
+                  content: "【活动时间】3.1版本更新后 ~ 3.1版本结束【参与条件】",
+                },
+              ],
+              pic_list: [
+                {
+                  ann_id: 226,
+                  title: "「点映返礼」活动说明",
+                  content: "【活动时间】3.1版本更新后 ~3.1版本结束【活动奖励】",
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1262,
+                      title: "3.1版本「漫长的告别」更新公告",
+                      start_time: "2026-07-29 06:00:00",
+                      end_time: "2026-09-09 07:00:00",
+                    },
+                    {
+                      ann_id: 1240,
+                      title: "「法厄同年度大揭秘」活动说明",
+                    },
+                    {
+                      ann_id: 1239,
+                      title: "「潜能预演·狩猎游戏」活动说明",
+                    },
+                    {
+                      ann_id: 226,
+                      title: "「点映返礼」活动说明",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+
+    for (const title of ["法厄同年度大揭秘", "潜能预演·狩猎游戏", "点映返礼"]) {
+      const event = events.find((item) => item.title === title);
+      assert.ok(event, title);
+      assert.equal(event.end_time, "2026-09-09T06:00:00+08:00", title);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
