@@ -12,7 +12,10 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
 } from "./starrail.js";
-import { extractZzzTimeRangeFromContent } from "./zzz.js";
+import {
+  extractZzzTimeRangeFromContent,
+  extractZzzVersionEndIsoFromContent,
+} from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -372,4 +375,16 @@ test("ZZZ resolves version-relative ends for supplemental activity notices", () 
       notice.title
     );
   }
+});
+
+test("ZZZ prefers an explicit version end from update content", () => {
+  const endIso = extractZzzVersionEndIsoFromContent(
+    [
+      "<p>2026/07/29 06:00（UTC+8）前绳网等级达到要求。</p>",
+      "<p>领取时间截至3.1版本结束前，3.1版本结束时间为 2026/09/09 06:00（UTC+8）。</p>",
+      "<p>2026/08/28 23:59前完成其他任务。</p>",
+    ].join("")
+  );
+
+  assert.equal(endIso, "2026-09-09T06:00:00+08:00");
 });
