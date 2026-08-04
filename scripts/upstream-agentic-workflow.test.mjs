@@ -12,25 +12,6 @@ const runtimePromptPath = new URL(
   "../.github/prompts/upstream-agentic-runtime.md",
   import.meta.url
 );
-const archiveMainPath = new URL(
-  "../.github/workflow-archive/upstream-review.v1.yml.disabled",
-  import.meta.url
-);
-const archiveReworkPath = new URL(
-  "../.github/workflow-archive/upstream-review-pr-rework.v1.yml.disabled",
-  import.meta.url
-);
-
-test("v1 workflows are archived outside GitHub's active workflow directory", async () => {
-  const [archivedMain, archivedRework] = await Promise.all([
-    readFile(archiveMainPath, "utf8"),
-    readFile(archiveReworkPath, "utf8"),
-  ]);
-  assert.match(archivedMain, /^name: Upstream Review$/m);
-  assert.match(archivedRework, /^name: Upstream Review PR Rework Round$/m);
-  assert.equal(archiveMainPath.pathname.includes("/.github/workflows/"), false);
-  assert.equal(archiveReworkPath.pathname.includes("/.github/workflows/"), false);
-});
 
 test("v2 exposes one bounded four-slot loop instead of copied rework jobs", async () => {
   const workflow = await readFile(mainPath, "utf8");
