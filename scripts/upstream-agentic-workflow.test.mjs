@@ -125,7 +125,11 @@ test("model jobs never receive GitHub write credentials", async () => {
 test("runtime verifier is explicitly allowed to read its exact-head input", async () => {
   const prompt = await readFile(runtimePromptPath, "utf8");
   assert.match(prompt, /must read this file before deciding\s+the verdict/i);
-  assert.match(prompt, /read-only command solely to display this exact file/);
+  assert.match(prompt, /as many read-only `jq` commands as needed/);
+  assert.match(prompt, /Do not rely on one\s+full-file display because command output may be truncated/);
+  assert.match(prompt, /\.context_sha256, \.findings\[\]/);
+  assert.match(prompt, /\.candidate_datasets\[\]/);
+  assert.match(prompt, /\.original_evidence\[\]/);
   assert.doesNotMatch(prompt, /Do not use the network, modify\s+files, run commands/);
 });
 
