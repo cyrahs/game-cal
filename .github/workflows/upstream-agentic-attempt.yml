@@ -134,7 +134,7 @@ jobs:
           output-schema-file: .github/schemas/upstream-agentic-repair-output.schema.json
           output-file: artifacts/upstream-agentic-repair-output.json
           codex-version: "0.145.0"
-          permission-profile: workspace-write
+          permission-profile: ":workspace"
           safety-strategy: drop-sudo
 
       - name: Enforce patch policy and export candidate

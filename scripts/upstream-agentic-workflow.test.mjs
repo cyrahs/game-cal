@@ -99,6 +99,8 @@ test("model jobs never receive GitHub write credentials", async () => {
     assert.match(job, /contents: read/);
     assert.doesNotMatch(job, /contents: write|pull-requests: write|UPSTREAM_REVIEW_APPROVAL_TOKEN/);
   }
+  assert.match(repair, /permission-profile: ":workspace"/);
+  assert.doesNotMatch(repair, /permission-profile: workspace-write/);
   assert.match(review, /permission-profile: ":read-only"/);
   assert.match(runtime, /permission-profile: ":read-only"/);
   assert.match(runtime, /prepare-runtime/);
