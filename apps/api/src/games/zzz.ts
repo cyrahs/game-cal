@@ -174,6 +174,18 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
+export function extractZzzVersionEndIsoFromContent(
+  content: string | undefined
+): string | null {
+  const text = stripHtml(content);
+  if (!text) return null;
+
+  const explicitEnd = new RegExp(
+    `版本结束时间\\s*(?:为|是|[:：])?\\s*(${ZZZ_DATE_TIME_PATTERN})`
+  ).exec(text);
+  return toSourceIsoFromDateTimeCandidate(explicitEnd?.[1]);
+}
+
 export function extractZzzTimeRangeFromContent(
   html: string,
   opts: ZzzTimeRangeOptions = {}
@@ -547,16 +559,24 @@ function buildVersionMaintenanceEndByLabel(
   return out;
 }
 
-function buildVersionEndByLabel(items: MihoyoNapAnnItem[]): Map<string, string> {
+function buildVersionEndByLabel(
+  items: MihoyoNapAnnItem[],
+  contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>
+): Map<string, string> {
   const out = new Map<string, string>();
 
   for (const item of items) {
     if (!isVersionNoticeText(item.title ?? "") && !isVersionNoticeText(item.subtitle ?? "")) {
       continue;
     }
-    if (!item.end_time) continue;
 
-    const endIso = toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET);
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    const endIso =
+      extractZzzVersionEndIsoFromContent(contentItem?.content) ??
+      (item.end_time
+        ? toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET)
+        : null);
+    if (!endIso) continue;
     if (!Number.isFinite(Date.parse(endIso))) continue;
 
     for (const label of extractVersionLabels(item)) out.set(label, endIso);
@@ -652,7 +672,8 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     contentItemsByAnnId
   );
   const versionEndByLabel = buildVersionEndByLabel(
-    categories.flatMap((category) => category.list ?? [])
+    categories.flatMap((category) => category.list ?? []),
+    contentItemsByAnnId
   );
 
   const list = activityRes.data?.activity_list ?? [];
