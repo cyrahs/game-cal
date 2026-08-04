@@ -146,6 +146,10 @@ test("approval and merge are exact-head, separate, and never use admin bypass", 
   const finalizeStart = main.indexOf("\n  finalize:\n");
   const guardStart = main.indexOf("\n  terminal_guard:\n", finalizeStart);
   const finalize = main.slice(finalizeStart, guardStart);
+  assert.match(finalize, /if: >-\n      always\(\) &&/);
+  assert.match(finalize, /needs\.publish_findings\.result == 'success'/);
+  assert.match(finalize, /needs\.resolve_terminal\.result == 'success'/);
+  assert.match(finalize, /needs\.resolve_terminal\.outputs\.disposition == 'approved'/);
   assert.match(finalize, /upstream-agentic\/validate/);
   assert.match(finalize, /\.commit_id == \$head and \.state == "APPROVED"/);
   assert.match(finalize, /gh pr merge "\$PR_NUMBER" --repo "\$GH_REPO" --auto --squash/);
