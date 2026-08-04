@@ -546,7 +546,11 @@ jobs:
     needs:
       - publish_findings
       - resolve_terminal
-    if: needs.resolve_terminal.outputs.disposition == 'approved'
+    if: >-
+      always() &&
+      needs.publish_findings.result == 'success' &&
+      needs.resolve_terminal.result == 'success' &&
+      needs.resolve_terminal.outputs.disposition == 'approved'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
