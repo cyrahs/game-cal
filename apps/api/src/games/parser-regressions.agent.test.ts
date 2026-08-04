@@ -12,7 +12,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
 } from "./starrail.js";
-import { extractZzzTimeRangeFromContent } from "./zzz.js";
+import { extractZzzTimeRangeFromContent, fetchZzzEvents } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -342,34 +342,104 @@ test("ZZZ keeps a version-relative gacha end ahead of later phase dates", () => 
   });
 });
 
-test("ZZZ resolves version-relative ends for supplemental activity notices", () => {
-  const versionEndByLabel = new Map([["3.1", "2026-09-09T06:00:00+08:00"]]);
-  const notices = [
-    {
-      title: "法厄同年度大揭秘",
-      content: "【活动时间】 3.1版本更新后 ~ 3.1版本结束 【活动奖励】",
-    },
-    {
-      title: "潜能预演·狩猎游戏",
-      content: "【活动时间】 3.1版本更新后 ~ 3.1版本结束 【参与条件】",
-    },
-    {
-      title: "点映返礼",
-      content: "【活动时间】 3.1版本更新后 ~3.1版本结束 【活动奖励】",
-    },
-  ];
+test("ZZZ prefers the explicit version end for supplemental activity notices", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: { activity_list: [] },
+        }
+      : url.endsWith("/list")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1262,
+                      title: "3.1版本「漫长的告别」更新公告",
+                      subtitle: "3.1版本更新说明",
+                      start_time: "2026-07-29 06:00:00",
+                      end_time: "2026-09-09 07:00:00",
+                    },
+                    {
+                      ann_id: 1240,
+                      title: "「法厄同年度大揭秘」活动说明",
+                    },
+                    {
+                      ann_id: 1239,
+                      title: "「潜能预演·狩猎游戏」活动说明",
+                    },
+                  ],
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1262,
+                  title: "3.1版本「漫长的告别」更新公告",
+                  subtitle: "3.1版本更新说明",
+                  content: [
+                    "【更新开始时间】2026/07/29 06:00（UTC+8）预计5个小时完成。",
+                    "3.1版本结束时间为 2026/09/09 06:00（UTC+8）。",
+                  ].join(""),
+                },
+                {
+                  ann_id: 1240,
+                  title: "「法厄同年度大揭秘」活动说明",
+                  content: "【活动时间】3.1版本更新后 ~ 3.1版本结束【活动奖励】",
+                },
+                {
+                  ann_id: 1239,
+                  title: "「潜能预演·狩猎游戏」活动说明",
+                  content: "【活动时间】3.1版本更新后 ~ 3.1版本结束【参与条件】",
+                },
+              ],
+              pic_list: [],
+            },
+          };
 
-  for (const notice of notices) {
-    const range = extractZzzTimeRangeFromContent(notice.content, {
-      versionEndByLabel,
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
     });
-    assert.deepEqual(
-      range,
-      {
-        startIso: null,
-        endIso: "2026-09-09T06:00:00+08:00",
-      },
-      notice.title
-    );
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+
+    for (const title of ["法厄同年度大揭秘", "潜能预演·狩猎游戏"]) {
+      const event = events.find((item) => item.title === title);
+      assert.ok(event);
+      assert.deepEqual(
+        {
+          start_time: event.start_time,
+          end_time: event.end_time,
+        },
+        {
+          start_time: "2026-07-29T11:00:00+08:00",
+          end_time: "2026-09-09T06:00:00+08:00",
+        },
+        title
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
