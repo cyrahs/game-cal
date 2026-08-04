@@ -8,6 +8,10 @@ const pullRequestGatePath = new URL(
   "../.github/workflows/upstream-agentic-pr-gate.yml",
   import.meta.url
 );
+const runtimePromptPath = new URL(
+  "../.github/prompts/upstream-agentic-runtime.md",
+  import.meta.url
+);
 const archiveMainPath = new URL(
   "../.github/workflow-archive/upstream-review.v1.yml.disabled",
   import.meta.url
@@ -105,6 +109,13 @@ test("model jobs never receive GitHub write credentials", async () => {
   assert.match(runtime, /permission-profile: ":read-only"/);
   assert.match(runtime, /prepare-runtime/);
   assert.match(runtime, /classify-runtime/);
+});
+
+test("runtime verifier is explicitly allowed to read its exact-head input", async () => {
+  const prompt = await readFile(runtimePromptPath, "utf8");
+  assert.match(prompt, /must read this file before deciding\s+the verdict/i);
+  assert.match(prompt, /read-only command solely to display this exact file/);
+  assert.doesNotMatch(prompt, /Do not use the network, modify\s+files, run commands/);
 });
 
 test("approval and merge are exact-head, separate, and never use admin bypass", async () => {
