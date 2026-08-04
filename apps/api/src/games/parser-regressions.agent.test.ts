@@ -12,7 +12,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
 } from "./starrail.js";
-import { extractZzzTimeRangeFromContent } from "./zzz.js";
+import { extractZzzTimeRangeFromContent, fetchZzzEvents } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -371,5 +371,113 @@ test("ZZZ resolves version-relative ends for supplemental activity notices", () 
       },
       notice.title
     );
+  }
+});
+
+test("ZZZ resolves an explicit supplemental start with a version-relative end", () => {
+  const range = extractZzzTimeRangeFromContent(
+    "【活动时间】 2026/07/17 20:30（UTC+8）~ 3.1版本结束 【活动奖励】",
+    {
+      versionEndByLabel: new Map([["3.1", "2026-09-09T05:59:59+08:00"]]),
+    }
+  );
+
+  assert.deepEqual(range, {
+    startIso: "2026-07-17T20:30:00+08:00",
+    endIso: "2026-09-09T05:59:59+08:00",
+  });
+});
+
+test("ZZZ uses the announced version end for version-relative activity windows", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            activity_list: [
+              {
+                name: "点映返礼",
+                start_time: String(
+                  Date.parse("2026-07-29T11:00:00+08:00") / 1000
+                ),
+                end_time: String(Date.parse("2026-09-09T07:00:00+08:00") / 1000),
+              },
+            ],
+          },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1262,
+                  title: "3.1版本「漫长的告别」更新公告",
+                  content: [
+                    "【更新开始时间】 2026/07/29 06:00（UTC+8） 预计5个小时完成。",
+                    "3.1版本结束时间为 2026/09/09 06:00（UTC+8）。",
+                  ].join(" "),
+                },
+              ],
+              pic_list: [
+                {
+                  ann_id: 226,
+                  title: "「点映返礼」活动说明",
+                  content: "【活动时间】 3.1版本更新后 ~ 3.1版本结束 【活动奖励】",
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1262,
+                      title: "3.1版本「漫长的告别」更新公告",
+                      start_time: "2026-07-29 06:00:00",
+                      end_time: "2026-09-09 07:00:00",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+    const event = events.find((item) => item.title === "点映返礼");
+    assert.ok(event);
+    assert.deepEqual(
+      {
+        start_time: event.start_time,
+        end_time: event.end_time,
+      },
+      {
+        start_time: "2026-07-29T11:00:00+08:00",
+        end_time: "2026-09-09T06:00:00+08:00",
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

@@ -19,6 +19,7 @@ import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gach
 const ZZZ_SOURCE_TZ_OFFSET = "+08:00";
 const ZZZ_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const ZZZ_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
+const ZZZ_TIMEZONE_SUFFIX_PATTERN = String.raw`(?:\s*[（(]\s*UTC\s*\+\s*8\s*[)）])?`;
 
 function parseEventEndMs(event: CalendarEvent): number {
   return event.end_time ? Date.parse(event.end_time) : Number.POSITIVE_INFINITY;
@@ -174,6 +175,16 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
+function extractVersionEndIsoFromVersionContent(content: string | undefined): string | null {
+  const text = stripHtml(content);
+  if (!text) return null;
+
+  const versionEndRe = new RegExp(
+    `(?:\\d+(?:\\.\\d+)+\\s*)?版本结束时间(?:为|[:：])?\\s*(${ZZZ_DATE_TIME_PATTERN})`
+  );
+  return toSourceIsoFromDateTimeCandidate(versionEndRe.exec(text)?.[1]);
+}
+
 export function extractZzzTimeRangeFromContent(
   html: string,
   opts: ZzzTimeRangeOptions = {}
@@ -191,6 +202,23 @@ export function extractZzzTimeRangeFromContent(
     return {
       startIso: start ? toIsoWithSourceOffset(start, ZZZ_SOURCE_TZ_OFFSET) : null,
       endIso: end ? toIsoWithSourceOffset(end, ZZZ_SOURCE_TZ_OFFSET) : null,
+    };
+  }
+
+  const explicitStartVersionEndRange = new RegExp(
+    `(${ZZZ_DATE_TIME_PATTERN})${ZZZ_TIMEZONE_SUFFIX_PATTERN}\\s*${ZZZ_RANGE_SEPARATOR_PATTERN}\\s*(?:\\d+(?:\\.\\d+)+\\s*)?版本结束(?:前)?`,
+    "i"
+  ).exec(text);
+  const explicitDateTimeCount = [
+    ...text.matchAll(new RegExp(ZZZ_DATE_TIME_PATTERN, "g")),
+  ].length;
+  if (explicitStartVersionEndRange?.[1] && explicitDateTimeCount === 1) {
+    return {
+      startIso: toSourceIsoFromDateTimeCandidate(explicitStartVersionEndRange[1]),
+      endIso: resolveVersionRelativeEndIso(text, {
+        versionEndByLabel: opts.versionEndByLabel ?? new Map(),
+        fallbackEndIso: opts.fallbackEndIso ?? null,
+      }),
     };
   }
 
@@ -438,7 +466,7 @@ function isVersionNoticeText(input: string): boolean {
   const text = stripHtml(input);
   if (!text) return false;
   if (text.includes("维护预告")) return false;
-  return text.includes("版本更新说明") || text.includes("版本更新公告");
+  return /版本[^。！？\n]{0,40}更新(?:说明|公告)/.test(text);
 }
 
 function pickCurrentVersionNotice(items: MihoyoNapAnnItem[]): ZzzVersionNotice | null {
@@ -547,19 +575,37 @@ function buildVersionMaintenanceEndByLabel(
   return out;
 }
 
-function buildVersionEndByLabel(items: MihoyoNapAnnItem[]): Map<string, string> {
+function buildVersionEndByLabel(
+  items: MihoyoNapAnnItem[],
+  contentItemsByAnnId: Map<number, MihoyoNapAnnContentItem[]>
+): Map<string, string> {
   const out = new Map<string, string>();
+  const contentBackedLabels = new Set<string>();
 
   for (const item of items) {
     if (!isVersionNoticeText(item.title ?? "") && !isVersionNoticeText(item.subtitle ?? "")) {
       continue;
     }
-    if (!item.end_time) continue;
 
-    const endIso = toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET);
-    if (!Number.isFinite(Date.parse(endIso))) continue;
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    const contentEndIso = extractVersionEndIsoFromVersionContent(contentItem?.content);
+    const listEndIso = item.end_time
+      ? toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET)
+      : null;
+    const labels = extractVersionLabels(item);
 
-    for (const label of extractVersionLabels(item)) out.set(label, endIso);
+    if (contentEndIso && Number.isFinite(Date.parse(contentEndIso))) {
+      for (const label of labels) {
+        out.set(label, contentEndIso);
+        contentBackedLabels.add(label);
+      }
+      continue;
+    }
+    if (!listEndIso || !Number.isFinite(Date.parse(listEndIso))) continue;
+
+    for (const label of labels) {
+      if (!contentBackedLabels.has(label)) out.set(label, listEndIso);
+    }
   }
 
   return out;
@@ -652,7 +698,8 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
     contentItemsByAnnId
   );
   const versionEndByLabel = buildVersionEndByLabel(
-    categories.flatMap((category) => category.list ?? [])
+    categories.flatMap((category) => category.list ?? []),
+    contentItemsByAnnId
   );
 
   const list = activityRes.data?.activity_list ?? [];
@@ -666,14 +713,21 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       const id = a.activity_id ?? `${a.name}:${a.start_time}`;
       const title = a.name!;
       const matched = candidates.length > 0 ? pickBestCandidate(a.name!, candidates) : null;
+      const startIso = unixSecondsToIsoWithSourceOffset(a.start_time!, ZZZ_SOURCE_TZ_OFFSET);
+      const listEndIso = unixSecondsToIsoWithSourceOffset(a.end_time!, ZZZ_SOURCE_TZ_OFFSET);
+      const contentEndIso = matched?.content?.includes("版本结束")
+        ? extractZzzTimeRangeFromContent(matched.content, { versionEndByLabel }).endIso
+        : null;
+      const endIso = contentEndIso ?? listEndIso;
+      if (Date.parse(endIso) <= Date.parse(startIso)) return [];
       const gachaKind = classifyGachaEvent("zzz", title, matched?.content);
       const isGacha = isGachaEventTitle("zzz", title) || gachaKind !== "other";
       return [
         {
           id,
           title,
-          start_time: unixSecondsToIsoWithSourceOffset(a.start_time!, ZZZ_SOURCE_TZ_OFFSET),
-          end_time: unixSecondsToIsoWithSourceOffset(a.end_time!, ZZZ_SOURCE_TZ_OFFSET),
+          start_time: startIso,
+          end_time: endIso,
           is_gacha: isGacha,
           gacha_kind: isGacha ? gachaKind : undefined,
           banner: matched?.banner,
