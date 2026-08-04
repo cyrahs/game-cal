@@ -89,6 +89,17 @@ test("validation cannot be skipped and still publish a candidate", async () => {
   assert.match(publish, /result_tree/);
 });
 
+test("publishing a replacement head tolerates bounded GitHub API propagation", async () => {
+  const workflow = await readFile(attemptPath, "utf8");
+  const publishStart = workflow.indexOf("\n  publish:\n");
+  const reviewStart = workflow.indexOf("\n  review:\n", publishStart);
+  const publish = workflow.slice(publishStart, reviewStart);
+  assert.match(publish, /for poll in \$\(seq 1 15\)/);
+  assert.match(publish, /\.state == "open" and \.head\.ref == \$branch/);
+  assert.match(publish, /\.head\.sha == \$head/);
+  assert.match(publish, /test "\$head_visible" = true/);
+});
+
 test("model jobs never receive GitHub write credentials", async () => {
   const workflow = await readFile(attemptPath, "utf8");
   const repairStart = workflow.indexOf("\n  repair:\n");
