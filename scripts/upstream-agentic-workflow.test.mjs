@@ -16,6 +16,9 @@ const runtimePromptPath = new URL(
 test("v2 exposes one bounded four-slot loop instead of copied rework jobs", async () => {
   const workflow = await readFile(mainPath, "utf8");
   assert.match(workflow, /^name: Upstream Agentic Review v2$/m);
+  assert.match(workflow, /schedule:\n    - cron: "0 9 \* \* \*"/);
+  assert.match(workflow, /timezone: "America\/Los_Angeles"/);
+  assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /max_code_attempts:/);
   for (const attempt of [0, 1, 2, 3]) {
     assert.match(workflow, new RegExp(`^  attempt_${attempt}:$`, "m"));

@@ -1,6 +1,9 @@
 name: Upstream Agentic Review v2
 
 on:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "America/Los_Angeles"
   workflow_dispatch:
     inputs:
       max_code_attempts:
