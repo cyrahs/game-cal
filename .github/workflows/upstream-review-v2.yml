@@ -376,7 +376,7 @@ jobs:
     uses: ./.github/workflows/upstream-agentic-attempt.yml
     with:
       attempt: 0
-      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      max_attempts: ${{ fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) }}
       base_sha: ${{ github.sha }}
       start_sha: ${{ github.sha }}
       source_artifact: upstream-agentic-source
@@ -390,7 +390,7 @@ jobs:
       always() &&
       needs.attempt_0.result == 'success' &&
       needs.attempt_0.outputs.disposition == 'retry' &&
-      fromJSON(inputs.max_code_attempts) >= 2
+      fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) >= 2
     permissions:
       actions: read
       contents: write
@@ -399,7 +399,7 @@ jobs:
     uses: ./.github/workflows/upstream-agentic-attempt.yml
     with:
       attempt: 1
-      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      max_attempts: ${{ fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) }}
       base_sha: ${{ github.sha }}
       start_sha: ${{ needs.attempt_0.outputs.head_sha || github.sha }}
       source_artifact: upstream-agentic-source
@@ -417,7 +417,7 @@ jobs:
       always() &&
       needs.attempt_1.result == 'success' &&
       needs.attempt_1.outputs.disposition == 'retry' &&
-      fromJSON(inputs.max_code_attempts) >= 3
+      fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) >= 3
     permissions:
       actions: read
       contents: write
@@ -426,7 +426,7 @@ jobs:
     uses: ./.github/workflows/upstream-agentic-attempt.yml
     with:
       attempt: 2
-      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      max_attempts: ${{ fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) }}
       base_sha: ${{ github.sha }}
       start_sha: ${{ needs.attempt_1.outputs.head_sha || github.sha }}
       source_artifact: upstream-agentic-source
@@ -444,7 +444,7 @@ jobs:
       always() &&
       needs.attempt_2.result == 'success' &&
       needs.attempt_2.outputs.disposition == 'retry' &&
-      fromJSON(inputs.max_code_attempts) >= 4
+      fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) >= 4
     permissions:
       actions: read
       contents: write
@@ -453,7 +453,7 @@ jobs:
     uses: ./.github/workflows/upstream-agentic-attempt.yml
     with:
       attempt: 3
-      max_attempts: ${{ fromJSON(inputs.max_code_attempts) }}
+      max_attempts: ${{ fromJSON(github.event_name == 'schedule' && '4' || inputs.max_code_attempts) }}
       base_sha: ${{ github.sha }}
       start_sha: ${{ needs.attempt_2.outputs.head_sha || github.sha }}
       source_artifact: upstream-agentic-source
