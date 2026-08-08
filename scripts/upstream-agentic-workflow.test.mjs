@@ -20,6 +20,14 @@ test("v2 exposes one bounded four-slot loop instead of copied rework jobs", asyn
   assert.match(workflow, /timezone: "America\/Los_Angeles"/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /max_code_attempts:/);
+  assert.equal(
+    workflow.match(
+      /fromJSON\(github\.event_name == 'schedule' && '4' \|\| inputs\.max_code_attempts\)/g
+    )?.length,
+    7,
+    "scheduled runs must explicitly use four attempts while manual runs use their selected input"
+  );
+  assert.doesNotMatch(workflow, /inputs\.max_code_attempts \|\| '4'/);
   for (const attempt of [0, 1, 2, 3]) {
     assert.match(workflow, new RegExp(`^  attempt_${attempt}:$`, "m"));
     assert.match(workflow, new RegExp(`attempt: ${attempt}`));
