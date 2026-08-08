@@ -91,6 +91,11 @@ export function classifyGachaEvent(game: GameId, title: string, content?: string
       return mergeGachaKind(hasCharacter, hasWeapon);
     }
     case "starrail": {
+      // The announcement body can bundle unrelated rewards and activities that
+      // mention warps, characters, and light cones. Only a warp-scoped title
+      // establishes that the announcement itself is a gacha event.
+      if (!isGachaEventTitle("starrail", normalizedTitle)) return "other";
+
       const hasWarpContext = normalizedText.includes("跃迁") || normalizedText.includes("概率提升");
       const hasCharacter =
         hasAny(normalizedText, ["角色活动跃迁", "角色联动跃迁"]) ||

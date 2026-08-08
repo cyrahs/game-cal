@@ -1012,8 +1012,8 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
-    const gachaKind = classifyGachaEvent("starrail", title, content);
-    const isGacha = isGachaEventTitle("starrail", title) || gachaKind !== "other";
+    const isGacha = isGachaEventTitle("starrail", title);
+    const gachaKind = isGacha ? classifyGachaEvent("starrail", title, content) : "other";
     const listStartIso = toIsoWithSourceOffset(item.start_time!, STARRAIL_SOURCE_TZ_OFFSET);
     const listEndIso = toIsoWithSourceOffset(item.end_time!, STARRAIL_SOURCE_TZ_OFFSET);
     const contentRange = extractStarRailTimeRangeFromContent(content, {
