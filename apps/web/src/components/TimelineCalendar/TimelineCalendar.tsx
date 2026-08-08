@@ -791,6 +791,11 @@ export function classifyGachaEvent(gameId: GameId, title: string, content?: stri
     }
     case "starrail":
       {
+        // A composite activity notice may discuss warps, characters, and light
+        // cones in separate sections. Require the title to identify a warp
+        // notice before using its body to infer the gacha kind.
+        if (!isGachaEventTitle("starrail", normalizedTitle)) return "other";
+
         const hasWarpContext = normalizedText.includes("跃迁") || normalizedText.includes("概率提升");
         const hasCharacter =
           hasAny(normalizedText, ["角色活动跃迁", "角色联动跃迁"]) ||

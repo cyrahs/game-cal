@@ -14,6 +14,7 @@ import {
   fetchEndfieldEvents,
   parseEndfieldWindowText,
 } from "./endfield.js";
+import { classifyGachaEvent } from "./gacha.js";
 import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
@@ -53,6 +54,83 @@ const fateLongTermContent = [
   "<p>活动介绍</p>",
   "<p>角色及光锥将加入 Fate[UBW] 联动跃迁，并于 2026/07/24 12:00:00 后长期开放。</p>",
 ].join("\n");
+
+const starRailCompositeActivityContent = [
+  "<h1>「幻造：圣杯战争」活动说明</h1>",
+  "<p>活动期间登录即可免费领取联动限定5星角色。</p>",
+  "<h1>「命运赠礼」活动说明</h1>",
+  "<p>参与条件：解锁「跃迁」</p>",
+  "<p>在任意跃迁活动中累计消耗星轨专票，即可选择限定5星光锥领取。</p>",
+].join("\n");
+
+test("Star Rail does not classify a composite activity notice as a warp", () => {
+  assert.equal(
+    classifyGachaEvent(
+      "starrail",
+      "「幻造：圣杯战争」活动说明",
+      starRailCompositeActivityContent
+    ),
+    "other"
+  );
+});
+
+test("Star Rail emits composite activity notices as non-gacha events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/list")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                type_id: 3,
+                type_label: "资讯",
+                list: [
+                  {
+                    ann_id: 1338,
+                    title: "「幻造：圣杯战争」活动说明",
+                    start_time: "2026-07-23 11:00:00",
+                    end_time: "2026-08-26 06:00:00",
+                  },
+                ],
+              },
+            ],
+          },
+        }
+      : {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                ann_id: 1338,
+                title: "「幻造：圣杯战争」活动说明",
+                content: starRailCompositeActivityContent,
+              },
+            ],
+          },
+        };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.is_gacha, false);
+    assert.equal(events[0]!.gacha_kind, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("Star Rail uses a title-scoped long-term window instead of the 2036 list fallback", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -137,6 +215,8 @@ test("Star Rail emits the title-scoped long-term window in the final event", asy
         end_time_text: "长期开放",
       }
     );
+    assert.equal(events[0]!.is_gacha, true);
+    assert.equal(events[0]!.gacha_kind, "mixed");
   } finally {
     globalThis.fetch = originalFetch;
   }
