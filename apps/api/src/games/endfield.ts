@@ -809,12 +809,15 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
   let inheritedWindow: EndfieldParsedWindow | null = null;
+  let standaloneSectionCount = 0;
+  let standaloneWindowCount = 0;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const sectionTitle = extractEndfieldStandaloneSectionTitle(line);
     if (sectionTitle) {
       currentTitle = sectionTitle;
+      standaloneSectionCount += 1;
       continue;
     }
 
@@ -825,6 +828,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     const timeText = inlineTimeText || lines[i + 1] || "";
     const window = parseEndfieldWindowText(timeText);
     if (!window.start) continue;
+    standaloneWindowCount += 1;
     inheritedWindow ??= window;
 
     const event = buildEndfieldEvent({
@@ -840,7 +844,9 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     if (event) out.push(event);
   }
 
-  if (!inheritedWindow?.start) return out;
+  if (standaloneSectionCount !== 1 || standaloneWindowCount !== 1 || !inheritedWindow?.start) {
+    return out;
+  }
 
   const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
   for (const title of extractEndfieldCoopenedSignInTitles(lines)) {

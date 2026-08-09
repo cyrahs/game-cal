@@ -299,6 +299,59 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
   }
 });
 
+test("Endfield does not assign a co-opened sign-in the first of multiple section windows", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "4601",
+              tab: "events",
+              title: "晨星于此闪耀 特许寻访",
+              startAt: 1786183200,
+              data: {
+                html: [
+                  "<p>「明耀晨星」限时签到活动同步开放，累计签到可获得活动奖励。</p>",
+                  "<p>▼//「作战演练」活动说明</p>",
+                  "<p>■活动时间</p>",
+                  "<p>2026/08/09 10:00（服务器时间） - 2026/08/09 11:00（服务器时间）</p>",
+                  "<p>▼//「晨星于此闪耀」特许寻访说明</p>",
+                  "<p>■活动时间</p>",
+                  "<p>2026/08/09 12:00（服务器时间） - 版本更新维护前</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    assert.equal(
+      events.some((item) => item.title === "明耀晨星"),
+      false
+    );
+    assert.equal(
+      events.filter((item) => item.title === "作战演练" || item.title === "晨星于此闪耀")
+        .length,
+      2
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Star Rail derives a nearby same-major version start from an explicit maintenance boundary", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
