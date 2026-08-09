@@ -783,21 +783,35 @@ function extractEndfieldStandaloneSectionTitle(line: string): string | null {
   return quoted?.[1] ? normalizeTitle(quoted[1]) : null;
 }
 
-function extractEndfieldCoopenedSignInTitles(lines: string[]): string[] {
-  const titles = new Map<string, string>();
+function extractEndfieldCoopenedSignIns(
+  lines: string[]
+): Array<{ title: string; anchorTitle: string | null }> {
+  const activities = new Map<string, { title: string; anchorTitle: string | null }>();
+  const text = lines.join("\n");
+  const matches = text.matchAll(
+    /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
+  );
 
-  for (const line of lines) {
-    const matches = line.matchAll(
-      /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
-    );
-    for (const match of matches) {
-      const title = normalizeTitle(match[1]);
-      const titleKey = normalizeTitleKey(title);
-      if (titleKey && !titles.has(titleKey)) titles.set(titleKey, title);
-    }
+  for (const match of matches) {
+    const title = normalizeTitle(match[1]);
+    const titleKey = normalizeTitleKey(title);
+    if (!titleKey || activities.has(titleKey)) continue;
+
+    const nearbyPrefix = text.slice(Math.max(0, match.index - 240), match.index);
+    const anchorMatches = [
+      ...nearbyPrefix.matchAll(
+        /[「『“"]([^」』”"]+)[」』”"][^「『“"\n]{0,40}?开放期间/g
+      ),
+    ];
+    const anchorTitle = anchorMatches.at(-1)?.[1];
+
+    activities.set(titleKey, {
+      title,
+      anchorTitle: anchorTitle ? normalizeTitle(anchorTitle) : null,
+    });
   }
 
-  return [...titles.values()];
+  return [...activities.values()];
 }
 
 function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEvent[] {
@@ -809,6 +823,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
   let inheritedWindow: EndfieldParsedWindow | null = null;
+  const sectionWindows = new Map<string, EndfieldParsedWindow>();
   let standaloneSectionCount = 0;
   let standaloneWindowCount = 0;
 
@@ -830,6 +845,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     if (!window.start) continue;
     standaloneWindowCount += 1;
     inheritedWindow ??= window;
+    sectionWindows.set(normalizeTitleKey(currentTitle), window);
 
     const event = buildEndfieldEvent({
       id: `${item.cid ?? "event"}:${normalizeTitleKey(currentTitle)}:${window.start}:${window.end ?? window.endText ?? ""}`,
@@ -844,21 +860,25 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     if (event) out.push(event);
   }
 
-  if (standaloneSectionCount !== 1 || standaloneWindowCount !== 1 || !inheritedWindow?.start) {
-    return out;
-  }
-
   const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
-  for (const title of extractEndfieldCoopenedSignInTitles(lines)) {
+  for (const activity of extractEndfieldCoopenedSignIns(lines)) {
+    const title = activity.title;
     const titleKey = normalizeTitleKey(title);
     if (!titleKey || existingTitleKeys.has(titleKey)) continue;
 
+    const window = activity.anchorTitle
+      ? sectionWindows.get(normalizeTitleKey(activity.anchorTitle))
+      : standaloneSectionCount === 1 && standaloneWindowCount === 1
+        ? inheritedWindow
+        : null;
+    if (!window?.start) continue;
+
     const event = buildEndfieldEvent({
-      id: `${item.cid ?? "event"}:${titleKey}:${inheritedWindow.start}:${inheritedWindow.end ?? inheritedWindow.endText ?? ""}`,
+      id: `${item.cid ?? "event"}:${titleKey}:${window.start}:${window.end ?? window.endText ?? ""}`,
       title,
-      startNaive: inheritedWindow.start,
-      endNaive: inheritedWindow.end,
-      endTimeText: inheritedWindow.endText ?? undefined,
+      startNaive: window.start,
+      endNaive: window.end,
+      endTimeText: window.endText ?? undefined,
       banner,
       content: html,
       classificationContent: "",

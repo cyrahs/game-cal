@@ -299,7 +299,7 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
   }
 });
 
-test("Endfield does not assign a co-opened sign-in the first of multiple section windows", async () => {
+test("Endfield assigns a co-opened sign-in its named section window", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
     new Response(
@@ -314,6 +314,7 @@ test("Endfield does not assign a co-opened sign-in the first of multiple section
               startAt: 1786183200,
               data: {
                 html: [
+                  "<p>「晨星于此闪耀」特许寻访开放期间，6星干员获取概率提升！</p>",
                   "<p>「明耀晨星」限时签到活动同步开放，累计签到可获得活动奖励。</p>",
                   "<p>▼//「作战演练」活动说明</p>",
                   "<p>■活动时间</p>",
@@ -338,9 +339,23 @@ test("Endfield does not assign a co-opened sign-in the first of multiple section
       ENDFIELD_CODE: "fixture",
       ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
     });
-    assert.equal(
-      events.some((item) => item.title === "明耀晨星"),
-      false
+    const event = events.find((item) => item.title === "明耀晨星");
+    assert.ok(event);
+    assert.deepEqual(
+      {
+        start_time: event.start_time,
+        end_time: event.end_time,
+        end_time_kind: event.end_time_kind,
+        end_time_text: event.end_time_text,
+        is_gacha: event.is_gacha,
+      },
+      {
+        start_time: "2026-08-09T12:00:00+08:00",
+        end_time: null,
+        end_time_kind: "relative",
+        end_time_text: "版本更新维护前",
+        is_gacha: false,
+      }
     );
     assert.equal(
       events.filter((item) => item.title === "作战演练" || item.title === "晨星于此闪耀")
