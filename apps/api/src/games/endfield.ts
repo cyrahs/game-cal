@@ -783,6 +783,22 @@ function extractEndfieldStandaloneSectionTitle(line: string): string | null {
   return quoted?.[1] ? normalizeTitle(quoted[1]) : null;
 }
 
+function extractEndfieldStandaloneTimeText(
+  line: string,
+  nextLine: string | undefined
+): string | null {
+  const normalized = line.replace(/^[·•]\s*/, "").trim();
+  if (!isEndfieldTimeSectionLabel(normalized)) return null;
+
+  const inlineTimeText = normalized
+    .replace(
+      /^(?:▼\/\/|■)?\s*(?:活动时间|开放时间|开启时间|开始时间)\s*[:：]?\s*/,
+      ""
+    )
+    .trim();
+  return inlineTimeText || nextLine || "";
+}
+
 function extractEndfieldCoopenedSignIns(
   lines: string[]
 ): Array<{ title: string; anchorTitle: string | null }> {
@@ -837,10 +853,8 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     }
 
     if (!currentTitle) continue;
-    if (!/^■\s*活动时间(?:\s*[:：]\s*.*)?$/.test(line)) continue;
-
-    const inlineTimeText = line.replace(/^■\s*活动时间\s*[:：]?\s*/, "").trim();
-    const timeText = inlineTimeText || lines[i + 1] || "";
+    const timeText = extractEndfieldStandaloneTimeText(line, lines[i + 1]);
+    if (timeText == null) continue;
     const window = parseEndfieldWindowText(timeText);
     if (!window.start) continue;
     standaloneWindowCount += 1;
