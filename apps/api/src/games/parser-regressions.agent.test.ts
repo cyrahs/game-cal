@@ -239,6 +239,66 @@ test("Endfield fails closed when a labeled time section is unresolved instead of
   }
 });
 
+test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "4601",
+              tab: "events",
+              title: "晨星于此闪耀 特许寻访",
+              startAt: 1786183200,
+              data: {
+                html: [
+                  "<p>「明耀晨星」限时签到活动同步开放，累计签到可获得活动奖励。</p>",
+                  "<p>▼//「晨星于此闪耀」特许寻访说明</p>",
+                  "<p>■活动时间</p>",
+                  "<p>2026/08/09 12:00（服务器时间） - 版本更新维护前</p>",
+                  "<p>■开放条件</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const event = events.find((item) => item.title === "明耀晨星");
+    assert.ok(event);
+    assert.deepEqual(
+      {
+        start_time: event.start_time,
+        end_time: event.end_time,
+        end_time_kind: event.end_time_kind,
+        end_time_text: event.end_time_text,
+        is_gacha: event.is_gacha,
+      },
+      {
+        start_time: "2026-08-09T12:00:00+08:00",
+        end_time: null,
+        end_time_kind: "relative",
+        end_time_text: "版本更新维护前",
+        is_gacha: false,
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Star Rail derives a nearby same-major version start from an explicit maintenance boundary", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {

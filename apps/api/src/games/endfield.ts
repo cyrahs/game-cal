@@ -783,6 +783,23 @@ function extractEndfieldStandaloneSectionTitle(line: string): string | null {
   return quoted?.[1] ? normalizeTitle(quoted[1]) : null;
 }
 
+function extractEndfieldCoopenedSignInTitles(lines: string[]): string[] {
+  const titles = new Map<string, string>();
+
+  for (const line of lines) {
+    const matches = line.matchAll(
+      /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
+    );
+    for (const match of matches) {
+      const title = normalizeTitle(match[1]);
+      const titleKey = normalizeTitleKey(title);
+      if (titleKey && !titles.has(titleKey)) titles.set(titleKey, title);
+    }
+  }
+
+  return [...titles.values()];
+}
+
 function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEvent[] {
   const html = item.data?.html;
   if (!html) return [];
@@ -791,6 +808,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const out: CalendarEvent[] = [];
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
+  let inheritedWindow: EndfieldParsedWindow | null = null;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -807,6 +825,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     const timeText = inlineTimeText || lines[i + 1] || "";
     const window = parseEndfieldWindowText(timeText);
     if (!window.start) continue;
+    inheritedWindow ??= window;
 
     const event = buildEndfieldEvent({
       id: `${item.cid ?? "event"}:${normalizeTitleKey(currentTitle)}:${window.start}:${window.end ?? window.endText ?? ""}`,
@@ -819,6 +838,28 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
       classificationContent: "",
     });
     if (event) out.push(event);
+  }
+
+  if (!inheritedWindow?.start) return out;
+
+  const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
+  for (const title of extractEndfieldCoopenedSignInTitles(lines)) {
+    const titleKey = normalizeTitleKey(title);
+    if (!titleKey || existingTitleKeys.has(titleKey)) continue;
+
+    const event = buildEndfieldEvent({
+      id: `${item.cid ?? "event"}:${titleKey}:${inheritedWindow.start}:${inheritedWindow.end ?? inheritedWindow.endText ?? ""}`,
+      title,
+      startNaive: inheritedWindow.start,
+      endNaive: inheritedWindow.end,
+      endTimeText: inheritedWindow.endText ?? undefined,
+      banner,
+      content: html,
+      classificationContent: "",
+    });
+    if (!event) continue;
+    out.push(event);
+    existingTitleKeys.add(titleKey);
   }
 
   return out;
