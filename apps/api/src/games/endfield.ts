@@ -948,35 +948,59 @@ function getEndfieldQuotedTitleKeys(input: string): string[] {
     .filter((key) => key.length >= 4);
 }
 
-export function applyAuthoritativePermanentWindows(
+function getPermanentSeriesReferenceIdentity(
+  event: CalendarEvent
+): { parentKey: string; seriesKey: string } | null {
+  if (
+    event.end_time != null ||
+    event.end_time_kind !== "relative" ||
+    !/(?:长期|常驻)/.test(event.end_time_text ?? "")
+  ) {
+    return null;
+  }
+
+  const parentMatch = /^(.+?)\s*系列更新(?:说明)?$/.exec(normalizeTitle(event.title));
+  const parentKey = normalizeTitleKey(parentMatch?.[1]);
+  if (!parentKey) return null;
+
+  const content = stripHtml(event.content ?? "");
+  const seriesMatch = /系列\s*[「『“"]([^」』”"]+)[」』”"]/.exec(content);
+  const seriesKey = normalizeTitleKey(seriesMatch?.[1]);
+  if (!seriesKey) return null;
+
+  return { parentKey, seriesKey };
+}
+
+function isCoveredByPermanentSeriesReference(
+  event: CalendarEvent,
+  reference: CalendarEvent
+): boolean {
+  if (reference.start_time !== event.start_time) return false;
+
+  const identity = getPermanentSeriesReferenceIdentity(reference);
+  if (!identity) return false;
+
+  const eventTitle = normalizeTitle(event.title);
+  if (!/挑战玩法更新/.test(eventTitle) || !/系列关卡/.test(eventTitle)) {
+    return false;
+  }
+
+  const quotedKeys = getEndfieldQuotedTitleKeys(eventTitle);
+  return (
+    extractLeadingQuotedTitleKey(eventTitle) === identity.parentKey &&
+    quotedKeys.includes(identity.seriesKey)
+  );
+}
+
+export function reconcileAuthoritativePermanentWindows(
   events: CalendarEvent[],
   references: CalendarEvent[]
 ): CalendarEvent[] {
-  const permanentReferences = references.filter(
+  const uncoveredEvents = events.filter(
     (event) =>
-      event.end_time == null &&
-      event.end_time_kind === "relative" &&
-      /(?:长期|常驻)/.test(event.end_time_text ?? "")
+      !references.some((reference) => isCoveredByPermanentSeriesReference(event, reference))
   );
-
-  return events.map((event) => {
-    const quotedKeys = getEndfieldQuotedTitleKeys(event.title);
-    if (quotedKeys.length === 0) return event;
-
-    const reference = permanentReferences.find((candidate) => {
-      if (candidate.start_time !== event.start_time) return false;
-      const candidateKey = normalizeTitleKey(candidate.title);
-      return quotedKeys.some((key) => candidateKey.includes(key));
-    });
-    if (!reference) return event;
-
-    return {
-      ...event,
-      end_time: null,
-      end_time_kind: "relative",
-      end_time_text: reference.end_time_text,
-    };
-  });
+  return [...references, ...uncoveredEvents];
 }
 
 function extractCommonsJsUrl(html: string): string | null {
@@ -1098,10 +1122,7 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
     ? parseVersionNoticeEvents(versionNotice.item, versionStartNaive)
     : [];
 
-  return mergeEvents([
-    ...tabEvents,
-    ...applyAuthoritativePermanentWindows(versionEvents, tabEvents),
-  ]);
+  return mergeEvents(reconcileAuthoritativePermanentWindows(versionEvents, tabEvents));
 }
 
 export async function fetchEndfieldCurrentVersion(

@@ -2,12 +2,12 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 
 import {
-  applyAuthoritativePermanentWindows,
   compareEndfieldVersionNoticeOrder,
   fetchEndfieldEvents,
   getEndfieldVersionNoticePriority,
   isEndfieldVersionNoticeCandidate,
   parseEndfieldWindowText,
+  reconcileAuthoritativePermanentWindows,
 } from "./endfield.js";
 import {
   extractStarRailTimeRangeFromContent,
@@ -241,7 +241,7 @@ test("Endfield fails closed when a labeled time section is unresolved instead of
   }
 });
 
-test("Endfield keeps a permanent series update from inheriting a finite version window", () => {
+test("Endfield replaces only the matching finite series update with its permanent notice", () => {
   const permanentWindow = parseEndfieldWindowText(
     "开放时间 2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放"
   );
@@ -251,11 +251,18 @@ test("Endfield keeps a permanent series update from inheriting a finite version 
     endText: "常驻开放",
   });
 
-  const [event] = applyAuthoritativePermanentWindows(
+  const events = reconcileAuthoritativePermanentWindows(
     [
       {
         id: "api:endfield:d3970dd7f1ce7cde2e569e671ffcab17",
         title: "「影拓丰碑」挑战玩法更新，开放「山中见犼」系列关卡",
+        start_time: "2026-08-06T12:00:00+08:00",
+        end_time: "2026-08-20T04:00:00+08:00",
+        is_gacha: false,
+      },
+      {
+        id: "limited-child",
+        title: "「影拓丰碑」挑战玩法更新，开放「兽犼试炼」系列关卡",
         start_time: "2026-08-06T12:00:00+08:00",
         end_time: "2026-08-20T04:00:00+08:00",
         is_gacha: false,
@@ -270,10 +277,19 @@ test("Endfield keeps a permanent series update from inheriting a finite version 
         end_time_kind: "relative",
         end_time_text: "常驻开放",
         is_gacha: false,
+        content: "本次「影拓丰碑」挑战玩法更新系列「山中见犼」，包含4个关卡。",
       },
     ]
   );
 
+  assert.equal(events.length, 2);
+  assert.equal(
+    events.some(
+      (event) => event.title === "「影拓丰碑」挑战玩法更新，开放「山中见犼」系列关卡"
+    ),
+    false
+  );
+  const event = events.find((item) => item.id === "5515");
   assert.deepEqual(
     {
       start_time: event?.start_time,
@@ -288,6 +304,13 @@ test("Endfield keeps a permanent series update from inheriting a finite version 
       end_time_text: "常驻开放",
     }
   );
+  assert.deepEqual(events.find((item) => item.id === "limited-child"), {
+    id: "limited-child",
+    title: "「影拓丰碑」挑战玩法更新，开放「兽犼试炼」系列关卡",
+    start_time: "2026-08-06T12:00:00+08:00",
+    end_time: "2026-08-20T04:00:00+08:00",
+    is_gacha: false,
+  });
 });
 
 test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
