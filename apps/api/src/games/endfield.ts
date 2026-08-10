@@ -137,6 +137,9 @@ function extractRelativeEndText(input: string): string | null {
   const text = normalizeTitle(input);
   if (!text) return null;
 
+  const permanentMatch = /(?:长期|常驻)(?:开放|开启|生效)?/.exec(text);
+  if (permanentMatch?.[0]) return permanentMatch[0];
+
   const maintenanceMatch = /(?:下次)?版本更新维护前/.exec(text);
   if (maintenanceMatch?.[0]) return maintenanceMatch[0];
 
@@ -192,17 +195,13 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   ).exec(text);
   const start = normalizeDateTimeCandidate(startKw?.[1]);
   const end = normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]);
-
-  if (start || end) {
-    return { start, end };
-  }
-
   const standaloneRelativeEndText = extractRelativeEndText(text);
-  if (standaloneRelativeEndText) {
+
+  if (start || end || standaloneRelativeEndText) {
     return {
-      start: null,
-      end: null,
-      endText: standaloneRelativeEndText,
+      start,
+      end,
+      endText: end ? undefined : standaloneRelativeEndText ?? undefined,
     };
   }
 
@@ -943,6 +942,43 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
   });
 }
 
+function getEndfieldQuotedTitleKeys(input: string): string[] {
+  return [...normalizeTitle(input).matchAll(/[「『“"]([^」』”"]+)[」』”"]/g)]
+    .map((match) => normalizeTitleKey(match[1]))
+    .filter((key) => key.length >= 4);
+}
+
+export function applyAuthoritativePermanentWindows(
+  events: CalendarEvent[],
+  references: CalendarEvent[]
+): CalendarEvent[] {
+  const permanentReferences = references.filter(
+    (event) =>
+      event.end_time == null &&
+      event.end_time_kind === "relative" &&
+      /(?:长期|常驻)/.test(event.end_time_text ?? "")
+  );
+
+  return events.map((event) => {
+    const quotedKeys = getEndfieldQuotedTitleKeys(event.title);
+    if (quotedKeys.length === 0) return event;
+
+    const reference = permanentReferences.find((candidate) => {
+      if (candidate.start_time !== event.start_time) return false;
+      const candidateKey = normalizeTitleKey(candidate.title);
+      return quotedKeys.some((key) => candidateKey.includes(key));
+    });
+    if (!reference) return event;
+
+    return {
+      ...event,
+      end_time: null,
+      end_time_kind: "relative",
+      end_time_text: reference.end_time_text,
+    };
+  });
+}
+
 function extractCommonsJsUrl(html: string): string | null {
   const m = /<script[^>]+src="([^"]+\/commons\.[^"]+\.js)"/i.exec(html);
   if (m?.[1]) return m[1];
@@ -1062,7 +1098,10 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
     ? parseVersionNoticeEvents(versionNotice.item, versionStartNaive)
     : [];
 
-  return mergeEvents([...tabEvents, ...versionEvents]);
+  return mergeEvents([
+    ...tabEvents,
+    ...applyAuthoritativePermanentWindows(versionEvents, tabEvents),
+  ]);
 }
 
 export async function fetchEndfieldCurrentVersion(

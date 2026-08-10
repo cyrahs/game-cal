@@ -117,7 +117,7 @@ function pickBestCandidate(
 }
 
 function normalizeDateTimeCandidate(input: string | undefined): string | null {
-  const source = (input ?? "").replace(/\s+/g, "").trim();
+  const source = (input ?? "").replace(/\s+/g, " ").trim();
   if (!source) return null;
 
   const m = /^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(source);
@@ -373,15 +373,19 @@ function pickContentItemForNotice(
   if (!items || items.length === 0) return undefined;
   if (items.length === 1) return items[0];
 
-  const targetKeys = [item.title, item.subtitle]
-    .map((value) => normalizeTitleKey(value))
-    .filter(Boolean);
-  for (const targetKey of targetKeys) {
-    const match = items.find(
-      (x) => normalizeTitleKey(x.title) === targetKey || normalizeTitleKey(x.subtitle) === targetKey
-    );
-    if (match) return match;
-  }
+  const targetKeys = new Set(
+    [item.title, item.subtitle]
+      .map((value) => normalizeTitleKey(value))
+      .filter(Boolean)
+  );
+  const matches = items.filter((candidate) =>
+    [candidate.title, candidate.subtitle]
+      .map((value) => normalizeTitleKey(value))
+      .some((key) => targetKeys.has(key))
+  );
+  const detailedMatch = matches.find((candidate) => Boolean(candidate.content?.trim()));
+  if (detailedMatch) return detailedMatch;
+  if (matches[0]) return matches[0];
 
   return items.find((x) => Boolean(x.content?.trim())) ?? items[0];
 }
