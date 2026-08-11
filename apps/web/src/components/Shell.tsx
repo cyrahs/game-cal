@@ -3,83 +3,18 @@ import dayjs from "dayjs";
 import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-import genshinIcon from "../assets/genshin.png";
-import starrailIcon from "../assets/starrail.png";
-import wwIcon from "../assets/wutheringwave.png";
-import zzzIcon from "../assets/zzz.png";
-import endfieldIcon from "../assets/endfield.png";
-import snowbreakIcon from "../assets/snowbreak.png";
 import type { CalendarEvent, GameId } from "../api/types";
 import { usePrefs } from "../context/prefs";
 import type { ThemePreference } from "../context/theme";
 import { useEvents } from "../hooks/useEvents";
-import {
-  computeRecurringWindow,
-  isCharacterTrialGachaEvent,
-  isUrgentByRemainingMs,
-  normalizeEventTitle,
-  parseDateTime,
-  resolveGachaClassification,
-} from "./TimelineCalendar/TimelineCalendar";
+import { isUrgentByRemainingMs, normalizeEventTitle } from "../lib/events";
+import { ALL_GAME_IDS, GAME_REGISTRY, GAME_REGISTRY_BY_ID } from "../lib/games";
+import { isCharacterTrialGachaEvent, resolveGachaClassification } from "../lib/gacha";
+import { computeRecurringWindow } from "../lib/recurring";
+import { parseDateTime } from "../lib/time";
 
-type GameLink = { id: GameId; to: string; name: string; icon: string };
 type SettingsTabId = "games" | "sync" | "config";
 
-const games: GameLink[] = [
-  {
-    id: "genshin",
-    to: "/genshin",
-    name: "原神",
-    icon: genshinIcon,
-  },
-  {
-    id: "starrail",
-    to: "/starrail",
-    name: "崩坏：星穹铁道",
-    icon: starrailIcon,
-  },
-  {
-    id: "zzz",
-    to: "/zzz",
-    name: "绝区零",
-    icon: zzzIcon,
-  },
-  {
-    id: "ww",
-    to: "/ww",
-    name: "鸣潮",
-    icon: wwIcon,
-  },
-  {
-    id: "snowbreak",
-    to: "/snowbreak",
-    name: "尘白禁区",
-    icon: snowbreakIcon,
-  },
-  {
-    id: "endfield",
-    to: "/endfield",
-    name: "明日方舟：终末地",
-    icon: endfieldIcon,
-  },
-];
-
-const allGameIds = games.map((g) => g.id);
-const GAME_BY_ID = games.reduce(
-  (acc, game) => {
-    acc[game.id] = game;
-    return acc;
-  },
-  {} as Record<GameId, GameLink>
-);
-const DATA_SOURCE_BY_GAME: Record<GameId, string> = {
-  genshin: "米哈游公告 API",
-  starrail: "米哈游公告 API",
-  zzz: "米哈游公告 API",
-  ww: "库洛公告 API",
-  snowbreak: "西山居公告 API",
-  endfield: "鹰角公告 API",
-};
 const THEME_OPTIONS: Array<{ id: ThemePreference; label: string }> = [
   { id: "light", label: "浅色" },
   { id: "dark", label: "深色" },
@@ -92,7 +27,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTabId; label: string }> = [
 ];
 
 function parseGameId(value: string): GameId | null {
-  return allGameIds.includes(value as GameId) ? (value as GameId) : null;
+  return ALL_GAME_IDS.includes(value as GameId) ? (value as GameId) : null;
 }
 
 function reorderGameIds(ids: GameId[], fromId: GameId, targetIndex: number): GameId[] {
@@ -135,12 +70,8 @@ export default function Shell() {
     exportRecurringSettings,
     importRecurringSettings,
   } = usePrefs();
-  const genshinEvents = useEvents("genshin");
-  const starrailEvents = useEvents("starrail");
-  const zzzEvents = useEvents("zzz");
-  const wwEvents = useEvents("ww");
-  const snowbreakEvents = useEvents("snowbreak");
-  const endfieldEvents = useEvents("endfield");
+  // ALL_GAME_IDS is a module constant, so the hook call order is stable across renders.
+  const eventStates = ALL_GAME_IDS.map((gameId) => [gameId, useEvents(gameId)] as const);
   const themePreference = prefs.theme;
   const themePreferenceIndex = Math.max(
     0,
@@ -174,14 +105,14 @@ export default function Shell() {
   );
   const currentGameId = useMemo<GameId | null>(() => {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
-    const matched = games.find((g) => g.to === normalizedPath);
+    const matched = GAME_REGISTRY.find((g) => g.route === normalizedPath);
     return matched?.id ?? null;
   }, [location.pathname]);
-  const currentDataSource = currentGameId ? DATA_SOURCE_BY_GAME[currentGameId] : "聚合所有游戏公告 API";
+  const currentDataSource = currentGameId ? GAME_REGISTRY_BY_ID[currentGameId].dataSource : "聚合所有游戏公告 API";
   const currentUpstreamUpdatedAtLabel = (() => {
     if (!currentGameId) {
       const updatedAtMsList: number[] = [];
-      for (const state of [genshinEvents, starrailEvents, zzzEvents, wwEvents, snowbreakEvents, endfieldEvents]) {
+      for (const [, state] of eventStates) {
         if (state.status === "success") updatedAtMsList.push(state.updatedAtMs);
       }
       if (updatedAtMsList.length === 0) return null;
@@ -191,20 +122,9 @@ export default function Shell() {
       return `最新更新于 ${d.format("MM/DD HH:mm")}`;
     }
 
-    const state =
-      currentGameId === "genshin"
-        ? genshinEvents
-        : currentGameId === "starrail"
-          ? starrailEvents
-          : currentGameId === "zzz"
-            ? zzzEvents
-            : currentGameId === "ww"
-              ? wwEvents
-              : currentGameId === "snowbreak"
-                ? snowbreakEvents
-                : endfieldEvents;
+    const state = eventStates.find(([gameId]) => gameId === currentGameId)?.[1];
 
-    if (state.status !== "success") return null;
+    if (state?.status !== "success") return null;
     const d = dayjs(state.updatedAtMs);
     if (!d.isValid()) return null;
     return `更新于 ${d.format("MM/DD HH:mm")}`;
@@ -242,7 +162,7 @@ export default function Shell() {
 
       let gameCount = 0;
       let activityCount = 0;
-      for (const gameId of allGameIds) {
+      for (const gameId of ALL_GAME_IDS) {
         const activities = payload.recurringActivitiesByGame[gameId];
         if (!activities || activities.length === 0) continue;
         gameCount += 1;
@@ -281,37 +201,26 @@ export default function Shell() {
   const visibleGameIdSet = useMemo(() => new Set<GameId>(visibleGameIds), [visibleGameIds]);
   const orderedMenuGameIds = useMemo(() => {
     if (gameOrderIds.length > 0) return gameOrderIds;
-    return allGameIds;
+    return ALL_GAME_IDS;
   }, [gameOrderIds]);
   const orderedVisibleGames = useMemo(
-    () => orderedMenuGameIds.filter((id) => visibleGameIdSet.has(id)).map((id) => GAME_BY_ID[id]),
+    () => orderedMenuGameIds.filter((id) => visibleGameIdSet.has(id)).map((id) => GAME_REGISTRY_BY_ID[id]),
     [orderedMenuGameIds, visibleGameIdSet]
   );
-  const orderedMenuGames = useMemo(() => orderedMenuGameIds.map((id) => GAME_BY_ID[id]), [orderedMenuGameIds]);
+  const orderedMenuGames = useMemo(() => orderedMenuGameIds.map((id) => GAME_REGISTRY_BY_ID[id]), [orderedMenuGameIds]);
   const upstreamEventsByGame = useMemo<Record<GameId, CalendarEvent[]>>(
-    () => ({
-      genshin: genshinEvents.status === "success" ? genshinEvents.data : [],
-      starrail: starrailEvents.status === "success" ? starrailEvents.data : [],
-      zzz: zzzEvents.status === "success" ? zzzEvents.data : [],
-      ww: wwEvents.status === "success" ? wwEvents.data : [],
-      snowbreak:
-        snowbreakEvents.status === "success" ? snowbreakEvents.data : [],
-      endfield: endfieldEvents.status === "success" ? endfieldEvents.data : [],
-    }),
-    [endfieldEvents, genshinEvents, snowbreakEvents, starrailEvents, wwEvents, zzzEvents]
+    () =>
+      Object.fromEntries(
+        eventStates.map(([gameId, state]) => [gameId, state.status === "success" ? state.data : []])
+      ) as Record<GameId, CalendarEvent[]>,
+    // eventStates is a fresh array each render; depend on the stable per-game state objects instead.
+    eventStates.map(([, state]) => state)
   );
   const hasUrgentByGame = useMemo<Record<GameId, boolean>>(() => {
     const nowMs = now.valueOf();
-    const next: Record<GameId, boolean> = {
-      genshin: false,
-      starrail: false,
-      zzz: false,
-      ww: false,
-      snowbreak: false,
-      endfield: false,
-    };
+    const next = Object.fromEntries(ALL_GAME_IDS.map((gameId) => [gameId, false])) as Record<GameId, boolean>;
 
-    for (const gameId of allGameIds) {
+    for (const gameId of ALL_GAME_IDS) {
       const completedIds = new Set<string | number>(prefs.timeline.completedIdsByGame[gameId] ?? []);
       const upstreamEvents = upstreamEventsByGame[gameId];
       let urgent = false;
@@ -529,8 +438,8 @@ export default function Shell() {
 
             {orderedVisibleGames.map((g) => (
               <NavLink
-                key={g.to}
-                to={g.to}
+                key={g.route}
+                to={g.route}
                 aria-label={g.name}
                 title={g.name}
                 className={({ isActive }) =>

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "game-cal-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@game-cal/web", "dev"],
+      "port": 5173
+    }
+  ]
+}
