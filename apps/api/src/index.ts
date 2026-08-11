@@ -33,6 +33,8 @@ function parseCacheTtlMs(): number {
 }
 
 const cacheTtlMs = parseCacheTtlMs();
+// Browser-side max-age stays short; the server-side cache above owns freshness.
+const CLIENT_CACHE_MAX_AGE_SECONDS = 60;
 const SYNC_DISABLED_MSG = "Sync is only available in Worker mode with D1 binding";
 
 function syncUnavailable(reply: { code: (code: number) => unknown }): ApiResponse<null> {
@@ -156,7 +158,7 @@ server.get<{
   const snapshot = await getGameSnapshotData(game);
   const data = snapshot.events;
 
-  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header("Cache-Control", `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`);
   reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
@@ -177,7 +179,7 @@ server.get<{
   const snapshot = await getGameSnapshotData(game);
   const data = snapshot.events;
 
-  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header("Cache-Control", `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`);
   reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
@@ -194,7 +196,7 @@ server.get<{
   const snapshot = await getGameSnapshotData(game);
   const data = snapshot.version;
 
-  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header("Cache-Control", `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`);
   reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });
@@ -215,7 +217,7 @@ server.get<{
   const snapshot = await getGameSnapshotData(game);
   const data = snapshot.version;
 
-  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  reply.header("Cache-Control", `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`);
   reply.header(UPDATED_AT_HEADER, String(snapshot.updatedAtMs));
   return { code: 200, data };
 });

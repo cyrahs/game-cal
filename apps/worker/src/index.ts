@@ -37,6 +37,11 @@ interface Env extends RuntimeEnv {
 const cache = new SimpleTtlCache();
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 8;
 const DEFAULT_CACHE_REFRESH_MARGIN_SECONDS = 30 * 60;
+// D1 is the cache of record; isolate memory only shields D1 from per-request reads.
+// Keep it short so cron-refreshed rows propagate to every isolate quickly.
+const D1_READ_CACHE_TTL_MS = 60 * 1000;
+// Browser-side max-age must stay short: clients poll the Worker, the Worker owns the cache.
+const CLIENT_CACHE_MAX_AGE_SECONDS = 60;
 const DEFAULT_SYNC_RATE_LIMIT_MAX = 120;
 const DEFAULT_SYNC_RATE_LIMIT_WINDOW_SECONDS = 60;
 const DEFAULT_SYNC_RATE_LIMIT_WRITE_COST = 1;
@@ -715,7 +720,7 @@ function invalidateAllGameCaches(): void {
   }
 }
 
-async function ensureDeploymentCacheRevision(env: Env): Promise<void> {
+async function ensureDeploymentCacheRevision(env: Env, ctx?: ExecutionContext): Promise<void> {
   if (!env.DB) return;
 
   const deploymentRevision = getDeploymentRevision(env);
@@ -725,16 +730,22 @@ async function ensureDeploymentCacheRevision(env: Env): Promise<void> {
 
   const persistedRevision = await readCacheMetaValue(env, CACHE_META_DEPLOYMENT_REVISION_KEY);
   if (persistedRevision !== deploymentRevision) {
-    await env.DB.batch([
-      env.DB.prepare(`DELETE FROM ${EVENTS_TABLE}`),
-      env.DB.prepare(`DELETE FROM ${VERSIONS_TABLE}`),
-      env.DB.prepare(
-        `INSERT INTO ${CACHE_META_TABLE} (key, value, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-      ).bind(CACHE_META_DEPLOYMENT_REVISION_KEY, deploymentRevision, Date.now()),
-    ]);
+    // A new deployment may change parser output, so refresh every cached row —
+    // but keep serving the previous rows until fresh data lands. Deleting them
+    // here would force visitors onto synchronous upstream fetches (slow first
+    // paint, and upstream hiccups surface as fetch errors).
+    await env.DB.prepare(
+      `INSERT INTO ${CACHE_META_TABLE} (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    )
+      .bind(CACHE_META_DEPLOYMENT_REVISION_KEY, deploymentRevision, Date.now())
+      .run();
     invalidateAllGameCaches();
+    const games = GAMES.map((g) => g.id);
+    scheduleBackgroundTask(ctx, "Post-deploy cache refresh failed", async () => {
+      await Promise.all([refreshAllGamesToD1(env, games), refreshAllVersionsToD1(env, games)]);
+    });
   }
 
   lastEnsuredDeploymentRevision = deploymentRevision;
@@ -828,13 +839,6 @@ type VersionWithUpdatedAt = {
   updatedAtMs: number;
 };
 
-function parseFreshUpdatedAt(updatedAtRaw: number | string | undefined, ttlMs: number): number | null {
-  const updatedAt = Number(updatedAtRaw);
-  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return null;
-  if (isCacheStale(updatedAt, ttlMs, Date.now())) return null;
-  return updatedAt;
-}
-
 function eventD1CacheKey(game: GameId): string {
   return `events:d1:${game}`;
 }
@@ -843,18 +847,19 @@ function versionD1CacheKey(game: GameId): string {
   return `version:d1:${game}`;
 }
 
-function snapshotCacheKey(game: GameId): string {
-  return `snapshot:${game}`;
-}
-
 function invalidateEventCaches(game: GameId): void {
   cache.delete(eventD1CacheKey(game));
-  cache.delete(snapshotCacheKey(game));
 }
 
 function invalidateVersionCaches(game: GameId): void {
   cache.delete(versionD1CacheKey(game));
-  cache.delete(snapshotCacheKey(game));
+}
+
+function scheduleBackgroundTask(ctx: ExecutionContext | undefined, label: string, task: () => Promise<unknown>): void {
+  const run = task().catch((err) => {
+    console.error(label, { err });
+  });
+  ctx?.waitUntil(run);
 }
 
 async function refreshGameEventsToD1(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
@@ -989,7 +994,7 @@ async function refreshAllVersionsToD1IfNeeded(env: Env): Promise<boolean> {
   return true;
 }
 
-async function getEventsForGameWithCache(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
+async function getEventsForGameWithCache(env: Env, game: GameId, ctx?: ExecutionContext): Promise<EventsWithUpdatedAt> {
   const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
   const memoryFallback = async () =>
     await cache.getOrSet(`events:${game}`, cacheTtlMs, async () => {
@@ -999,37 +1004,27 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
 
   if (!env.DB) return await memoryFallback();
 
-  return await cache.getOrSet(eventD1CacheKey(game), cacheTtlMs, async () => {
+  return await cache.getOrSet(eventD1CacheKey(game), D1_READ_CACHE_TTL_MS, async () => {
     try {
       if (!(await ensureEventsSchema(env))) {
         return await memoryFallback();
       }
 
       const row = await readEventCacheRow(env, game);
+      const parsed = row ? decodeEventPayload(row.payload) : null;
+      const updatedAt = row ? Number(row.updated_at) : Number.NaN;
 
-      if (!row) {
-        await Promise.allSettled([triggerRefreshGameEvents(env, game)]);
-        const refreshed = await readEventCacheRow(env, game);
-        const parsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        const updatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
-        if (parsed && updatedAt != null) return { events: parsed, updatedAtMs: updatedAt };
-        return await refreshGameEventsToD1(env, game);
-      }
-
-      const parsed = decodeEventPayload(row.payload);
-      const updatedAt = Number(row.updated_at);
-      if (!parsed || !Number.isFinite(updatedAt) || updatedAt <= 0 || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
-        await Promise.allSettled([triggerRefreshGameEvents(env, game)]);
-        const refreshed = await readEventCacheRow(env, game);
-        const refreshedParsed = refreshed ? decodeEventPayload(refreshed.payload) : null;
-        const refreshedUpdatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
-        if (refreshedParsed && refreshedUpdatedAt != null) {
-          return { events: refreshedParsed, updatedAtMs: refreshedUpdatedAt };
+      if (parsed && Number.isFinite(updatedAt) && updatedAt > 0) {
+        // Serve whatever D1 has — even past TTL — and let the refresh happen in
+        // the background. Requests must never wait on (or fail with) upstream.
+        if (isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+          scheduleBackgroundTask(ctx, "Stale event cache refresh failed", () => triggerRefreshGameEvents(env, game));
         }
-        return await refreshGameEventsToD1(env, game);
+        return { events: parsed, updatedAtMs: updatedAt };
       }
 
-      return { events: parsed, updatedAtMs: updatedAt };
+      // No usable cached payload (first boot or corrupt row): fetch upstream once.
+      return await triggerRefreshGameEvents(env, game);
     } catch (err) {
       console.error("D1 event cache failed, fallback to in-memory cache", { game, err });
       return await memoryFallback();
@@ -1037,7 +1032,7 @@ async function getEventsForGameWithCache(env: Env, game: GameId): Promise<Events
   });
 }
 
-async function getVersionForGameWithCache(env: Env, game: GameId): Promise<VersionWithUpdatedAt> {
+async function getVersionForGameWithCache(env: Env, game: GameId, ctx?: ExecutionContext): Promise<VersionWithUpdatedAt> {
   const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
   const memoryFallback = async () =>
     await cache.getOrSet(`version:${game}`, cacheTtlMs, async () => {
@@ -1047,39 +1042,24 @@ async function getVersionForGameWithCache(env: Env, game: GameId): Promise<Versi
 
   if (!env.DB) return await memoryFallback();
 
-  return await cache.getOrSet(versionD1CacheKey(game), cacheTtlMs, async () => {
+  return await cache.getOrSet(versionD1CacheKey(game), D1_READ_CACHE_TTL_MS, async () => {
     try {
       if (!(await ensureVersionsSchema(env))) {
         return await memoryFallback();
       }
 
       const row = await readVersionCacheRow(env, game);
+      const decoded = row ? decodeVersionPayload(row.payload) : { valid: false as const };
+      const updatedAt = row ? Number(row.updated_at) : Number.NaN;
 
-      if (!row) {
-        await Promise.allSettled([triggerRefreshGameVersion(env, game)]);
-        const refreshed = await readVersionCacheRow(env, game);
-        const decoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
-        const updatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
-        if (decoded.valid && updatedAt != null) {
-          return { version: decoded.value, updatedAtMs: updatedAt };
+      if (decoded.valid && Number.isFinite(updatedAt) && updatedAt > 0) {
+        if (isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+          scheduleBackgroundTask(ctx, "Stale version cache refresh failed", () => triggerRefreshGameVersion(env, game));
         }
-        return await refreshGameVersionToD1(env, game);
+        return { version: decoded.value, updatedAtMs: updatedAt };
       }
 
-      const decoded = decodeVersionPayload(row.payload);
-      const updatedAt = Number(row.updated_at);
-      if (!decoded.valid || !Number.isFinite(updatedAt) || updatedAt <= 0 || isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
-        await Promise.allSettled([triggerRefreshGameVersion(env, game)]);
-        const refreshed = await readVersionCacheRow(env, game);
-        const refreshedDecoded = refreshed ? decodeVersionPayload(refreshed.payload) : { valid: false as const };
-        const refreshedUpdatedAt = refreshed ? parseFreshUpdatedAt(refreshed.updated_at, cacheTtlMs) : null;
-        if (refreshedDecoded.valid && refreshedUpdatedAt != null) {
-          return { version: refreshedDecoded.value, updatedAtMs: refreshedUpdatedAt };
-        }
-        return await refreshGameVersionToD1(env, game);
-      }
-
-      return { version: decoded.value, updatedAtMs: updatedAt };
+      return await triggerRefreshGameVersion(env, game);
     } catch (err) {
       console.error("D1 version cache failed, fallback to in-memory cache", { game, err });
       return await memoryFallback();
@@ -1093,15 +1073,12 @@ type GameSnapshotData = {
   version: GameVersionInfo | null;
 };
 
-async function getGameSnapshotWithCache(env: Env, game: GameId): Promise<GameSnapshotData> {
-  const { ttlMs: cacheTtlMs } = parseCacheConfig(env);
-  return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
-    const [eventsRes, versionRes] = await Promise.all([
-      getEventsForGameWithCache(env, game),
-      getVersionForGameWithCache(env, game),
-    ]);
-    return { events: eventsRes.events, eventsUpdatedAtMs: eventsRes.updatedAtMs, version: versionRes.version };
-  });
+async function getGameSnapshotWithCache(env: Env, game: GameId, ctx?: ExecutionContext): Promise<GameSnapshotData> {
+  const [eventsRes, versionRes] = await Promise.all([
+    getEventsForGameWithCache(env, game, ctx),
+    getVersionForGameWithCache(env, game, ctx),
+  ]);
+  return { events: eventsRes.events, eventsUpdatedAtMs: eventsRes.updatedAtMs, version: versionRes.version };
 }
 
 async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -1301,10 +1278,6 @@ async function handleSyncApi(request: Request, env: Env, ctx: ExecutionContext):
   return json({ code: 405, msg: "Method not allowed", data: null }, { status: 405 });
 }
 
-function parseCacheTtlMs(env: Env): number {
-  return parseCacheConfig(env).ttlMs;
-}
-
 function parseCorsAllowlist(env: Env): string[] | null {
   const raw = (env.CORS_ORIGIN ?? "").trim();
   if (!raw) return null;
@@ -1483,12 +1456,11 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
       });
     }
 
-    const cacheTtlMs = parseCacheTtlMs(env);
-    const snapshot = await getGameSnapshotWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game, ctx);
     const data = snapshot.version;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
-      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+      headers: { "cache-control": `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}` },
     });
   }
 
@@ -1505,13 +1477,12 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
       });
     }
 
-    const cacheTtlMs = parseCacheTtlMs(env);
-    const snapshot = await getGameSnapshotWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game, ctx);
     const data = snapshot.events;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
       headers: {
-        "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}`,
+        "cache-control": `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`,
         [UPDATED_AT_HEADER]: String(snapshot.eventsUpdatedAtMs),
       },
     });
@@ -1526,12 +1497,11 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
       });
     }
 
-    const cacheTtlMs = parseCacheTtlMs(env);
-    const snapshot = await getGameSnapshotWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game, ctx);
     const data = snapshot.version;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
-      headers: { "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}` },
+      headers: { "cache-control": `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}` },
     });
   }
 
@@ -1544,13 +1514,12 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
       });
     }
 
-    const cacheTtlMs = parseCacheTtlMs(env);
-    const snapshot = await getGameSnapshotWithCache(env, game);
+    const snapshot = await getGameSnapshotWithCache(env, game, ctx);
     const data = snapshot.events;
 
     return json({ code: 200, data } satisfies ApiResponse<typeof data>, {
       headers: {
-        "cache-control": `public, max-age=${Math.floor(cacheTtlMs / 1000)}`,
+        "cache-control": `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}`,
         [UPDATED_AT_HEADER]: String(snapshot.eventsUpdatedAtMs),
       },
     });
@@ -1563,7 +1532,7 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    await ensureDeploymentCacheRevision(env);
+    await ensureDeploymentCacheRevision(env, ctx);
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api")) {
@@ -1574,8 +1543,8 @@ export default {
     // Static SPA assets (built from apps/web). See wrangler.jsonc "assets".
     return env.ASSETS.fetch(request);
   },
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await ensureDeploymentCacheRevision(env);
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    await ensureDeploymentCacheRevision(env, ctx);
     try {
       await flushDueSyncRowsToD1(env);
     } catch (err) {

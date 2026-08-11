@@ -3,93 +3,44 @@ import { useMemo } from "react";
 import type { GameId } from "../api/types";
 import TimelineCalendar, { type TimelineCalendarEvent } from "../components/TimelineCalendar/TimelineCalendar";
 import { usePrefs } from "../context/prefs";
+import { ALL_GAME_IDS, GAME_REGISTRY_BY_ID } from "../lib/games";
 import { useEvents } from "../hooks/useEvents";
 import { useCurrentVersion } from "../hooks/useCurrentVersion";
 
-const GAME_LABELS: Record<GameId, string> = {
-  genshin: "原神",
-  starrail: "崩坏：星穹铁道",
-  zzz: "绝区零",
-  ww: "鸣潮",
-  snowbreak: "尘白禁区",
-  endfield: "明日方舟：终末地",
-};
-
 export default function HomePage() {
   const { prefs } = usePrefs();
-  const genshinEvents = useEvents("genshin");
-  const starrailEvents = useEvents("starrail");
-  const zzzEvents = useEvents("zzz");
-  const wwEvents = useEvents("ww");
-  const snowbreakEvents = useEvents("snowbreak");
-  const endfieldEvents = useEvents("endfield");
-  const genshinVersion = useCurrentVersion("genshin");
-  const starrailVersion = useCurrentVersion("starrail");
-  const zzzVersion = useCurrentVersion("zzz");
-  const wwVersion = useCurrentVersion("ww");
-  const snowbreakVersion = useCurrentVersion("snowbreak");
-  const endfieldVersion = useCurrentVersion("endfield");
+  // ALL_GAME_IDS is a module constant, so the hook call order is stable across renders.
+  const eventStates = ALL_GAME_IDS.map((gameId) => [gameId, useEvents(gameId)] as const);
+  const versionStates = ALL_GAME_IDS.map((gameId) => [gameId, useCurrentVersion(gameId)] as const);
   const visibleGameIdSet = useMemo(() => new Set<GameId>(prefs.visibleGameIds), [prefs.visibleGameIds]);
 
-  const aggregatedEvents = useMemo<TimelineCalendarEvent[]>(() => {
-    const pairs = [
-      ["genshin", genshinEvents],
-      ["starrail", starrailEvents],
-      ["zzz", zzzEvents],
-      ["ww", wwEvents],
-      ["snowbreak", snowbreakEvents],
-      ["endfield", endfieldEvents],
-    ] as const;
+  const visibleEventStates = eventStates.filter(([gameId]) => visibleGameIdSet.has(gameId));
+  const visibleVersionStates = versionStates.filter(([gameId]) => visibleGameIdSet.has(gameId));
 
-    return pairs.flatMap(([gameId, state]) => {
+  const aggregatedEvents = useMemo<TimelineCalendarEvent[]>(() => {
+    return eventStates.flatMap(([gameId, state]) => {
       if (!visibleGameIdSet.has(gameId)) return [];
       if (state.status !== "success") return [];
       return state.data.map((event) => ({ ...event, gameId }));
     });
-  }, [endfieldEvents, genshinEvents, snowbreakEvents, starrailEvents, visibleGameIdSet, wwEvents, zzzEvents]);
+    // eventStates is a fresh array each render; depend on the stable per-game state objects instead.
+  }, [...eventStates.map(([, state]) => state), visibleGameIdSet]);
 
   const currentVersions = useMemo(() => {
-    return [genshinVersion, starrailVersion, zzzVersion, wwVersion, snowbreakVersion, endfieldVersion].flatMap((state) => {
+    return versionStates.flatMap(([, state]) => {
       if (state.status !== "success" || !state.data) return [];
       if (!visibleGameIdSet.has(state.data.game)) return [];
       return state.data;
     });
-  }, [endfieldVersion, genshinVersion, snowbreakVersion, starrailVersion, visibleGameIdSet, wwVersion, zzzVersion]);
+  }, [...versionStates.map(([, state]) => state), visibleGameIdSet]);
 
-  const states = (
-    [
-      ["genshin", genshinEvents],
-      ["starrail", starrailEvents],
-      ["zzz", zzzEvents],
-      ["ww", wwEvents],
-      ["snowbreak", snowbreakEvents],
-      ["endfield", endfieldEvents],
-    ] as const
-  ).flatMap(([gameId, state]) => (visibleGameIdSet.has(gameId) ? [state] : []));
-  const versionStates = (
-    [
-      ["genshin", genshinVersion],
-      ["starrail", starrailVersion],
-      ["zzz", zzzVersion],
-      ["ww", wwVersion],
-      ["snowbreak", snowbreakVersion],
-      ["endfield", endfieldVersion],
-    ] as const
-  ).flatMap(([gameId, state]) => (visibleGameIdSet.has(gameId) ? [state] : []));
-  const hasSuccess = states.some((state) => state.status === "success");
-  const isLoading = states.some((state) => state.status === "loading") || versionStates.some((state) => state.status === "loading");
-  const eventErrors = [
-    ["genshin", genshinEvents],
-    ["starrail", starrailEvents],
-    ["zzz", zzzEvents],
-    ["ww", wwEvents],
-    ["snowbreak", snowbreakEvents],
-    ["endfield", endfieldEvents],
-  ] as const;
-  const failedEventLoads = eventErrors.flatMap(([gameId, state]) => {
-    if (!visibleGameIdSet.has(gameId)) return [];
+  const hasSuccess = visibleEventStates.some(([, state]) => state.status === "success");
+  const isLoading =
+    visibleEventStates.some(([, state]) => state.status === "loading") ||
+    visibleVersionStates.some(([, state]) => state.status === "loading");
+  const failedEventLoads = visibleEventStates.flatMap(([gameId, state]) => {
     if (state.status !== "error") return [];
-    return `${GAME_LABELS[gameId]}: ${state.error.message}`;
+    return `${GAME_REGISTRY_BY_ID[gameId].name}: ${state.error.message}`;
   });
 
   if (!hasSuccess && isLoading) {
