@@ -783,6 +783,53 @@ function extractEndfieldStandaloneSectionTitle(line: string): string | null {
   return quoted?.[1] ? normalizeTitle(quoted[1]) : null;
 }
 
+function extractEndfieldStandaloneTimeText(
+  line: string,
+  nextLine: string | undefined
+): string | null {
+  const normalized = line.replace(/^[·•]\s*/, "").trim();
+  if (!isEndfieldTimeSectionLabel(normalized)) return null;
+
+  const inlineTimeText = normalized
+    .replace(
+      /^(?:▼\/\/|■)?\s*(?:活动时间|开放时间|开启时间|开始时间)\s*[:：]?\s*/,
+      ""
+    )
+    .trim();
+  return inlineTimeText || nextLine || "";
+}
+
+function extractEndfieldCoopenedSignIns(
+  lines: string[]
+): Array<{ title: string; anchorTitle: string | null }> {
+  const activities = new Map<string, { title: string; anchorTitle: string | null }>();
+  const text = lines.join("\n");
+  const matches = text.matchAll(
+    /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
+  );
+
+  for (const match of matches) {
+    const title = normalizeTitle(match[1]);
+    const titleKey = normalizeTitleKey(title);
+    if (!titleKey || activities.has(titleKey)) continue;
+
+    const nearbyPrefix = text.slice(Math.max(0, match.index - 240), match.index);
+    const anchorMatches = [
+      ...nearbyPrefix.matchAll(
+        /[「『“"]([^」』”"]+)[」』”"][^「『“"\n]{0,40}?开放期间/g
+      ),
+    ];
+    const anchorTitle = anchorMatches.at(-1)?.[1];
+
+    activities.set(titleKey, {
+      title,
+      anchorTitle: anchorTitle ? normalizeTitle(anchorTitle) : null,
+    });
+  }
+
+  return [...activities.values()];
+}
+
 function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEvent[] {
   const html = item.data?.html;
   if (!html) return [];
@@ -791,22 +838,28 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const out: CalendarEvent[] = [];
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
+  let inheritedWindow: EndfieldParsedWindow | null = null;
+  const sectionWindows = new Map<string, EndfieldParsedWindow>();
+  let standaloneSectionCount = 0;
+  let standaloneWindowCount = 0;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const sectionTitle = extractEndfieldStandaloneSectionTitle(line);
     if (sectionTitle) {
       currentTitle = sectionTitle;
+      standaloneSectionCount += 1;
       continue;
     }
 
     if (!currentTitle) continue;
-    if (!/^■\s*活动时间(?:\s*[:：]\s*.*)?$/.test(line)) continue;
-
-    const inlineTimeText = line.replace(/^■\s*活动时间\s*[:：]?\s*/, "").trim();
-    const timeText = inlineTimeText || lines[i + 1] || "";
+    const timeText = extractEndfieldStandaloneTimeText(line, lines[i + 1]);
+    if (timeText == null) continue;
     const window = parseEndfieldWindowText(timeText);
     if (!window.start) continue;
+    standaloneWindowCount += 1;
+    inheritedWindow ??= window;
+    sectionWindows.set(normalizeTitleKey(currentTitle), window);
 
     const event = buildEndfieldEvent({
       id: `${item.cid ?? "event"}:${normalizeTitleKey(currentTitle)}:${window.start}:${window.end ?? window.endText ?? ""}`,
@@ -819,6 +872,34 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
       classificationContent: "",
     });
     if (event) out.push(event);
+  }
+
+  const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
+  for (const activity of extractEndfieldCoopenedSignIns(lines)) {
+    const title = activity.title;
+    const titleKey = normalizeTitleKey(title);
+    if (!titleKey || existingTitleKeys.has(titleKey)) continue;
+
+    const window = activity.anchorTitle
+      ? sectionWindows.get(normalizeTitleKey(activity.anchorTitle))
+      : standaloneSectionCount === 1 && standaloneWindowCount === 1
+        ? inheritedWindow
+        : null;
+    if (!window?.start) continue;
+
+    const event = buildEndfieldEvent({
+      id: `${item.cid ?? "event"}:${titleKey}:${window.start}:${window.end ?? window.endText ?? ""}`,
+      title,
+      startNaive: window.start,
+      endNaive: window.end,
+      endTimeText: window.endText ?? undefined,
+      banner,
+      content: html,
+      classificationContent: "",
+    });
+    if (!event) continue;
+    out.push(event);
+    existingTitleKeys.add(titleKey);
   }
 
   return out;
