@@ -1,10 +1,11 @@
-import { apiGetWithUpdatedAt } from "../api/client";
+import { fetchGameSummaryEntry } from "../api/summary";
 import type { CalendarEvent } from "../api/types";
 import { type CachedResourceState, createGameResourceHook } from "./useCachedResource";
 
 export type UseEventsState = CachedResourceState<CalendarEvent[]>;
 
 export const useEvents = createGameResourceHook<CalendarEvent[]>(async (game) => {
-  const { json, updatedAtMs } = await apiGetWithUpdatedAt<CalendarEvent[]>(`/api/events/${game}`);
-  return { data: json.data, updatedAtMs: updatedAtMs ?? Date.now() };
+  const entry = await fetchGameSummaryEntry(game);
+  if (!entry.ok) throw new Error(entry.error || "加载失败");
+  return { data: entry.events, updatedAtMs: entry.updatedAtMs };
 });

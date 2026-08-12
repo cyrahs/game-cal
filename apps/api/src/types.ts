@@ -43,6 +43,25 @@ export interface ApiResponse<T> {
   data: T;
 }
 
+// /api/summary
+export type GameSummaryEntry =
+  | {
+      game: GameId;
+      ok: true;
+      events: CalendarEvent[];
+      version: GameVersionInfo | null;
+      updatedAtMs: number; // epoch ms of the events snapshot
+    }
+  | {
+      game: GameId;
+      ok: false;
+      error: string;
+    };
+
+export interface GamesSummary {
+  games: GameSummaryEntry[];
+}
+
 // /api/sync/*
 export interface SyncStateData {
   uuid: string;

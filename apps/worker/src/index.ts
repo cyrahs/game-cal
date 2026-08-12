@@ -6,7 +6,14 @@ import {
   ZZZ_SNAPSHOT_CACHE_TTL_MS,
 } from "../../api/src/lib/zzzSnapshot.js";
 import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "../../api/src/games/index.js";
-import type { ApiResponse, CalendarEvent, GameId, GameVersionInfo } from "../../api/src/types.js";
+import type {
+  ApiResponse,
+  CalendarEvent,
+  GameId,
+  GameSummaryEntry,
+  GamesSummary,
+  GameVersionInfo,
+} from "../../api/src/types.js";
 
 interface Env extends RuntimeEnv {
   // Workers Assets binding (see wrangler.jsonc assets.binding).
@@ -1443,6 +1450,30 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
     return json({ code: 200, data: GAMES } satisfies ApiResponse<typeof GAMES>);
   }
 
+  if (url.pathname === "/api/summary") {
+    const games = await Promise.all(
+      GAMES.map(async ({ id }): Promise<GameSummaryEntry> => {
+        try {
+          const snapshot = await getGameSnapshotWithCache(env, id, ctx);
+          return {
+            game: id,
+            ok: true,
+            events: snapshot.events,
+            version: snapshot.version,
+            updatedAtMs: snapshot.eventsUpdatedAtMs,
+          };
+        } catch (err) {
+          console.error("Summary snapshot failed", { game: id, err });
+          return { game: id, ok: false, error: "Upstream fetch failed" };
+        }
+      })
+    );
+
+    return json({ code: 200, data: { games } } satisfies ApiResponse<GamesSummary>, {
+      headers: { "cache-control": `public, max-age=${CLIENT_CACHE_MAX_AGE_SECONDS}` },
+    });
+  }
+
   if (url.pathname === "/api/version") {
     const game = url.searchParams.get("game");
     if (!game) {
@@ -1532,10 +1563,13 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Pro
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    await ensureDeploymentCacheRevision(env, ctx);
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api")) {
+      // Only API routes read the D1-backed caches, so only they need the
+      // per-deployment revision check; SPA/static requests skip the D1
+      // round-trips on cold isolates.
+      await ensureDeploymentCacheRevision(env, ctx);
       const res = await handleApi(request, env, ctx);
       return withCors(request, env, res);
     }

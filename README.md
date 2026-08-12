@@ -159,6 +159,7 @@ pnpm --filter @game-cal/api start
 
 - `GET /api/health`
 - `GET /api/games`
+- `GET /api/summary`（一次返回全部游戏的 events + version + 更新时间；单个游戏拉取失败时以 `ok: false` 逐游戏标记，前端首页/导航使用该端点）
 - `GET /api/events?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/events/:game`（`genshin|starrail|ww|zzz|snowbreak|endfield`）
 - `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
