@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiGetWithUpdatedAt } from "../api/client";
+import { fetchGameSummaryEntry } from "../api/summary";
 import type { CalendarEvent, GameId } from "../api/types";
 
 type UseEventsState =
@@ -9,7 +9,6 @@ type UseEventsState =
 type KeyedUseEventsState = { key: string; value: UseEventsState };
 
 const memory = new Map<string, { at: number; data: CalendarEvent[]; updatedAtMs: number }>();
-const inFlight = new Map<string, Promise<{ data: CalendarEvent[]; updatedAtMs: number }>>();
 const TTL_MS = 60_000;
 
 export function useEvents(game: GameId) {
@@ -29,24 +28,12 @@ export function useEvents(game: GameId) {
     }
 
     setState({ key, value: { status: "loading", data: null, error: null, updatedAtMs: null } });
-    let request = inFlight.get(key);
-    if (!request) {
-      request = apiGetWithUpdatedAt<CalendarEvent[]>(`/api/events/${game}`)
-        .then(({ json, updatedAtMs }) => {
-          const safeUpdatedAtMs = updatedAtMs ?? Date.now();
-          memory.set(key, { at: Date.now(), data: json.data, updatedAtMs: safeUpdatedAtMs });
-          return { data: json.data, updatedAtMs: safeUpdatedAtMs };
-        })
-        .finally(() => {
-          if (inFlight.get(key) === request) inFlight.delete(key);
-        });
-      inFlight.set(key, request);
-    }
-
-    request
-      .then(({ data, updatedAtMs }) => {
+    fetchGameSummaryEntry(game)
+      .then((entry) => {
+        if (!entry.ok) throw new Error(entry.error || "加载失败");
+        memory.set(key, { at: Date.now(), data: entry.events, updatedAtMs: entry.updatedAtMs });
         if (cancelled) return;
-        setState({ key, value: { status: "success", data, error: null, updatedAtMs } });
+        setState({ key, value: { status: "success", data: entry.events, error: null, updatedAtMs: entry.updatedAtMs } });
       })
       .catch((err) => {
         if (cancelled) return;

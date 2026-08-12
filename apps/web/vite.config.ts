@@ -48,5 +48,18 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    rollupOptions: {
+      output: {
+        // Keep long-lived third-party code in stable chunks so app-code changes
+        // do not invalidate the whole JS cache.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules\/(react|react-dom|scheduler|react-router|react-router-dom|@remix-run)\//.test(id)) {
+            return "react";
+          }
+          return "vendor";
+        },
+      },
+    },
   },
 });

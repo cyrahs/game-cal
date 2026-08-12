@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiGet } from "../api/client";
+import { fetchGameSummaryEntry } from "../api/summary";
 import type { GameId, GameVersionInfo } from "../api/types";
 
 export type UseCurrentVersionState =
@@ -28,11 +28,12 @@ export function useCurrentVersion(game: GameId) {
     }
 
     setState({ key, value: { status: "loading", data: null, error: null } });
-    apiGet<GameVersionInfo | null>(`/api/version/${game}`)
-      .then((res) => {
+    fetchGameSummaryEntry(game)
+      .then((entry) => {
+        if (!entry.ok) throw new Error(entry.error || "加载失败");
+        memory.set(key, { at: Date.now(), data: entry.version });
         if (cancelled) return;
-        memory.set(key, { at: Date.now(), data: res.data });
-        setState({ key, value: { status: "success", data: res.data, error: null } });
+        setState({ key, value: { status: "success", data: entry.version, error: null } });
       })
       .catch((err) => {
         if (cancelled) return;

@@ -46,6 +46,7 @@ Container defaults:
 Implemented in `apps/api/src/index.ts`:
 - `GET /api/health`
 - `GET /api/games`
+- `GET /api/summary` (all games' events + version + updatedAtMs in one response; per-game failures are marked `ok: false`; the web app's hooks fetch this single endpoint)
 - `GET /api/events?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/events/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`)
 - `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`

@@ -14,7 +14,7 @@ import {
   type ZzzSnapshotBundle,
 } from "./lib/zzzSnapshot.js";
 import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "./games/index.js";
-import type { ApiResponse, GameId } from "./types.js";
+import type { ApiResponse, GameId, GameSummaryEntry, GamesSummary } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -143,6 +143,29 @@ async function getGameSnapshotData(game: GameId): Promise<GameSnapshotData> {
     return { events, version, updatedAtMs: Date.now() };
   });
 }
+
+server.get("/api/summary", async (_req, reply): Promise<ApiResponse<GamesSummary>> => {
+  const games = await Promise.all(
+    GAMES.map(async ({ id }): Promise<GameSummaryEntry> => {
+      try {
+        const snapshot = await getGameSnapshotData(id);
+        return {
+          game: id,
+          ok: true,
+          events: snapshot.events,
+          version: snapshot.version,
+          updatedAtMs: snapshot.updatedAtMs,
+        };
+      } catch (err) {
+        server.log.error({ game: id, err }, "Summary snapshot failed");
+        return { game: id, ok: false, error: "Upstream fetch failed" };
+      }
+    })
+  );
+
+  reply.header("Cache-Control", `public, max-age=${Math.floor(cacheTtlMs / 1000)}`);
+  return { code: 200, data: { games } };
+});
 
 server.get<{
   Params: { game: string };
