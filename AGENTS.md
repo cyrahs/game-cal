@@ -11,7 +11,7 @@ In production the API can serve the built SPA from `apps/web/dist` so UI + API s
 ## Quick Start (Local Dev)
 
 Prereqs:
-- Node.js 25.x recommended (Docker uses `node:25-alpine`)
+- Node.js 25.x recommended
 - pnpm via Corepack (repo pins `pnpm@9.9.0`)
 
 Commands:
@@ -31,15 +31,10 @@ Default dev URLs:
 - Web (Vite): `http://localhost:5173`
 - API (Fastify): `http://localhost:8787`
 
-## Production / Docker
+## Production
 
-- Docker image builds web + api, then runs the API which serves the SPA if present.
-- `docker compose up -d --build` builds locally.
-- No Docker image CI workflow is currently present in this repo.
-
-Container defaults:
-- `PORT=8787`
-- `HOST=0.0.0.0`
+- Production is Worker-first: Cloudflare Worker + D1 (see `wrangler.jsonc`, `apps/worker`).
+- The Node API (`apps/api`) is kept for local development; it can also serve `apps/web/dist` for simple self-hosting (`PORT=8787`, `HOST=0.0.0.0`).
 
 ## API Endpoints
 
@@ -83,7 +78,6 @@ Upstream override URLs (optional):
 Notes:
 - The API imports `dotenv/config`, so `.env` is loaded from the process working directory.
   - When run via pnpm scripts, cwd is typically `apps/api/`.
-  - In Docker, the app runs from `/app` and expects env to come from container env vars.
 - Examples live in `.env.example` (repo root) and `apps/api/.env.example` (API-focused).
 
 ## Code Map (Where To Change Things)

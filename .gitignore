@@ -17,4 +17,9 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.claude/
+
+# pnpm
+.pnpm-store/
+
+# claude worktrees
+.claude/worktrees/

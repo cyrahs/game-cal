@@ -68,6 +68,51 @@ export function isGachaEventTitle(game: GameId, title: string): boolean {
   }
 }
 
+export function isValidGachaKind(input: unknown): input is GachaKind {
+  return input === "character" || input === "weapon" || input === "mixed" || input === "other";
+}
+
+export function resolveGachaKind(
+  game: GameId,
+  title: string,
+  content?: string,
+  upstreamKind?: GachaKind
+): GachaKind {
+  const fallbackKind = classifyGachaEvent(game, title, content);
+  if (!isValidGachaKind(upstreamKind)) return fallbackKind;
+  if (upstreamKind === "other" && fallbackKind !== "other") return fallbackKind;
+  return upstreamKind;
+}
+
+export function resolveGachaClassification(
+  game: GameId,
+  title: string,
+  content?: string,
+  upstreamIsGacha?: boolean,
+  upstreamKind?: GachaKind
+): { isGacha: boolean; gachaKind: GachaKind } {
+  if (upstreamIsGacha === false) {
+    return { isGacha: false, gachaKind: "other" };
+  }
+
+  const gachaKind = resolveGachaKind(game, title, content, upstreamKind);
+  const isGacha = upstreamIsGacha === true || isGachaEventTitle(game, title) || gachaKind !== "other";
+  return { isGacha, gachaKind };
+}
+
+export function isCharacterTrialGachaKind(kind: GachaKind): boolean {
+  return kind === "character" || kind === "mixed";
+}
+
+export function isCharacterTrialGachaEvent(
+  game: GameId,
+  title: string,
+  content?: string,
+  upstreamKind?: GachaKind
+): boolean {
+  return isCharacterTrialGachaKind(resolveGachaKind(game, title, content, upstreamKind));
+}
+
 export function classifyGachaEvent(game: GameId, title: string, content?: string): GachaKind {
   const normalizedTitle = normalizeForGachaKind(title);
   const normalizedText = normalizeForGachaKind(title, content);

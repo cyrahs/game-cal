@@ -41,7 +41,7 @@ pnpm dev
 
 ### 推荐方式：Cloudflare Worker + D1
 
-当前维护的生产路径是 Worker-first，不再维护 Docker 部署说明。
+当前维护的生产路径是 Worker-first，仓库不再包含 Docker 部署配置。
 
 Worker 配置入口：
 - 代码入口：`apps/worker/src/index.ts`
