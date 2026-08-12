@@ -1,0 +1,420 @@
+name: Upstream Autopatch
+
+# Daily reconciling loop: discover and confirm upstream findings, keep one managed
+# Issue per finding fingerprint, and remediate every actionable open Issue through
+# a draft PR with bounded repair -> trusted gates -> independent review -> runtime
+# replay rounds. All remediation state lives on the Issue/PR, so any interrupted
+# run resumes on the next schedule instead of stranding work.
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "America/Los_Angeles"
+  workflow_dispatch:
+    inputs:
+      rounds_per_run:
+        description: Repair->review rounds allowed per issue in this run
+        required: false
+        default: "3"
+        type: choice
+        options: ["1", "2", "3", "4"]
+      issues_per_run:
+        description: Maximum issues remediated in this run
+        required: false
+        default: "2"
+        type: choice
+        options: ["1", "2", "3", "4"]
+
+concurrency:
+  group: upstream-autopatch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Budgets are resolved once here; scheduled runs fall back to the defaults
+  # because the inputs context is empty outside workflow_dispatch.
+  AUTOPATCH_ROUNDS_PER_RUN: ${{ inputs.rounds_per_run || '3' }}
+  AUTOPATCH_ISSUES_PER_RUN: ${{ inputs.issues_per_run || '2' }}
+  AUTOPATCH_LIFETIME_ATTEMPTS: "6"
+  AUTOPATCH_STALE_MISS_LIMIT: "2"
+  AUTOPATCH_DEADLINE_MINUTES: "120"
+  ZZZ_SNAPSHOT_API_URL: https://gamecal.nv5.me/api/upstream/zzz/snapshot
+
+jobs:
+  preflight:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify model configuration and independent reviewer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          missing=()
+          for name in OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL OPENAI_REASONING_EFFORT GH_TOKEN; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing required configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+
+          reviewer="$(gh api user --jq .login)"
+          if [ "$reviewer" = github-actions[bot] ]; then
+            echo "UPSTREAM_REVIEW_APPROVAL_TOKEN must use an independent reviewer identity" >&2
+            exit 1
+          fi
+          reviewer_permission="$(
+            gh api "repos/$GH_REPO/collaborators/$reviewer/permission" --jq '.permission // "none"'
+          )"
+          case "$reviewer_permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "Independent reviewer $reviewer has insufficient repository role: $reviewer_permission" >&2
+              exit 1
+              ;;
+          esac
+          echo "Independent reviewer: $reviewer ($reviewer_permission)" >> "$GITHUB_STEP_SUMMARY"
+
+          # Branch protection drift is surfaced as a warning instead of failing
+          # the whole run: merges still require our posted validate status plus
+          # the independent approval before auto-merge is armed.
+          if ! gh api "repos/$GH_REPO/branches/$DEFAULT_BRANCH/protection" > "$RUNNER_TEMP/protection.json" 2>/dev/null; then
+            echo "::warning::Could not read default branch protection; agentic auto-merge may be unguarded"
+          elif ! jq -e '
+            (
+              ((.required_status_checks.contexts // []) | index("upstream-agentic/validate")) != null or
+              ([.required_status_checks.checks[]?.context] | index("upstream-agentic/validate")) != null
+            )
+          ' "$RUNNER_TEMP/protection.json" >/dev/null; then
+            echo "::warning::Default branch protection does not require upstream-agentic/validate"
+          fi
+
+  collect:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      review_matrix: ${{ steps.collect.outputs.review_matrix }}
+      collection_status: ${{ steps.collect.outputs.collection_status }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start trusted local API
+        run: nohup pnpm --filter @game-cal/api exec tsx src/index.ts > "$RUNNER_TEMP/api.log" 2>&1 &
+
+      - name: Wait for API
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          tail -n 200 "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Freeze upstream review input
+        id: collect
+        env:
+          ZZZ_SNAPSHOT_API_URL: http://127.0.0.1:8787/api/upstream/zzz/snapshot
+          UPSTREAM_REVIEW_API_BASE_URL: http://127.0.0.1:8787
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: pnpm review:upstream:collect
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-input
+          path: artifacts/upstream-review-input.json
+          if-no-files-found: error
+
+      - name: Upload collector diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-collector-log
+          path: ${{ runner.temp }}/api.log
+          if-no-files-found: warn
+
+  discover:
+    needs: collect
+    name: Discover ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.collect.outputs.review_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-input
+          path: artifacts
+
+      - name: Extract one game
+        env:
+          UPSTREAM_REVIEW_GAME: ${{ matrix.game }}
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+        run: node scripts/review-upstream.mjs --extract-game
+
+      - name: Review frozen evidence with Codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review.md
+          output-schema-file: .github/schemas/upstream-review-output.schema.json
+          output-file: artifacts/upstream-review-agent-${{ matrix.game }}.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-discovery-${{ matrix.game }}
+          path: artifacts/upstream-review-agent-${{ matrix.game }}.json
+          if-no-files-found: error
+
+  confirmation_plan:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_candidates: ${{ steps.plan.outputs.has_candidates }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-input
+          path: artifacts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: upstream-autopatch-discovery-*
+          path: artifacts/agent-reviews
+          merge-multiple: true
+
+      - name: Build bounded confirmation plan
+        id: plan
+        env:
+          UPSTREAM_REVIEW_INPUT_PATH: artifacts/upstream-review-input.json
+          UPSTREAM_REVIEW_AGENT_OUTPUT_DIR: artifacts/agent-reviews
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_INPUT_DIR: artifacts/confirmation
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+        run: node scripts/review-upstream.mjs --prepare-confirmation
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-confirmation-plan
+          path: artifacts/confirmation
+          if-no-files-found: error
+
+  confirm:
+    needs: confirmation_plan
+    if: needs.confirmation_plan.outputs.has_candidates == 'true'
+    name: Confirm ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.confirmation_plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-confirmation-plan
+          path: artifacts/confirmation
+
+      - name: Place one confirmation shard
+        run: cp "artifacts/confirmation/upstream-review-confirm-input-${{ matrix.game }}.json" artifacts/upstream-review-confirm-input.json
+
+      - name: Independently confirm findings
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ secrets.OPENAI_BASE_URL }}
+          model: ${{ secrets.OPENAI_MODEL }}
+          effort: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          prompt-file: .github/prompts/upstream-review-confirm.md
+          output-schema-file: .github/schemas/upstream-review-confirm-output.schema.json
+          output-file: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          codex-version: "0.145.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-confirmation-${{ matrix.game }}
+          path: artifacts/upstream-review-confirm-agent-${{ matrix.game }}.json
+          if-no-files-found: error
+
+  sync_findings:
+    needs:
+      - confirmation_plan
+      - confirm
+    if: >-
+      always() &&
+      needs.confirmation_plan.result == 'success' &&
+      (
+        needs.confirmation_plan.outputs.has_candidates == 'false' ||
+        needs.confirm.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-confirmation-plan
+          path: artifacts/confirmation
+
+      - if: needs.confirmation_plan.outputs.has_candidates == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: upstream-autopatch-confirmation-*
+          path: artifacts/confirmation-results
+          merge-multiple: true
+
+      - name: Finalize findings and synchronize Issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REVIEW_CONFIRMATION_PLAN_PATH: artifacts/confirmation/upstream-review-confirmation-plan.json
+          UPSTREAM_REVIEW_CONFIRMATION_OUTPUT_DIR: artifacts/confirmation-results
+          UPSTREAM_REVIEW_REPORT_PATH: artifacts/upstream-review.json
+          UPSTREAM_REVIEW_BASE_SHA: ${{ github.sha }}
+          UPSTREAM_REVIEW_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: node scripts/review-upstream.mjs --finalize-confirmation
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-autopatch-report
+          path: artifacts/upstream-review.json
+          if-no-files-found: error
+
+  remediate:
+    needs:
+      - collect
+      - sync_findings
+    if: always() && needs.sync_findings.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.9.0
+          run_install: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Codex CLI
+        run: |
+          npm install -g @openai/codex@0.145.0
+          codex --version
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-input
+          path: ${{ runner.temp }}/autopatch
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-autopatch-report
+          path: ${{ runner.temp }}/autopatch
+
+      - name: Drop sudo before running model agents
+        run: |
+          if sudo -n true 2>/dev/null; then
+            sudo bash -c 'rm -f /etc/sudoers.d/* && echo "runner ALL=(ALL:ALL) !ALL" > /etc/sudoers.d/deny-runner && chmod 440 /etc/sudoers.d/deny-runner'
+          fi
+          if sudo -n true 2>/dev/null; then
+            echo "sudo is still available; refusing to run model agents" >&2
+            exit 1
+          fi
+
+      - name: Reconcile and remediate open findings
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAM_REVIEW_APPROVAL_TOKEN: ${{ secrets.UPSTREAM_REVIEW_APPROVAL_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ secrets.OPENAI_REASONING_EFFORT }}
+          AUTOPATCH_REPORT_PATH: ${{ runner.temp }}/autopatch/upstream-review.json
+          AUTOPATCH_COLLECT_INPUT_PATH: ${{ runner.temp }}/autopatch/upstream-review-input.json
+          AUTOPATCH_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node scripts/upstream-autopatch.mjs run
