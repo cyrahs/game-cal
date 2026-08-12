@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const mainPath = new URL("../.github/workflows/upstream-review-v2.yml", import.meta.url);
-const attemptPath = new URL("../.github/workflows/upstream-agentic-attempt.yml", import.meta.url);
+const autopatchPath = new URL("../.github/workflows/upstream-autopatch.yml", import.meta.url);
 const pullRequestGatePath = new URL(
   "../.github/workflows/upstream-agentic-pr-gate.yml",
   import.meta.url
@@ -13,105 +14,92 @@ const runtimePromptPath = new URL(
   import.meta.url
 );
 
-test("v2 exposes one bounded four-slot loop instead of copied rework jobs", async () => {
-  const workflow = await readFile(mainPath, "utf8");
-  assert.match(workflow, /^name: Upstream Agentic Review v2$/m);
+test("the retired v2 chain and reusable attempt workflow are gone", () => {
+  for (const retired of [
+    "../.github/workflows/upstream-review-v2.yml",
+    "../.github/workflows/upstream-agentic-attempt.yml",
+  ]) {
+    assert.equal(
+      existsSync(fileURLToPath(new URL(retired, import.meta.url))),
+      false,
+      `${retired} must not exist`
+    );
+  }
+});
+
+test("autopatch runs daily, accepts manual budgets, and resolves them exactly once", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
+  assert.match(workflow, /^name: Upstream Autopatch$/m);
   assert.match(workflow, /schedule:\n    - cron: "0 9 \* \* \*"/);
   assert.match(workflow, /timezone: "America\/Los_Angeles"/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /max_code_attempts:/);
-  assert.equal(
-    workflow.match(
-      /fromJSON\(github\.event_name == 'schedule' && '4' \|\| inputs\.max_code_attempts\)/g
-    )?.length,
-    7,
-    "scheduled runs must explicitly use four attempts while manual runs use their selected input"
-  );
-  assert.doesNotMatch(workflow, /inputs\.max_code_attempts \|\| '4'/);
-  for (const attempt of [0, 1, 2, 3]) {
-    assert.match(workflow, new RegExp(`^  attempt_${attempt}:$`, "m"));
-    assert.match(workflow, new RegExp(`attempt: ${attempt}`));
-  }
-  assert.equal(workflow.match(/uses: \.\/\.github\/workflows\/upstream-agentic-attempt\.yml/g)?.length, 4);
-  assert.doesNotMatch(workflow, /rework_round_/);
-  assert.match(workflow, /^  resolve_terminal:$/m);
-  assert.match(workflow, /^  terminal_guard:$/m);
+  assert.match(workflow, /concurrency:\n  group: upstream-autopatch\n  cancel-in-progress: false/);
+  // Budgets resolve in one place with schedule-safe fallbacks; the
+  // fromJSON(inputs...) pattern broke scheduled runs before (#50).
+  assert.match(workflow, /AUTOPATCH_ROUNDS_PER_RUN: \$\{\{ inputs\.rounds_per_run \|\| '3' \}\}/);
+  assert.match(workflow, /AUTOPATCH_ISSUES_PER_RUN: \$\{\{ inputs\.issues_per_run \|\| '2' \}\}/);
+  assert.doesNotMatch(workflow, /fromJSON\(inputs/);
+  // The copied attempt chain is replaced by one reconciling remediate job.
+  assert.doesNotMatch(workflow, /attempt_\d|resolve_terminal|terminal_guard|rework_round_/);
+  assert.match(workflow, /^  remediate:$/m);
+  assert.match(workflow, /node scripts\/upstream-autopatch\.mjs run/);
 });
 
-test("preflight checks reviewer role without requiring token contents write or protected reviews", async () => {
-  const workflow = await readFile(mainPath, "utf8");
+test("preflight keeps hard identity checks but degrades protection drift to warnings", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
   const preflightStart = workflow.indexOf("\n  preflight:\n");
   const collectStart = workflow.indexOf("\n  collect:\n", preflightStart);
   const preflight = workflow.slice(preflightStart, collectStart);
+  assert.match(preflight, /gh api user --jq \.login/);
+  assert.match(preflight, /must use an independent reviewer identity/);
   assert.match(preflight, /collaborators\/\$reviewer\/permission/);
   assert.match(preflight, /admin\|maintain\|write/);
-  assert.doesNotMatch(preflight, /\.permissions\.push/);
-  assert.doesNotMatch(preflight, /required_pull_request_reviews/);
-  assert.doesNotMatch(preflight, /allow_squash_merge|allow_auto_merge/);
-  assert.match(preflight, /has insufficient repository role/);
-  assert.match(preflight, /Default branch protection does not satisfy/);
-  assert.match(preflight, /Default branch moved during preflight/);
+  assert.match(preflight, /::warning::Default branch protection does not require/);
+  assert.doesNotMatch(preflight, /Default branch moved during preflight/);
 });
 
-test("every expected code failure becomes structured feedback", async () => {
-  const workflow = await readFile(attemptPath, "utf8");
-  assert.match(workflow, /classify-validation/);
-  assert.match(workflow, /classify-review/);
-  assert.match(workflow, /classify-runtime/);
-  assert.match(workflow, /upstream-agentic-feedback-\$\{\{ inputs\.attempt \}\}/);
-  assert.match(workflow, /needs\.validate\.outputs\.disposition/);
-  assert.match(workflow, /needs\.review\.outputs\.disposition/);
-  assert.match(workflow, /if: always\(\)/);
-  assert.match(workflow, /Attempt did not reach an explicit terminal or retry state/);
-});
-
-test("validation cannot be skipped and still publish a candidate", async () => {
-  const workflow = await readFile(attemptPath, "utf8");
-  const validateStart = workflow.indexOf("\n  validate:\n");
-  const publishStart = workflow.indexOf("\n  publish:\n", validateStart);
-  const reviewStart = workflow.indexOf("\n  review:\n", publishStart);
-  const validate = workflow.slice(validateStart, publishStart);
-  const publish = workflow.slice(publishStart, reviewStart);
-  for (const gate of ["safeguards", "parsers", "typecheck", "build"]) {
-    assert.match(validate, new RegExp(`id: ${gate}`));
-    assert.match(validate, new RegExp(`${gate}: \\{executed: true, outcome:`));
+test("discovery and confirmation model jobs stay read-only and secret-minimal", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
+  for (const job of ["discover", "confirm"]) {
+    const start = workflow.indexOf(`\n  ${job}:\n`);
+    assert.ok(start > 0, `missing job ${job}`);
+    const body = workflow.slice(start, workflow.indexOf("\n  sync_findings:\n"));
+    assert.match(body, /permission-profile: ":read-only"/);
   }
-  assert.match(publish, /if: needs\.validate\.outputs\.disposition == 'review'/);
-  assert.match(publish, /upstream-agentic\/validate/);
-  assert.match(publish, /result_tree/);
+  assert.doesNotMatch(
+    workflow.slice(workflow.indexOf("\n  discover:\n"), workflow.indexOf("\n  sync_findings:\n")),
+    /UPSTREAM_REVIEW_APPROVAL_TOKEN|contents: write|pull-requests: write/
+  );
 });
 
-test("publishing a replacement head tolerates bounded GitHub API propagation", async () => {
-  const workflow = await readFile(attemptPath, "utf8");
-  const publishStart = workflow.indexOf("\n  publish:\n");
-  const reviewStart = workflow.indexOf("\n  review:\n", publishStart);
-  const publish = workflow.slice(publishStart, reviewStart);
-  assert.match(publish, /for poll in \$\(seq 1 15\)/);
-  assert.match(publish, /\.state == "open" and \.head\.ref == \$branch/);
-  assert.match(publish, /\.head\.sha == \$head/);
-  assert.match(publish, /test "\$head_visible" = true/);
+test("sync_findings runs even without candidates and owns the only issues write before remediation", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
+  const start = workflow.indexOf("\n  sync_findings:\n");
+  const end = workflow.indexOf("\n  remediate:\n", start);
+  const sync = workflow.slice(start, end);
+  assert.match(sync, /always\(\)/);
+  assert.match(sync, /has_candidates == 'false' \|\|/);
+  assert.match(sync, /issues: write/);
+  assert.match(sync, /--finalize-confirmation/);
+  assert.match(sync, /name: upstream-autopatch-report/);
 });
 
-test("model jobs never receive GitHub write credentials", async () => {
-  const workflow = await readFile(attemptPath, "utf8");
-  const repairStart = workflow.indexOf("\n  repair:\n");
-  const validateStart = workflow.indexOf("\n  validate:\n", repairStart);
-  const reviewStart = workflow.indexOf("\n  review:\n");
-  const runtimeStart = workflow.indexOf("\n  runtime:\n", reviewStart);
-  const submitStart = workflow.indexOf("\n  submit_review:\n", runtimeStart);
-  const repair = workflow.slice(repairStart, validateStart);
-  const review = workflow.slice(reviewStart, runtimeStart);
-  const runtime = workflow.slice(runtimeStart, submitStart);
-  for (const job of [repair, review, runtime]) {
-    assert.match(job, /contents: read/);
-    assert.doesNotMatch(job, /contents: write|pull-requests: write|UPSTREAM_REVIEW_APPROVAL_TOKEN/);
-  }
-  assert.match(repair, /permission-profile: ":workspace"/);
-  assert.doesNotMatch(repair, /permission-profile: workspace-write/);
-  assert.match(review, /permission-profile: ":read-only"/);
-  assert.match(runtime, /permission-profile: ":read-only"/);
-  assert.match(runtime, /prepare-runtime/);
-  assert.match(runtime, /classify-runtime/);
+test("remediate reconciles on every successful sync, with pinned codex and no sudo", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
+  const start = workflow.indexOf("\n  remediate:\n");
+  const remediate = workflow.slice(start);
+  assert.match(remediate, /if: always\(\) && needs\.sync_findings\.result == 'success'/);
+  assert.match(remediate, /contents: write/);
+  assert.match(remediate, /pull-requests: write/);
+  assert.match(remediate, /statuses: write/);
+  assert.match(remediate, /npm install -g @openai\/codex@0\.145\.0/);
+  assert.match(remediate, /Drop sudo before running model agents/);
+  assert.match(remediate, /refusing to run model agents/);
+  assert.match(remediate, /persist-credentials: false/);
+  assert.match(remediate, /UPSTREAM_REVIEW_APPROVAL_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/);
+  const dropSudoIndex = remediate.indexOf("Drop sudo before running model agents");
+  const driverIndex = remediate.indexOf("node scripts/upstream-autopatch.mjs run");
+  assert.ok(dropSudoIndex >= 0 && driverIndex > dropSudoIndex, "sudo must be dropped before the driver runs");
 });
 
 test("runtime verifier is explicitly allowed to read its exact-head input", async () => {
@@ -125,38 +113,13 @@ test("runtime verifier is explicitly allowed to read its exact-head input", asyn
   assert.doesNotMatch(prompt, /Do not use the network, modify\s+files, run commands/);
 });
 
-test("approval and merge are exact-head, separate, and never use admin bypass", async () => {
-  const [main, attempt] = await Promise.all([readFile(mainPath, "utf8"), readFile(attemptPath, "utf8")]);
-  const submitStart = attempt.indexOf("\n  submit_review:\n");
-  const resolveStart = attempt.indexOf("\n  resolve:\n", submitStart);
-  const submit = attempt.slice(submitStart, resolveStart);
-  assert.match(submit, /GH_TOKEN: \$\{\{ secrets\.UPSTREAM_REVIEW_APPROVAL_TOKEN \}\}/);
-  assert.match(submit, /-f commit_id="\$HEAD_SHA"/);
-  assert.match(submit, /event=APPROVE/);
-  assert.match(submit, /RUNTIME_DISPOSITION/);
-
-  const finalizeStart = main.indexOf("\n  finalize:\n");
-  const guardStart = main.indexOf("\n  terminal_guard:\n", finalizeStart);
-  const finalize = main.slice(finalizeStart, guardStart);
-  assert.match(finalize, /if: >-\n      always\(\) &&/);
-  assert.match(finalize, /needs\.publish_findings\.result == 'success'/);
-  assert.match(finalize, /needs\.resolve_terminal\.result == 'success'/);
-  assert.match(finalize, /needs\.resolve_terminal\.outputs\.disposition == 'approved'/);
-  assert.match(finalize, /upstream-agentic\/validate/);
-  assert.match(finalize, /\.commit_id == \$head and \.state == "APPROVED"/);
-  assert.match(finalize, /gh pr merge "\$PR_NUMBER" --repo "\$GH_REPO" --auto --squash/);
-  assert.doesNotMatch(finalize, /--admin/);
-  assert.match(finalize, /\.merged == true and \.head\.sha == \$head/);
-});
-
-test("blocked or incomplete cycles make the workflow fail truthfully", async () => {
-  const workflow = await readFile(mainPath, "utf8");
-  const guardStart = workflow.indexOf("\n  terminal_guard:\n");
-  const guard = workflow.slice(guardStart);
-  assert.match(guard, /if: always\(\)/);
-  assert.match(guard, /DISPOSITION:/);
-  assert.match(guard, /The workflow did not merge and intentionally reports failure/);
-  assert.match(guard, /exit 1/);
+test("review prompt describes the driver workspace truthfully", async () => {
+  const prompt = await readFile(
+    new URL("../.github/prompts/upstream-agentic-review.md", import.meta.url),
+    "utf8"
+  );
+  assert.match(prompt, /`HEAD` is `base_sha`/);
+  assert.match(prompt, /applied as uncommitted changes/);
 });
 
 test("every pull request into main receives the required validation context", async () => {

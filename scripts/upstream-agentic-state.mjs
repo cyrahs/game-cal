@@ -4,7 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CODE_ATTEMPT_DEFAULT = 4;
-const CODE_ATTEMPT_MAX = 4;
+const CODE_ATTEMPT_MAX = 8;
 const INFRA_RETRY_DEFAULT = 3;
 
 const DISPOSITIONS = new Set([
