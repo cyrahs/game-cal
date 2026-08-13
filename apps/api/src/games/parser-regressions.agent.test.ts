@@ -239,6 +239,82 @@ test("Endfield fails closed when a labeled time section is unresolved instead of
   }
 });
 
+test("Endfield preserves permanent availability after an explicit start", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「向渊行」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/07/16 06:00 - 2026/07/16 12:00</p>",
+                  "<p>■ 活动及玩法更新</p>",
+                  "<p>1. 「影拓丰碑」挑战玩法更新，开放「山中见犼」系列关卡</p>",
+                  "<p>· 开放时间：2026/08/06 12:00 - 2026/08/20 04:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "permanent-challenge",
+              tab: "events",
+              title: "影拓丰碑 系列更新",
+              header: "「影拓丰碑 - 山中见犼」系列更新说明",
+              startAt: 1785902400,
+              data: {
+                html: [
+                  "<p>▼//开放时间</p>",
+                  "<p>2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放</p>",
+                  "<p>▼//玩法说明</p>",
+                  "<p>挑战玩法更新系列关卡。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const matchingEvents = events.filter((item) => item.title.includes("影拓丰碑"));
+    assert.equal(matchingEvents.length, 1);
+    const event = matchingEvents[0];
+    assert.ok(event);
+    assert.deepEqual(
+      {
+        title: event.title,
+        start_time: event.start_time,
+        end_time: event.end_time,
+        end_time_kind: event.end_time_kind,
+        end_time_text: event.end_time_text,
+      },
+      {
+        title: "「影拓丰碑」挑战玩法更新，开放「山中见犼」系列关卡",
+        start_time: "2026-08-06T12:00:00+08:00",
+        end_time: null,
+        end_time_kind: "relative",
+        end_time_text: "系列开启后常驻开放",
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
