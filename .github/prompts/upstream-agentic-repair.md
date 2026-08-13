@@ -18,13 +18,18 @@ Before editing, verify:
 - `cycle.attempt` is lower than `cycle.max_attempts`;
 - the checked-out `HEAD` equals `cycle.start_sha`;
 - `allowed_files` is nonempty;
-- attempt zero has `feedback: null`, while every later attempt has retryable feedback
-  from exactly the previous attempt.
+- when `feedback` is present it is retryable and comes from exactly the previous
+  attempt.
 
-For the initial attempt, make the smallest general correction supported by the
-confirmed findings and evidence. For later attempts, inspect the cumulative existing
-candidate and correct the supplied validation or review feedback without undoing the
-original repair.
+`feedback` alone decides how to work, and `cycle.attempt` only counts the budget.
+`cycle.attempt` may be greater than zero with `feedback: null`, flagged by
+`restarted: true`: the cycle restarted on a newer base commit, so any earlier
+candidate is void.
+
+With `feedback: null`, make the smallest general correction supported by the confirmed
+findings and evidence, starting from the workspace as checked out. With feedback
+present, inspect the cumulative existing candidate and correct the supplied validation
+or review feedback without undoing the original repair.
 
 Workspace policy:
 
