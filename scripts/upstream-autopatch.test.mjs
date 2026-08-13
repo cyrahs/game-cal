@@ -760,3 +760,55 @@ test("feedback rendering shows the concrete diagnostics on the PR review", () =>
   assert.match(body, /parsers/);
   assert.match(body, /off by one hour/);
 });
+
+test("a cycle restarted on a newer base is a valid attempt without feedback", () => {
+  const entry = finding();
+  const state = { ...createIssueState(49, 6), findings: [entry] };
+  const { fixInput } = buildIssueFixInput({
+    repository: "example/game-cal",
+    issueNumber: 49,
+    issueUrl: "https://github.com/example/game-cal/issues/49",
+    marker: parseIssueMarker(issueMarkerBody([getFindingKey(entry)])),
+    state,
+    baseSha: BASE_SHA,
+    collectInput: collectInputFor([entry]),
+    generatedAt: "2026-08-12T00:00:00.000Z",
+  });
+  // An approved-but-unmerged head clears last_feedback, so the next run resumes
+  // at attempt > 0 with no feedback. That must be legal and explicitly flagged.
+  const restarted = buildAttemptInput({
+    repository: "example/game-cal",
+    fixInput,
+    attempt: 2,
+    maxAttempts: 6,
+    baseSha: BASE_SHA,
+    feedback: null,
+  });
+  assert.equal(restarted.restarted, true);
+  assert.equal(restarted.feedback, null);
+
+  const first = buildAttemptInput({
+    repository: "example/game-cal",
+    fixInput,
+    attempt: 0,
+    maxAttempts: 6,
+    baseSha: BASE_SHA,
+    feedback: null,
+  });
+  assert.equal(first.restarted, false);
+});
+
+test("an issue whose fix already merged is closed on the next reconcile", () => {
+  const entry = finding();
+  const key = getFindingKey(entry);
+  const resolved = { ...createIssueState(59, 6), status: "resolved", pr_number: 64 };
+  const issue = managedIssue({ number: 59, keys: [key], state: resolved });
+  const { actions } = planReconciliation({
+    issues: [issue],
+    pulls: [],
+    report: reportFor([], 0),
+    budgets: BUDGETS,
+  });
+  assert.equal(actions[0].type, "close_resolved");
+  assert.equal(actions[0].pr_number, 64);
+});

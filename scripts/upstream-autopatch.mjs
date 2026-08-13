@@ -322,6 +322,17 @@ function planReconciliation({ issues, pulls, report, budgets, warnings = [] }) {
       actions.push({ type: "skip", issue_number: issue.number, reason: "paused by label", state });
       continue;
     }
+    // Backstop for an Issue whose fix already merged but which stayed open —
+    // e.g. merged by a driver version that relied on GitHub's `Closes #N`.
+    if (state.status === "resolved") {
+      actions.push({
+        type: "close_resolved",
+        issue_number: issue.number,
+        pr_number: state.pr_number,
+        state,
+      });
+      continue;
+    }
     if (labels.has(BLOCKED_LABEL) || state.status === "blocked") {
       actions.push({
         type: "skip",
@@ -521,6 +532,10 @@ function buildAttemptInput({ repository, fixInput, attempt, maxAttempts, baseSha
     allowed_files: [...fixInput.allowed_files].sort(),
     findings: fixInput.findings,
     evidence: fixInput.evidence,
+    // A cycle restarts with no feedback when its previous candidate was voided
+    // — the base advanced, or an approved head never merged. Say so explicitly
+    // instead of leaving the agent to reconcile attempt > 0 against null.
+    restarted: attempt > 0 && feedback == null,
     feedback,
   };
   return { ...input, context_sha256: sha256(input) };
@@ -1086,7 +1101,7 @@ async function remediateIssue({ item, context, deps }) {
 
   // Recovery fast path: an already approved, validated head only needs merging.
   if (item.pull) {
-    const recovered = await tryRecoverApprovedHead({ item, context, roundLog });
+    const recovered = await tryRecoverApprovedHead({ item, context, roundLog, baseSha });
     if (recovered) return { outcome: "merged", roundLog };
   }
 
@@ -1319,7 +1334,7 @@ async function closeRemediatedIssue({ client, issueNumber, prNumber }) {
   });
 }
 
-async function tryRecoverApprovedHead({ item, context, roundLog }) {
+async function tryRecoverApprovedHead({ item, context, roundLog, baseSha }) {
   const { client, reviewClient } = context;
   const pull = item.pull;
   try {
@@ -1342,6 +1357,15 @@ async function tryRecoverApprovedHead({ item, context, roundLog }) {
       (entry) => entry.context === "upstream-agentic/validate" && entry.state === "success"
     );
     if (!validated) return false;
+    // A head built on a superseded base can never satisfy an up-to-date branch
+    // requirement; regenerate instead of burning the merge poll waiting.
+    const pr = await client.request(`/repos/${client.repository}/pulls/${pull.number}`);
+    if (pr.base?.sha && baseSha && pr.base.sha !== baseSha) {
+      roundLog.push(
+        `previously approved head \`${pull.head.sha.slice(0, 12)}\` is behind the default branch; regenerating`
+      );
+      return false;
+    }
     const mergeResult = await context.deps.armAutoMergeAndWait({
       client,
       prNumber: pull.number,
@@ -1480,6 +1504,20 @@ async function executePlan({ plan, context, deps }) {
         summary.push(`⚠️ issue #${action.issue_number}: failed to record block: ${error.message}`);
       }
       summary.push(`🛑 issue #${action.issue_number}: blocked (${action.reason})`);
+      continue;
+    }
+    if (action.type === "close_resolved") {
+      try {
+        await closeRemediatedIssue({
+          client,
+          issueNumber: action.issue_number,
+          prNumber: action.pr_number,
+        });
+        await saveIssueState(client, issue, action.state);
+        summary.push(`✅ issue #${action.issue_number}: closed after its fix merged`);
+      } catch (error) {
+        summary.push(`⚠️ issue #${action.issue_number}: failed to close: ${error.message}`);
+      }
       continue;
     }
     if (action.type === "close_stale") {
