@@ -415,6 +415,7 @@ async function makeLoopHarness({ reviewVerdicts, gatesOutcomes, runtimeDispositi
   let round = 0;
   const deps = {
     git: async () => "",
+    refreshBase: async () => BASE_SHA,
     runCodexAgent: async ({ promptPath, outputPath, cwd }) => {
       if (promptPath.includes("repair")) {
         return { complete: true, errors: [], summary: "patch", changed_files: ["apps/api/src/games/zzz.ts"] };
@@ -506,7 +507,17 @@ async function makeLoopHarness({ reviewVerdicts, gatesOutcomes, runtimeDispositi
     runUrl: "https://github.com/example/game-cal/actions/runs/1",
   };
   const context = {
-    client: { repository: "example/game-cal", request: async () => ({}) },
+    client: {
+      repository: "example/game-cal",
+      request: async (pathname, options = {}) => {
+        calls.github ??= [];
+        calls.github.push({ pathname, method: options.method ?? "GET", body: options.body });
+        if (/\/issues\/\d+$/.test(pathname) && (options.method ?? "GET") === "GET") {
+          return { state: "open" };
+        }
+        return {};
+      },
+    },
     reviewClient: { request: async () => ({ login: "reviewer" }) },
     budgets: BUDGETS,
     baseSha: BASE_SHA,
@@ -522,7 +533,7 @@ async function makeLoopHarness({ reviewVerdicts, gatesOutcomes, runtimeDispositi
   return { item, context, deps, calls, state };
 }
 
-test("a clean round publishes, approves, runs runtime replay, and merges", async () => {
+test("a clean round publishes, approves, runs runtime replay, merges, and closes the issue", async () => {
   const harness = await makeLoopHarness({
     reviewVerdicts: ["approve"],
     gatesOutcomes: [],
@@ -536,6 +547,35 @@ test("a clean round publishes, approves, runs runtime replay, and merges", async
   assert.equal(harness.calls.automerge, 1);
   const submitted = harness.calls.reviews.filter((entry) => entry.kind === "submitted");
   assert.deepEqual(submitted.map((entry) => entry.event), ["APPROVE"]);
+  // GitHub's `Closes #N` keyword did not fire for API merges, so the driver
+  // must close the Issue itself.
+  const closed = harness.calls.github.find(
+    (call) => call.method === "PATCH" && call.pathname === "/repos/example/game-cal/issues/49"
+  );
+  assert.ok(closed, "remediated issue must be closed explicitly");
+  assert.equal(closed.body.state, "closed");
+  assert.equal(closed.body.state_reason, "completed");
+});
+
+test("each issue rebases onto the current default-branch tip before repairing", async () => {
+  const harness = await makeLoopHarness({
+    reviewVerdicts: ["approve"],
+    gatesOutcomes: [],
+    runtimeDispositions: ["approved"],
+    trees: [],
+  });
+  // Simulates an earlier issue in the same run having merged: protected
+  // branches require up-to-date PRs, so a stale run-wide base would leave this
+  // PR permanently BEHIND.
+  const advanced = "f".repeat(40);
+  harness.deps.refreshBase = async () => advanced;
+  const result = await remediateIssue(harness);
+  assert.equal(result.outcome, "merged");
+  assert.equal(harness.item.fixInput.source_report.base_sha, advanced);
+  assert.ok(
+    result.roundLog.some((line) => line.includes("rebased onto")),
+    "a base change must be recorded on the issue trail"
+  );
 });
 
 test("gate failures consume budget without publishing, then a fixed round merges", async () => {
