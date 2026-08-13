@@ -75,7 +75,7 @@ function normalizeTitleKey(input: string | undefined): string {
     .replace(/[·・•‧．.]/g, "")
     .replace(/[「」『』“”"'’‘]/g, "")
     .replace(
-      /(?:常驻活动|签到活动|引入活动|供给活动|减耗活动|趣味活动|挑战活动|限时挑战活动|叙事活动|内容更新|开放)$/u,
+      /(?:常驻活动|签到活动|引入活动|供给活动|减耗活动|趣味活动|挑战活动|限时挑战活动|叙事活动|内容更新|系列更新(?:说明)?|开放)$/u,
       ""
     );
 }
@@ -89,12 +89,21 @@ function extractLeadingQuotedTitleKey(input: string | undefined): string | null 
   return key || null;
 }
 
-function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
+function getEndfieldEventTitleKeys(event: CalendarEvent): string[] {
   const keys = [normalizeTitleKey(event.title)].filter(Boolean);
   const quotedKey = extractLeadingQuotedTitleKey(event.title);
   if (quotedKey && !keys.includes(quotedKey)) keys.push(quotedKey);
+  return keys;
+}
+
+function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
+  const keys = getEndfieldEventTitleKeys(event);
   const endKey = event.end_time ?? event.end_time_text ?? "";
   return keys.map((key) => `${key}|${event.start_time}|${endKey}`);
+}
+
+function isEndfieldPermanentEvent(event: CalendarEvent): boolean {
+  return event.end_time == null && /(?:长期|常驻)开放/.test(event.end_time_text ?? "");
 }
 
 function stripHtml(input: string): string {
@@ -136,6 +145,10 @@ function normalizeDateTimeCandidate(input: string | undefined): string | null {
 function extractRelativeEndText(input: string): string | null {
   const text = normalizeTitle(input);
   if (!text) return null;
+
+  const permanentMatch =
+    /(?:系列)?(?:开启|开放)后(?:长期|常驻)开放|(?:长期|常驻)开放/.exec(text);
+  if (permanentMatch?.[0]) return permanentMatch[0];
 
   const maintenanceMatch = /(?:下次)?版本更新维护前/.exec(text);
   if (maintenanceMatch?.[0]) return maintenanceMatch[0];
@@ -192,12 +205,16 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   ).exec(text);
   const start = normalizeDateTimeCandidate(startKw?.[1]);
   const end = normalizeDateTimeCandidate(endKw?.[1] ?? endFromRangeWithFuzzyStart?.[1]);
+  const standaloneRelativeEndText = extractRelativeEndText(text);
 
   if (start || end) {
-    return { start, end };
+    return {
+      start,
+      end,
+      endText: end ? null : standaloneRelativeEndText,
+    };
   }
 
-  const standaloneRelativeEndText = extractRelativeEndText(text);
   if (standaloneRelativeEndText) {
     return {
       start: null,
@@ -911,10 +928,20 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
 
   for (const event of events) {
     const mergeKeys = getEndfieldEventMergeKeys(event);
-    const existingPrimaryKey = mergeKeys.find((key) => {
+    const exactPrimaryKey = mergeKeys.find((key) => {
       const primaryKey = aliases.get(key) ?? key;
       return merged.has(primaryKey);
     });
+    const eventTitleKeys = getEndfieldEventTitleKeys(event);
+    const permanentPrimaryKey = exactPrimaryKey
+      ? undefined
+      : [...merged.entries()].find(([, existing]) => {
+          if (existing.start_time !== event.start_time) return false;
+          if (!isEndfieldPermanentEvent(existing) && !isEndfieldPermanentEvent(event)) return false;
+          const existingTitleKeys = getEndfieldEventTitleKeys(existing);
+          return eventTitleKeys.some((key) => existingTitleKeys.includes(key));
+        })?.[0];
+    const existingPrimaryKey = exactPrimaryKey ?? permanentPrimaryKey;
     const primaryKey = existingPrimaryKey ? aliases.get(existingPrimaryKey) ?? existingPrimaryKey : mergeKeys[0];
     if (!primaryKey) continue;
 
@@ -925,12 +952,28 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
       continue;
     }
 
+    if (!permanentPrimaryKey) {
+      merged.set(primaryKey, {
+        ...prev,
+        is_gacha: prev.is_gacha || event.is_gacha,
+        gacha_kind: combineGachaKinds(prev.gacha_kind, event.gacha_kind),
+        banner: prev.banner ?? event.banner,
+        content: prev.content ?? event.content,
+      });
+      for (const key of mergeKeys) aliases.set(key, primaryKey);
+      continue;
+    }
+
+    const permanentEvent = isEndfieldPermanentEvent(event) ? event : prev;
+    const identityEvent = permanentEvent === event ? prev : event;
     merged.set(primaryKey, {
-      ...prev,
+      ...permanentEvent,
+      id: identityEvent.id,
+      title: identityEvent.title,
       is_gacha: prev.is_gacha || event.is_gacha,
       gacha_kind: combineGachaKinds(prev.gacha_kind, event.gacha_kind),
-      banner: prev.banner ?? event.banner,
-      content: prev.content ?? event.content,
+      banner: identityEvent.banner ?? permanentEvent.banner,
+      content: permanentEvent.content ?? identityEvent.content,
     });
     for (const key of mergeKeys) aliases.set(key, primaryKey);
   }
