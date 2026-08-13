@@ -165,3 +165,20 @@ test("runtime input freezes exact-head candidate API results", async () => {
     globalThis.fetch = previousFetch;
   }
 });
+
+test("an aborted repair surfaces the agent's own explanation", () => {
+  const attemptInput = { allowed_files: ["apps/api/src/games/zzz.ts"] };
+  assert.throws(
+    () =>
+      validateAgentOutput(
+        {
+          complete: false,
+          errors: ["every shell command failed during sandbox initialization"],
+          summary: "no remediation attempted",
+          changed_files: [],
+        },
+        attemptInput
+      ),
+    /sandbox initialization/
+  );
+});

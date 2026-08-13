@@ -140,8 +140,19 @@ function validateAgentOutput(output, attemptInput) {
     JSON.stringify(Object.keys(output).sort()) === JSON.stringify(expected),
     "agent output has unexpected fields"
   );
-  assert(output.complete === true, "agent did not complete the repair");
-  assert(Array.isArray(output.errors) && output.errors.length === 0, "agent reported repair errors");
+  // Surface the agent's own explanation: it is the only diagnostic that reaches
+  // the Issue comment when a repair aborts.
+  const reported = Array.isArray(output.errors)
+    ? output.errors.map((item) => normalizeText(item, 300)).filter(Boolean).join("; ")
+    : "";
+  assert(
+    output.complete === true,
+    `agent did not complete the repair${reported ? `: ${reported}` : ""}`
+  );
+  assert(
+    Array.isArray(output.errors) && output.errors.length === 0,
+    `agent reported repair errors${reported ? `: ${reported}` : ""}`
+  );
   assert(Array.isArray(output.changed_files), "agent changed_files must be an array");
   assert(output.changed_files.length > 0 && output.changed_files.length <= 8, "agent changed_files is empty or too large");
   const unique = [...new Set(output.changed_files)].sort();

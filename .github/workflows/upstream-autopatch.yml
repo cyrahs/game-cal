@@ -396,6 +396,28 @@ jobs:
           name: upstream-autopatch-report
           path: ${{ runner.temp }}/autopatch
 
+      # Codex sandboxes each agent with bubblewrap. On Ubuntu 24.04+
+      # kernel.apparmor_restrict_unprivileged_userns=1 denies CAP_NET_ADMIN
+      # inside an unprivileged user namespace, so bwrap cannot bring up the
+      # loopback interface and every agent command fails. Both fixes need root,
+      # so they must run before sudo is dropped.
+      - name: Prepare the agent sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+
+      - name: Verify the agent sandbox actually isolates
+        run: |
+          # Same shape as a codex agent command: new user, mount, pid, and
+          # network namespaces with a loopback interface.
+          if ! bwrap --ro-bind / / --dev /dev --unshare-all --die-with-parent true; then
+            echo "bubblewrap cannot create an isolated namespace on this runner" >&2
+            exit 1
+          fi
+          echo "Sandbox preflight passed: $(bwrap --version)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Drop sudo before running model agents
         run: |
           if sudo -n true 2>/dev/null; then
