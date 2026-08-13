@@ -432,8 +432,11 @@ function buildIssueFixInput({ repository, issueNumber, issueUrl, marker, state, 
     findings.some((finding) => finding.game === game)
   );
   assert(targetGames.length > 0, "issue findings reference no known game");
+  // The collected input stores the suppression-filtered evidence the review
+  // agents saw under review_datasets (schema v3); `datasets` holds the
+  // unfiltered snapshots and must not leak suppressed items into repair.
   const datasetsByGame = new Map(
-    (collectInput?.games ?? []).map((dataset) => [dataset.game, dataset])
+    (collectInput?.review_datasets ?? []).map((dataset) => [dataset.game, dataset])
   );
   const evidenceWarnings = [];
   const evidence = targetGames.map((game) => {

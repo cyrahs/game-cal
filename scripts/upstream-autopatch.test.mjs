@@ -98,7 +98,8 @@ function collectInputFor(findings) {
       dataset.api_events.push({ review_ref: ref, title: entry.api_title, content: "api" });
     }
   }
-  return { games: [...games.values()] };
+  // Mirrors the real collect-only output: evidence lives under review_datasets.
+  return { mode: "collect_only", schema_version: 3, review_datasets: [...games.values()] };
 }
 
 const BUDGETS = {
