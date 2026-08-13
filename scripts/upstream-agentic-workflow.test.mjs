@@ -102,6 +102,23 @@ test("remediate reconciles on every successful sync, with pinned codex and no su
   assert.ok(dropSudoIndex >= 0 && driverIndex > dropSudoIndex, "sudo must be dropped before the driver runs");
 });
 
+test("the agent sandbox is prepared and proven before sudo is dropped", async () => {
+  const workflow = await readFile(autopatchPath, "utf8");
+  const remediate = workflow.slice(workflow.indexOf("\n  remediate:\n"));
+  // Ubuntu 24.04+ denies CAP_NET_ADMIN in unprivileged user namespaces, which
+  // breaks every bubblewrap-sandboxed agent command; both fixes need root.
+  const prepareIndex = remediate.indexOf("Prepare the agent sandbox");
+  const verifyIndex = remediate.indexOf("Verify the agent sandbox actually isolates");
+  const dropSudoIndex = remediate.indexOf("Drop sudo before running model agents");
+  assert.ok(prepareIndex >= 0, "sandbox preparation step is missing");
+  assert.ok(verifyIndex > prepareIndex, "sandbox verification must follow preparation");
+  assert.ok(dropSudoIndex > verifyIndex, "sandbox must be prepared and verified before sudo is dropped");
+  assert.match(remediate, /apt-get install -y --no-install-recommends bubblewrap/);
+  assert.match(remediate, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/);
+  assert.match(remediate, /bwrap --ro-bind \/ \/ --dev \/dev --unshare-all --die-with-parent true/);
+  assert.match(remediate, /cannot create an isolated namespace on this runner/);
+});
+
 test("runtime verifier is explicitly allowed to read its exact-head input", async () => {
   const prompt = await readFile(runtimePromptPath, "utf8");
   assert.match(prompt, /must read this file before deciding\s+the verdict/i);
