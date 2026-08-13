@@ -1051,7 +1051,7 @@ async function armAutoMergeAndWait({ client, prNumber, headSha, waitSeconds = ME
 }
 
 async function remediateIssue({ item, context, deps }) {
-  const { client, reviewClient, budgets, baseSha, collectInput, report, workspace } = context;
+  const { client, reviewClient, budgets, collectInput, report, workspace } = context;
   const state = item.state;
   const issueNumber = item.issue_number;
   const roundLog = [];
@@ -1060,6 +1060,14 @@ async function remediateIssue({ item, context, deps }) {
 
   await deps.git(["checkout", "--", "."], { cwd: workspace });
   await deps.git(["clean", "-fd", "--", "apps"], { cwd: workspace });
+
+  // Each issue rebases onto the current default-branch tip. Protected branches
+  // require PRs to be up to date, so reusing one run-wide base would leave the
+  // second issue's PR permanently BEHIND once the first one merges.
+  const baseSha = await deps.refreshBase();
+  if (baseSha !== context.baseSha) {
+    roundLog.push(`rebased onto \`${baseSha.slice(0, 12)}\` after an earlier merge advanced the default branch`);
+  }
 
   if (!state.fix_branch) state.fix_branch = `codex/autopatch-i${issueNumber}`;
 
@@ -1279,6 +1287,7 @@ async function remediateIssue({ item, context, deps }) {
         `attempt ${attempt + 1}: approved and merged \`${published.headSha.slice(0, 12)}\` ✅`
       );
       outcome = "merged";
+      await closeRemediatedIssue({ client, issueNumber, prNumber: published.prNumber });
       try {
         await client.request(
           `/repos/${client.repository}/git/refs/heads/${item.fixInput.fix_branch}`,
@@ -1297,6 +1306,17 @@ async function remediateIssue({ item, context, deps }) {
   }
 
   return { outcome, roundLog };
+}
+
+// GitHub's `Closes #N` keyword did not close the Issue when the driver merged
+// the PR through the API, so close it explicitly rather than relying on it.
+async function closeRemediatedIssue({ client, issueNumber, prNumber }) {
+  const issue = await client.request(`/repos/${client.repository}/issues/${issueNumber}`);
+  if (issue.state === "closed") return;
+  await client.request(`/repos/${client.repository}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: { state: "closed", state_reason: "completed" },
+  });
 }
 
 async function tryRecoverApprovedHead({ item, context, roundLog }) {
@@ -1330,6 +1350,11 @@ async function tryRecoverApprovedHead({ item, context, roundLog }) {
     if (mergeResult.merged) {
       item.state.status = "resolved";
       roundLog.push(`recovered previously approved head \`${pull.head.sha.slice(0, 12)}\` and merged ✅`);
+      await closeRemediatedIssue({
+        client,
+        issueNumber: item.issue_number,
+        prNumber: pull.number,
+      });
       return true;
     }
     return false;
@@ -1629,8 +1654,16 @@ async function run() {
     issuesByNumber: new Map(issues.map((issue) => [issue.number, issue])),
     roundsUsed: 0,
   };
+  const defaultBranch = process.env.AUTOPATCH_DEFAULT_BRANCH || "main";
   const deps = {
     git: (args, options = {}) => git(args, { cwd: workspace, ...options }),
+    refreshBase: async () => {
+      await git(["fetch", "--depth=1", "origin", defaultBranch], { cwd: workspace });
+      await git(["reset", "--hard", "FETCH_HEAD"], { cwd: workspace });
+      const refreshed = await git(["rev-parse", "HEAD"], { cwd: workspace });
+      assert(SHA40.test(refreshed), "refreshed base is not a valid commit");
+      return refreshed;
+    },
     runCodexAgent,
     createCandidate: (options) => createCandidate(options),
     runTrustedGates,
@@ -1639,7 +1672,7 @@ async function run() {
     armAutoMergeAndWait,
     verifyRuntime,
     pushUrl: `https://x-access-token:${token}@github.com/${repository}.git`,
-    defaultBranch: process.env.AUTOPATCH_DEFAULT_BRANCH || "main",
+    defaultBranch,
     runUrl,
   };
   context.deps = deps;
@@ -1676,6 +1709,7 @@ export {
   buildAttemptInput,
   buildCodexExecArgs,
   buildIssueFixInput,
+  closeRemediatedIssue,
   codexProviderBaseUrl,
   createIssueState,
   executePlan,
