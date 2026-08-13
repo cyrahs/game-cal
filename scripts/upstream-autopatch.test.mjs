@@ -8,7 +8,9 @@ import { sha256 } from "./upstream-agentic-state.mjs";
 import { getFindingKey } from "./review-upstream.mjs";
 import {
   buildAttemptInput,
+  buildCodexExecArgs,
   buildIssueFixInput,
+  codexProviderBaseUrl,
   createIssueState,
   executePlan,
   groupConfirmedFindingsByIssue,
@@ -350,6 +352,30 @@ test("the codex subprocess environment never contains GitHub credentials", () =>
   assert.equal(env.UPSTREAM_REVIEW_APPROVAL_TOKEN, undefined);
   assert.equal(env.OPENAI_MODEL, undefined);
   assert.equal(env.OPENAI_API_KEY, "sk-x");
+});
+
+test("codex talks to the configured gateway as an explicit provider with bearer auth", () => {
+  assert.equal(
+    codexProviderBaseUrl("https://gateway.example/v1/responses"),
+    "https://gateway.example/v1"
+  );
+  assert.equal(codexProviderBaseUrl("https://gateway.example/v1/"), "https://gateway.example/v1");
+  assert.throws(() => codexProviderBaseUrl(""), /absolute URL/);
+
+  const args = buildCodexExecArgs({
+    sandbox: "read-only",
+    schemaPath: "schema.json",
+    outputPath: "out.json",
+    model: "gpt-x",
+    effort: "high",
+    baseUrl: "https://gateway.example/v1/responses",
+    prompt: "prompt",
+  });
+  assert.ok(args.includes('model_provider="autopatch"'));
+  assert.ok(args.includes('model_providers.autopatch.base_url="https://gateway.example/v1"'));
+  assert.ok(args.includes('model_providers.autopatch.env_key="OPENAI_API_KEY"'));
+  assert.ok(args.includes('model_providers.autopatch.wire_api="responses"'));
+  assert.equal(args.at(-1), "prompt");
 });
 
 test("candidate code (gates, runtime API) never sees GitHub or model credentials", () => {

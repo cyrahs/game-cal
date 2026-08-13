@@ -745,21 +745,22 @@ function scrubbedAgentEnv(base = process.env) {
   return env;
 }
 
-async function runCodexAgent({
-  promptPath,
-  schemaPath,
-  outputPath,
-  sandbox,
-  cwd,
-  timeoutMs = 25 * 60 * 1000,
-  env = process.env,
-}) {
+// OPENAI_BASE_URL stores the full Responses POST endpoint (…/v1/responses);
+// codex appends /responses to a provider base_url itself, so strip the suffix.
+function codexProviderBaseUrl(endpoint) {
+  const trimmed = String(endpoint ?? "").trim().replace(/\/+$/, "");
+  assert(/^https?:\/\//.test(trimmed), "OPENAI_BASE_URL must be an absolute URL");
+  return trimmed.replace(/\/responses$/, "");
+}
+
+function buildCodexExecArgs({ sandbox, schemaPath, outputPath, model, effort, baseUrl, prompt }) {
   assert(["read-only", "workspace-write"].includes(sandbox), `invalid sandbox: ${sandbox}`);
-  const prompt = await readFile(promptPath, "utf8");
-  const model = env.OPENAI_MODEL;
-  const effort = env.OPENAI_REASONING_EFFORT;
   assert(model && effort, "missing OPENAI_MODEL or OPENAI_REASONING_EFFORT");
-  const args = [
+  // The gateway is declared as an explicit provider: the built-in openai
+  // provider ignores OPENAI_BASE_URL at exec time and expects ChatGPT-style
+  // auth, which produced 401s against api.openai.com. env_key makes codex send
+  // OPENAI_API_KEY from the scrubbed subprocess environment as the bearer.
+  return [
     "exec",
     "--sandbox",
     sandbox,
@@ -771,11 +772,40 @@ async function runCodexAgent({
     "--model",
     model,
     "-c",
-    `model_reasoning_effort=${JSON.stringify(effort)}`,
+    'model_provider="autopatch"',
     "-c",
-    'preferred_auth_method="apikey"',
+    'model_providers.autopatch.name="Autopatch Gateway"',
+    "-c",
+    `model_providers.autopatch.base_url=${JSON.stringify(codexProviderBaseUrl(baseUrl))}`,
+    "-c",
+    'model_providers.autopatch.env_key="OPENAI_API_KEY"',
+    "-c",
+    'model_providers.autopatch.wire_api="responses"',
+    "-c",
+    `model_reasoning_effort=${JSON.stringify(effort)}`,
     prompt,
   ];
+}
+
+async function runCodexAgent({
+  promptPath,
+  schemaPath,
+  outputPath,
+  sandbox,
+  cwd,
+  timeoutMs = 25 * 60 * 1000,
+  env = process.env,
+}) {
+  const prompt = await readFile(promptPath, "utf8");
+  const args = buildCodexExecArgs({
+    sandbox,
+    schemaPath,
+    outputPath,
+    model: env.OPENAI_MODEL,
+    effort: env.OPENAI_REASONING_EFFORT,
+    baseUrl: env.OPENAI_BASE_URL,
+    prompt,
+  });
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "autopatch-codex-"));
   await new Promise((resolve, reject) => {
     const child = spawn(env.AUTOPATCH_CODEX_BIN || "codex", args, {
@@ -1644,7 +1674,9 @@ if (isMain) {
 
 export {
   buildAttemptInput,
+  buildCodexExecArgs,
   buildIssueFixInput,
+  codexProviderBaseUrl,
   createIssueState,
   executePlan,
   groupConfirmedFindingsByIssue,
