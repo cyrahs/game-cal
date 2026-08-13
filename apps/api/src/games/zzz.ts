@@ -216,6 +216,19 @@ export function extractZzzTimeRangeFromContent(
     };
   }
 
+  const versionRelativeEndRange = new RegExp(
+    `(${ZZZ_DATE_TIME_PATTERN})\\s*(?:[（(]UTC\\+8[）)])?\\s*${ZZZ_RANGE_SEPARATOR_PATTERN}\\s*(?:\\d+(?:\\.\\d+)+\\s*)?版本结束(?:前)?`
+  ).exec(text);
+  if (versionRelativeEndRange?.[1]) {
+    return {
+      startIso: toSourceIsoFromDateTimeCandidate(versionRelativeEndRange[1]),
+      endIso: resolveVersionRelativeEndIso(html, {
+        versionEndByLabel: opts.versionEndByLabel ?? new Map(),
+        fallbackEndIso: opts.fallbackEndIso ?? null,
+      }),
+    };
+  }
+
   const all: string[] = [];
   const seen = new Set<string>();
   const re = /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)/g;

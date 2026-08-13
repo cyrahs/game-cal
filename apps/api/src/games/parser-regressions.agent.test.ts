@@ -503,6 +503,20 @@ test("ZZZ resolves version-relative ends for supplemental activity notices", () 
       notice.title
     );
   }
+
+  assert.deepEqual(
+    extractZzzTimeRangeFromContent(
+      "【活动时间】 2026/07/17 20:30（UTC+8）~ 3.1版本结束 【活动奖励】",
+      {
+        versionEndByLabel: new Map([["3.1", "2026-09-09T05:59:59+08:00"]]),
+      }
+    ),
+    {
+      startIso: "2026-07-17T20:30:00+08:00",
+      endIso: "2026-09-09T05:59:59+08:00",
+    },
+    "「回归丽都 羽落重逢」活动说明"
+  );
 });
 
 test("ZZZ prefers an explicit version end from update content", () => {
