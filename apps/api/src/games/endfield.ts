@@ -106,6 +106,18 @@ function isEndfieldPermanentEvent(event: CalendarEvent): boolean {
   return event.end_time == null && /(?:长期|常驻)开放/.test(event.end_time_text ?? "");
 }
 
+function extractEndfieldVersionSeriesFamilyKey(event: CalendarEvent): string | null {
+  const title = normalizeTitle(event.title);
+  const match =
+    /^[「『“"]([^」』”"]+)[」』”"]\s*挑战玩法更新[，,]?\s*开放[「『“"][^」』”"]+[」』”"]系列关卡$/u.exec(
+      title
+    );
+  if (!match?.[1]) return null;
+
+  const key = normalizeTitleKey(match[1]);
+  return key || null;
+}
+
 function stripHtml(input: string): string {
   return input
     .replace(/<[^>]*>/g, " ")
@@ -932,14 +944,18 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
       const primaryKey = aliases.get(key) ?? key;
       return merged.has(primaryKey);
     });
-    const eventTitleKeys = getEndfieldEventTitleKeys(event);
     const permanentPrimaryKey = exactPrimaryKey
       ? undefined
       : [...merged.entries()].find(([, existing]) => {
           if (existing.start_time !== event.start_time) return false;
-          if (!isEndfieldPermanentEvent(existing) && !isEndfieldPermanentEvent(event)) return false;
-          const existingTitleKeys = getEndfieldEventTitleKeys(existing);
-          return eventTitleKeys.some((key) => existingTitleKeys.includes(key));
+          const existingIsPermanent = isEndfieldPermanentEvent(existing);
+          const eventIsPermanent = isEndfieldPermanentEvent(event);
+          if (existingIsPermanent === eventIsPermanent) return false;
+
+          const permanentEvent = existingIsPermanent ? existing : event;
+          const finiteEvent = existingIsPermanent ? event : existing;
+          const seriesFamilyKey = extractEndfieldVersionSeriesFamilyKey(finiteEvent);
+          return seriesFamilyKey === normalizeTitleKey(permanentEvent.title);
         })?.[0];
     const existingPrimaryKey = exactPrimaryKey ?? permanentPrimaryKey;
     const primaryKey = existingPrimaryKey ? aliases.get(existingPrimaryKey) ?? existingPrimaryKey : mergeKeys[0];

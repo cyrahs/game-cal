@@ -315,6 +315,91 @@ test("Endfield preserves permanent availability after an explicit start", async 
   }
 });
 
+test("Endfield keeps distinct same-name permanent and limited activities", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「向渊行」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/07/16 06:00 - 2026/07/16 12:00</p>",
+                  "<p>■ 活动及玩法更新</p>",
+                  "<p>1. 「同名企划」限时挑战活动</p>",
+                  "<p>· 开放时间：2026/08/06 12:00 - 2026/08/20 04:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "permanent-challenge",
+              tab: "events",
+              title: "同名企划 系列更新",
+              startAt: 1785902400,
+              data: {
+                html: [
+                  "<p>▼//开放时间</p>",
+                  "<p>2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放</p>",
+                  "<p>▼//玩法说明</p>",
+                  "<p>常驻玩法说明。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const matchingEvents = events.filter((item) => item.title.includes("同名企划"));
+    assert.equal(matchingEvents.length, 2);
+    const permanentEvent = matchingEvents.find((event) => event.end_time == null);
+    const limitedEvent = matchingEvents.find((event) => event.end_time != null);
+    assert.ok(permanentEvent);
+    assert.ok(limitedEvent);
+    assert.deepEqual(
+      {
+        title: permanentEvent.title,
+        end_time: permanentEvent.end_time,
+        end_time_text: permanentEvent.end_time_text,
+      },
+      {
+        title: "同名企划 系列更新",
+        end_time: null,
+        end_time_text: "系列开启后常驻开放",
+      }
+    );
+    assert.deepEqual(
+      {
+        title: limitedEvent.title,
+        end_time: limitedEvent.end_time,
+        end_time_text: limitedEvent.end_time_text,
+      },
+      {
+        title: "「同名企划」限时挑战活动",
+        end_time: "2026-08-20T04:00:00+08:00",
+        end_time_text: undefined,
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
