@@ -42,7 +42,7 @@ function normalizeTitleKey(input: string | undefined): string {
 }
 
 function normalizeAnnouncementEventTitle(input: string | undefined): string {
-  let title = stripHtml(input).replace(/\s*活动说明\s*$/, "").trim();
+  let title = stripHtml(input).replace(/\s*(?:活动)?说明\s*$/, "").trim();
   const outerQuoted =
     /^「(.+)」$/.exec(title) ??
     /^『(.+)』$/.exec(title) ??
@@ -52,11 +52,18 @@ function normalizeAnnouncementEventTitle(input: string | undefined): string {
   return title;
 }
 
-function isSupplementalActivityNotice(item: MihoyoNapAnnItem): boolean {
+function isSupplementalActivityNotice(
+  item: MihoyoNapAnnItem,
+  content: string | undefined
+): boolean {
   const title = stripHtml(item.title || item.subtitle);
-  if (!title.endsWith("活动说明")) return false;
   if (isGachaEventTitle("zzz", title)) return false;
-  return true;
+  if (isVersionNoticeText(title)) return false;
+  if (title.endsWith("活动说明")) return true;
+  if (!title.endsWith("说明")) return false;
+
+  const text = stripHtml(content);
+  return /活动期间/.test(text) && /(?:奖励|获得|获取|领取|兑换)/.test(text);
 }
 
 type ContentCandidate = {
@@ -413,13 +420,13 @@ function parseSupplementalActivityEventsFromAnnContent(
   const out = new Map<string, CalendarEvent>();
 
   for (const item of items) {
-    if (!isSupplementalActivityNotice(item)) continue;
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    if (!isSupplementalActivityNotice(item, contentItem?.content)) continue;
 
     const title = normalizeAnnouncementEventTitle(item.title || item.subtitle);
     const titleKey = normalizeTitleKey(title);
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
-    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
     const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "", {
       fallbackEndIso: opts.fallbackEndIso,
       versionEndByLabel: opts.versionEndByLabel,

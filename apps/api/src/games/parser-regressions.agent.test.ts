@@ -15,6 +15,7 @@ import {
 import {
   extractZzzTimeRangeFromContent,
   extractZzzVersionEndIsoFromContent,
+  fetchZzzEvents,
 } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
@@ -48,6 +49,50 @@ test("Star Rail preserves an explicit long-term start alongside version wording"
     endIso: null,
     endText: "长期开放",
   });
+});
+
+test("Star Rail uses a unique body reward deadline when list metadata ends early", () => {
+  const range = extractStarRailTimeRangeFromContent(
+    [
+      "<p>浏览版本专题展示页，分享页面即可领取信用点*20000奖励。</p>",
+      "<p>2026/09/02 04:00:00前，首次进行网页分享可获得信用点*20000。</p>",
+    ].join(""),
+    {
+      title: "4.5版本「挥掷千星的筹码」专题展示页现已上线",
+      versionMaintenanceEndByLabel: new Map(),
+      singleVersionMaintenanceEndIso: null,
+      listEndIso: "2026-08-18T00:00:00+08:00",
+    }
+  );
+
+  assert.deepEqual(range, {
+    startIso: null,
+    endIso: "2026-09-02T04:00:00+08:00",
+  });
+});
+
+test("Star Rail ignores prerequisite and non-extending body deadlines", () => {
+  const prerequisite = extractStarRailTimeRangeFromContent(
+    "<p>2026/09/02 04:00:00前完成开拓任务后方可参与活动。</p>",
+    {
+      title: "限时活动说明",
+      versionMaintenanceEndByLabel: new Map(),
+      singleVersionMaintenanceEndIso: null,
+      listEndIso: "2026-08-18T00:00:00+08:00",
+    }
+  );
+  const earlierRewardDeadline = extractStarRailTimeRangeFromContent(
+    "<p>2026/08/17 04:00:00前领取信用点奖励。</p>",
+    {
+      title: "限时活动说明",
+      versionMaintenanceEndByLabel: new Map(),
+      singleVersionMaintenanceEndIso: null,
+      listEndIso: "2026-08-18T00:00:00+08:00",
+    }
+  );
+
+  assert.deepEqual(prerequisite, { startIso: null, endIso: null });
+  assert.deepEqual(earlierRewardDeadline, { startIso: null, endIso: null });
 });
 
 test("Star Rail does not infer version starts across a major boundary or beyond three versions", () => {
@@ -605,4 +650,100 @@ test("ZZZ prefers an explicit version end from update content", () => {
   );
 
   assert.equal(endIso, "2026-09-09T06:00:00+08:00");
+});
+
+test("ZZZ admits reward activity notices ending with a generic explanation suffix", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: { activity_list: [] },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1200,
+                  title: "3.1版本更新说明",
+                  content: [
+                    "<p>维护时间</p><p>2026/07/28 06:00 - 2026/07/28 11:00</p>",
+                    "<p>版本更新后将开放多项活动，活动期间可获得奖励。</p>",
+                  ].join(""),
+                },
+                {
+                  ann_id: 1236,
+                  title: "3.1版本「丽都城募」说明",
+                  content: [
+                    "<p>活动时间</p>",
+                    "<p>3.1版本更新后 - 2026/09/07 03:59</p>",
+                    "<p>活动期间，通过提升城募等级获取丰厚奖励。</p>",
+                  ].join(""),
+                },
+              ],
+              pic_list: [],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1200,
+                      title: "3.1版本更新说明",
+                      start_time: "2026-07-28 06:00:00",
+                      end_time: "2026-09-09 06:00:00",
+                    },
+                    {
+                      ann_id: 1236,
+                      title: "3.1版本「丽都城募」说明",
+                      start_time: "2026-07-28 13:30:00",
+                      end_time: "2026-09-07 03:59:59",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+    const event = events.find((item) => item.title === "3.1版本「丽都城募」");
+    assert.ok(event);
+    assert.equal(events.some((item) => item.title === "3.1版本更新"), false);
+    assert.deepEqual(
+      {
+        start_time: event.start_time,
+        end_time: event.end_time,
+        is_gacha: event.is_gacha,
+      },
+      {
+        start_time: "2026-07-28T11:00:00+08:00",
+        end_time: "2026-09-07T03:59:00+08:00",
+        is_gacha: false,
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

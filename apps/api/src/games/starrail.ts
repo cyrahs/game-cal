@@ -449,6 +449,36 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
   return null;
 }
 
+function extractStarRailRewardDeadlineEndIso(
+  content: string | undefined,
+  listEndIso: string
+): string | null {
+  const text = stripHtml(content);
+  if (!text) return null;
+
+  const deadlineRe = new RegExp(
+    `(${STARRAIL_DATE_TIME_PATTERN})\\s*(?:[（(]UTC\\+8[）)])?\\s*前([^。；;\\n]{0,120})`,
+    "g"
+  );
+  const deadlines = [...text.matchAll(deadlineRe)]
+    .filter((match) => {
+      const clause = match[2] ?? "";
+      return (
+        /(?:领取|获得|获取|兑换|发放)/.test(clause) &&
+        /(?:奖励|信用点|星琼|道具|物品|材料|头像)/.test(clause)
+      );
+    })
+    .map((match) => toStarRailSourceIso(match[1]))
+    .filter((value): value is string => {
+      if (!value) return false;
+      const deadlineMs = Date.parse(value);
+      const listEndMs = Date.parse(listEndIso);
+      return Number.isFinite(deadlineMs) && Number.isFinite(listEndMs) && deadlineMs > listEndMs;
+    });
+
+  return deadlines.length === 1 ? deadlines[0]! : null;
+}
+
 export function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
@@ -459,6 +489,7 @@ export function extractStarRailTimeRangeFromContent(
   }
 ): StarRailParsedTimeRange {
   const text = stripHtml(content);
+  const deadlineEndIso = extractStarRailRewardDeadlineEndIso(content, opts.listEndIso);
   const longTermFallback = (source: string): StarRailParsedTimeRange => {
     const longTermRe = new RegExp(
       `(${STARRAIL_DATE_TIME_PATTERN})\\s*(?:后|起)(长期开放|永久开放|持续开放)`
@@ -497,7 +528,11 @@ export function extractStarRailTimeRangeFromContent(
   if (titleLongTermRange) return titleLongTermRange;
 
   const section = extractStarRailTimeSection(content);
-  if (!section) return longTermFallback(text);
+  if (!section) {
+    return deadlineEndIso
+      ? { startIso: null, endIso: deadlineEndIso }
+      : longTermFallback(text);
+  }
 
   const dates = collectDateTimeCandidates(section);
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
@@ -552,7 +587,9 @@ export function extractStarRailTimeRangeFromContent(
     };
   }
 
-  return longTermFallback(section);
+  return deadlineEndIso
+    ? { startIso: null, endIso: deadlineEndIso }
+    : longTermFallback(section);
 }
 
 function isRecord(value: unknown): value is JsonObject {
