@@ -42,7 +42,7 @@ function normalizeTitleKey(input: string | undefined): string {
 }
 
 function normalizeAnnouncementEventTitle(input: string | undefined): string {
-  let title = stripHtml(input).replace(/\s*活动说明\s*$/, "").trim();
+  let title = stripHtml(input).replace(/\s*(?:活动)?说明\s*$/, "").trim();
   const outerQuoted =
     /^「(.+)」$/.exec(title) ??
     /^『(.+)』$/.exec(title) ??
@@ -52,11 +52,18 @@ function normalizeAnnouncementEventTitle(input: string | undefined): string {
   return title;
 }
 
-function isSupplementalActivityNotice(item: MihoyoNapAnnItem): boolean {
-  const title = stripHtml(item.title || item.subtitle);
-  if (!title.endsWith("活动说明")) return false;
+export function isZzzSupplementalActivityNotice(
+  titleInput: string | undefined,
+  contentInput: string | undefined
+): boolean {
+  const title = stripHtml(titleInput);
+  if (!title.endsWith("说明")) return false;
+  if (isVersionNoticeText(title)) return false;
   if (isGachaEventTitle("zzz", title)) return false;
-  return true;
+  if (title.endsWith("活动说明")) return true;
+
+  const content = stripHtml(contentInput);
+  return /活动(?:时间|期间)/.test(content);
 }
 
 type ContentCandidate = {
@@ -413,13 +420,20 @@ function parseSupplementalActivityEventsFromAnnContent(
   const out = new Map<string, CalendarEvent>();
 
   for (const item of items) {
-    if (!isSupplementalActivityNotice(item)) continue;
+    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
+    if (
+      !isZzzSupplementalActivityNotice(
+        item.title || item.subtitle,
+        contentItem?.content
+      )
+    ) {
+      continue;
+    }
 
     const title = normalizeAnnouncementEventTitle(item.title || item.subtitle);
     const titleKey = normalizeTitleKey(title);
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
-    const contentItem = pickContentItemForNotice(item, contentItemsByAnnId);
     const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "", {
       fallbackEndIso: opts.fallbackEndIso,
       versionEndByLabel: opts.versionEndByLabel,
