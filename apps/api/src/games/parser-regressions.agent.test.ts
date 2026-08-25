@@ -15,6 +15,7 @@ import {
 import {
   extractZzzTimeRangeFromContent,
   extractZzzVersionEndIsoFromContent,
+  isZzzSupplementalActivityNotice,
 } from "./zzz.js";
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
@@ -647,6 +648,16 @@ test("ZZZ keeps a version-relative gacha end ahead of later phase dates", () => 
     startIso: null,
     endIso: "2026-09-08T14:59:00+08:00",
   });
+});
+
+test("ZZZ recognizes activity notices whose titles omit the activity suffix", () => {
+  assert.equal(
+    isZzzSupplementalActivityNotice(
+      "3.1版本「丽都城募」说明",
+      "亲爱的绳匠：活动期间，绳匠可以在「丽都城募」中，通过提升城募等级获取丰厚奖励！"
+    ),
+    true
+  );
 });
 
 test("ZZZ resolves version-relative ends for supplemental activity notices", () => {
