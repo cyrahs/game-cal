@@ -360,7 +360,7 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   const start = startRe.exec(text);
   if (!start?.[1]) return null;
 
-  const duration = /预计\s*([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
+  const duration = /预计\s*(?:需要\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
     text.slice(start.index)
   );
   const durationHours = Number(duration?.[1]);
@@ -740,6 +740,12 @@ function isVersionNoticeText(input: string): boolean {
   return text.includes("版本更新说明") || text.includes("版本更新公告");
 }
 
+export function isStarRailVersionMaintenanceAnchorText(input: string): boolean {
+  const text = input.trim();
+  if (!text) return false;
+  return isVersionNoticeText(text) || text.includes("版本更新维护预告");
+}
+
 function pickCurrentVersionNotice(items: MihoyoAnnItem[]): StarRailVersionNotice | null {
   const candidates = items
     .filter((item) => isVersionNoticeText(item.title ?? "") || isVersionNoticeText(item.subtitle ?? ""))
@@ -949,7 +955,10 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
   for (const noticeItem of allNoticeItems.values()) {
-    if (!isVersionNoticeText(noticeItem.title ?? "") && !isVersionNoticeText(noticeItem.subtitle ?? "")) {
+    if (
+      !isStarRailVersionMaintenanceAnchorText(noticeItem.title ?? "") &&
+      !isStarRailVersionMaintenanceAnchorText(noticeItem.subtitle ?? "")
+    ) {
       continue;
     }
 
