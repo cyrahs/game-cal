@@ -11,6 +11,7 @@ import {
 import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
+  isStarRailVersionMaintenanceAnchorText,
 } from "./starrail.js";
 import {
   extractZzzTimeRangeFromContent,
@@ -91,6 +92,129 @@ test("Star Rail chooses the nearest eligible later version anchor", () => {
     startIso: "2026-04-22T11:00:00+08:00",
     endIso: "2026-08-26T06:00:00+08:00",
   });
+});
+
+test("Star Rail resolves version starts from maintenance previews with expected durations", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/list")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                type_id: 4,
+                type_label: "公告",
+                list: [
+                  {
+                    ann_id: 1403,
+                    title: "4.5版本更新维护预告",
+                    start_time: "2026-08-24 14:00:00",
+                    end_time: "2026-08-26 06:00:00",
+                  },
+                ],
+              },
+              {
+                type_id: 3,
+                type_label: "资讯",
+                list: [
+                  {
+                    ann_id: 1330,
+                    title: "4.5版本活动跃迁（其一）",
+                    start_time: "2026-08-25 14:00:00",
+                    end_time: "2026-09-12 11:59:00",
+                  },
+                  {
+                    ann_id: 1335,
+                    title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+                    start_time: "2026-08-25 13:00:00",
+                    end_time: "2026-09-28 03:59:00",
+                  },
+                ],
+              },
+            ],
+          },
+        }
+      : {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                ann_id: 1403,
+                title: "4.5版本更新维护预告",
+                content: [
+                  "<h1>更新时间</h1>",
+                  "<p>2026/08/26 06:00:00 开始，预计需要<strong>5</strong>个小时。</p>",
+                ].join(""),
+              },
+              {
+                ann_id: 1330,
+                title: "4.5版本活动跃迁（其一）",
+                content: [
+                  "<p>本期活动跃迁时间为</p>",
+                  "<p>4.5版本更新后 - 2026/09/12 11:59:00</p>",
+                  "<p>跃迁说明</p>",
+                ].join(""),
+              },
+              {
+                ann_id: 1335,
+                title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+                content: [
+                  "<p>限时活动期</p>",
+                  "<p>4.5版本更新后 - 2026/09/28 03:59:00</p>",
+                  "<p>参与条件</p>",
+                ].join(""),
+              },
+            ],
+          },
+        };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    assert.equal(
+      isStarRailVersionMaintenanceAnchorText("4.5版本更新维护预告"),
+      true
+    );
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(
+      events
+        .filter(
+          (event) =>
+            String(event.id).includes("starrail:1330|") ||
+            String(event.id).includes("starrail:1335|")
+        )
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+        })),
+      [
+        {
+          title: "4.5版本活动跃迁（其一）",
+          start_time: "2026-08-26T11:00:00+08:00",
+          end_time: "2026-09-12T11:59:00+08:00",
+        },
+        {
+          title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+          start_time: "2026-08-26T11:00:00+08:00",
+          end_time: "2026-09-28T03:59:00+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Endfield uses maintenance previews to resolve version-relative returner events", () => {
