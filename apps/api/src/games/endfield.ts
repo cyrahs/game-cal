@@ -868,6 +868,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
   let inheritedWindow: EndfieldParsedWindow | null = null;
+  let noticeWindow: EndfieldParsedWindow | null = null;
   const sectionWindows = new Map<string, EndfieldParsedWindow>();
   let standaloneSectionCount = 0;
   let standaloneWindowCount = 0;
@@ -881,7 +882,28 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
       continue;
     }
 
-    if (!currentTitle) continue;
+    if (!currentTitle) {
+      // A permanent window ahead of the first quoted section belongs to the
+      // bulletin itself; quoted sub-activities below would otherwise hide it.
+      if (!noticeWindow && isEndfieldTimeSectionLabel(line)) {
+        const sectionLines = [line];
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const next = lines[j]!;
+          if (isEndfieldTimeSectionBoundary(next)) break;
+          sectionLines.push(next);
+        }
+        const window = parseEndfieldWindowText(sectionLines.join(" "));
+        if (
+          window.start &&
+          !window.end &&
+          window.endText &&
+          /(?:长期|常驻)开放/.test(window.endText)
+        ) {
+          noticeWindow = window;
+        }
+      }
+      continue;
+    }
     const timeText = extractEndfieldStandaloneTimeText(line, lines[i + 1]);
     if (timeText == null) continue;
     const window = parseEndfieldWindowText(timeText);
@@ -901,6 +923,26 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
       classificationContent: "",
     });
     if (event) out.push(event);
+  }
+
+  if (out.length > 0 && noticeWindow?.start) {
+    const noticeTitle = normalizeTitle(item.title);
+    const noticeTitleKey = normalizeTitleKey(noticeTitle);
+    if (
+      noticeTitleKey &&
+      !out.some((event) => getEndfieldEventTitleKeys(event).includes(noticeTitleKey))
+    ) {
+      const event = buildEndfieldEvent({
+        id: `${item.cid ?? "event"}:${noticeTitleKey}:${noticeWindow.start}:${noticeWindow.endText ?? ""}`,
+        title: noticeTitle,
+        startNaive: noticeWindow.start,
+        endTimeText: noticeWindow.endText ?? undefined,
+        banner,
+        content: html,
+        classificationContent: "",
+      });
+      if (event) out.unshift(event);
+    }
   }
 
   const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
@@ -934,8 +976,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   return out;
 }
 
-function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
-  const merged = new Map<string, CalendarEvent>();
+function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {  const merged = new Map<string, CalendarEvent>();
   const aliases = new Map<string, string>();
 
   for (const event of events) {

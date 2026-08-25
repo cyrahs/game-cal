@@ -272,7 +272,10 @@ test("Endfield preserves permanent availability after an explicit start", async 
                   "<p>▼//开放时间</p>",
                   "<p>2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放</p>",
                   "<p>▼//玩法说明</p>",
-                  "<p>挑战玩法更新系列关卡。</p>",
+                  "<p>· 本次「影拓丰碑」挑战玩法更新系列「山中见犼」，包含4个关卡。</p>",
+                  "<p>▼//「丰碑留名·兽犼」限时挑战活动</p>",
+                  "<p>· 活动时间：2026/08/06 12:00 - 2026/08/20 04:00（服务器时间）</p>",
+                  "<p>· 活动说明：「影拓丰碑 - 山中见犼」系列开放后，将开启「丰碑留名·兽犼」限时活动。</p>",
                 ].join(""),
               },
             },
@@ -308,6 +311,18 @@ test("Endfield preserves permanent availability after an explicit start", async 
         end_time: null,
         end_time_kind: "relative",
         end_time_text: "系列开启后常驻开放",
+      }
+    );
+    const limitedEvent = events.find((item) => item.title === "丰碑留名·兽犼");
+    assert.ok(limitedEvent);
+    assert.deepEqual(
+      {
+        start_time: limitedEvent.start_time,
+        end_time: limitedEvent.end_time,
+      },
+      {
+        start_time: "2026-08-06T12:00:00+08:00",
+        end_time: "2026-08-20T04:00:00+08:00",
       }
     );
   } finally {
