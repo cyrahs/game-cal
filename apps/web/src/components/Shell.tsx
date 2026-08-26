@@ -7,6 +7,7 @@ import type { CalendarEvent, GameId } from "../api/types";
 import { usePrefs } from "../context/prefs";
 import type { ThemePreference } from "../context/theme";
 import { useEvents } from "../hooks/useEvents";
+import { localizeErrorMessage } from "../lib/errors";
 import { isUrgentByRemainingMs, normalizeEventTitle } from "../lib/events";
 import { ALL_GAME_IDS, GAME_REGISTRY, GAME_REGISTRY_BY_ID } from "../lib/games";
 import { isCharacterTrialGachaEvent, resolveGachaClassification } from "../lib/gacha";
@@ -624,7 +625,7 @@ export default function Shell() {
                           ) : null}
                         </div>
 
-                        <div className="mt-3 text-[11px] text-[color:var(--muted)]">
+                        <div className="mt-3 text-xs text-[color:var(--muted)]">
                           拖动左侧手柄可排序；未勾选的游戏会从顶部导航隐藏。
                         </div>
                       </>
@@ -633,7 +634,7 @@ export default function Shell() {
                     {activeSettingsTab === "sync" ? (
                       <>
                         <div className="mt-3 text-sm font-semibold">同步</div>
-                        <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                        <div className="mt-2 text-xs text-[color:var(--muted)]">
                           状态会在本地加密后上传到云端（D1）。该功能需服务端启用 Worker + D1；Node API 模式会显示“云端未启用”。
                         </div>
 
@@ -650,7 +651,7 @@ export default function Shell() {
                               inputMode="text"
                             />
                             {syncInputErrors.uuid ? (
-                              <span className="text-[11px] text-red-600/80 dark:text-red-400/80">{syncInputErrors.uuid}</span>
+                              <span className="text-xs text-red-600/80 dark:text-red-400/80">{syncInputErrors.uuid}</span>
                             ) : null}
                           </label>
 
@@ -693,7 +694,7 @@ export default function Shell() {
                               inputMode="text"
                             />
                             {syncInputErrors.password ? (
-                              <span className="text-[11px] text-red-600/80 dark:text-red-400/80">{syncInputErrors.password}</span>
+                              <span className="text-xs text-red-600/80 dark:text-red-400/80">{syncInputErrors.password}</span>
                             ) : null}
                           </label>
 
@@ -770,7 +771,7 @@ export default function Shell() {
                           </div>
                         ) : null}
 
-                        <div className="mt-3 text-[11px] text-[color:var(--muted)]">
+                        <div className="mt-3 text-xs text-[color:var(--muted)]">
                           状态:{" "}
                           {sync.state.phase === "init"
                             ? "初始化"
@@ -784,7 +785,9 @@ export default function Shell() {
                                     ? "冲突"
                                     : "错误"}
                           {sync.state.error ? (
-                            <span className="block mt-1 text-red-600/80 dark:text-red-400/80">{sync.state.error}</span>
+                            <span className="block mt-1 text-red-600/80 dark:text-red-400/80">
+                              {localizeErrorMessage(sync.state.error)}
+                            </span>
                           ) : null}
                           {sync.state.lastPullAt ? (
                             <span className="block mt-1">上次拉取: {new Date(sync.state.lastPullAt).toLocaleString()}</span>
@@ -839,7 +842,7 @@ export default function Shell() {
 
                         <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
                           <div className="text-sm font-semibold">时间线显示</div>
-                          <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                          <div className="mt-2 text-xs text-[color:var(--muted)]">
                             控制时间线是否按周分隔，以及是否展示卡池和未开始活动。
                           </div>
                           <div className="mt-3 grid gap-2">
@@ -861,17 +864,21 @@ export default function Shell() {
                                 className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
                               />
                             </label>
-                            {showGacha ? (
-                              <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
-                                <span className="text-xs text-[color:var(--ink)]">仅显示试用</span>
-                                <input
-                                  type="checkbox"
-                                  checked={showGachaTrialsOnly}
-                                  onChange={(e) => setShowGachaTrialsOnly(e.target.checked)}
-                                  className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
-                                />
-                              </label>
-                            ) : null}
+                            <label
+                              className={clsx(
+                                "flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 select-none ml-4",
+                                showGacha ? "cursor-pointer" : "opacity-45 cursor-not-allowed"
+                              )}
+                            >
+                              <span className="text-xs text-[color:var(--ink)]">仅显示试用</span>
+                              <input
+                                type="checkbox"
+                                checked={showGachaTrialsOnly}
+                                disabled={!showGacha}
+                                onChange={(e) => setShowGachaTrialsOnly(e.target.checked)}
+                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)] disabled:cursor-not-allowed"
+                              />
+                            </label>
                             <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
                               <span className="text-xs text-[color:var(--ink)]">显示未开始活动</span>
                               <input
@@ -886,7 +893,7 @@ export default function Shell() {
 
                         <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
                           <div className="text-sm font-semibold">循环活动配置</div>
-                          <div className="mt-2 text-[11px] text-[color:var(--muted)]">
+                          <div className="mt-2 text-xs text-[color:var(--muted)]">
                             可导出当前循环活动配置到 JSON 文件，也可从文件导入并覆盖现有循环活动配置。
                           </div>
                           <div className="mt-3 flex gap-2">
@@ -918,7 +925,7 @@ export default function Shell() {
                           {recurringSettingsFeedback ? (
                             <div
                               className={clsx(
-                                "mt-2 text-[11px]",
+                                "mt-2 text-xs",
                                 recurringSettingsFeedback.kind === "error" ? "text-red-600/90 dark:text-red-400/90" : "text-[color:var(--muted)]"
                               )}
                             >
@@ -959,11 +966,11 @@ export default function Shell() {
             </a>
             <span className="min-w-0">数据来源: {currentDataSource}</span>
             {currentUpstreamUpdatedAtLabel ? (
-              <span className="min-w-0 font-mono text-[11px]">
+              <span className="min-w-0 font-mono text-xs">
                 {currentUpstreamUpdatedAtLabel}
               </span>
             ) : null}
-            <span className="min-w-0 font-mono text-[11px]" title={`build ${buildCommit}`}>
+            <span className="min-w-0 font-mono text-xs" title={`build ${buildCommit}`}>
               build {buildCommit}
             </span>
           </div>

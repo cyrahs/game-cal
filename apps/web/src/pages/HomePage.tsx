@@ -1,9 +1,12 @@
 import { useMemo } from "react";
 
 import type { GameId } from "../api/types";
+import LoadingCard from "../components/LoadingCard";
 import TimelineCalendar, { type TimelineCalendarEvent } from "../components/TimelineCalendar/TimelineCalendar";
 import { usePrefs } from "../context/prefs";
+import { localizeErrorMessage } from "../lib/errors";
 import { ALL_GAME_IDS, GAME_REGISTRY_BY_ID } from "../lib/games";
+import { refreshGameData } from "../hooks/refreshGameData";
 import { useEvents } from "../hooks/useEvents";
 import { useCurrentVersion } from "../hooks/useCurrentVersion";
 
@@ -40,26 +43,29 @@ export default function HomePage() {
     visibleVersionStates.some(([, state]) => state.status === "loading");
   const failedEventLoads = visibleEventStates.flatMap(([gameId, state]) => {
     if (state.status !== "error") return [];
-    return `${GAME_REGISTRY_BY_ID[gameId].name}: ${state.error.message}`;
+    return `${GAME_REGISTRY_BY_ID[gameId].name}: ${localizeErrorMessage(state.error.message)}`;
   });
 
   if (!hasSuccess && isLoading) {
-    return (
-      <div className="glass rounded-2xl p-6 shadow-ink">
-        <div className="text-sm font-semibold">加载中...</div>
-      </div>
-    );
+    return <LoadingCard />;
   }
 
   if (!hasSuccess && failedEventLoads.length > 0) {
     return (
       <div className="glass rounded-2xl p-6 shadow-ink border-red-500/30">
         <div className="text-sm font-semibold">加载失败</div>
-        <div className="mt-2 grid gap-1 text-xs text-[color:var(--muted)] font-mono">
+        <div className="mt-2 grid gap-1 text-xs text-[color:var(--muted)]">
           {failedEventLoads.map((message) => (
             <div key={message}>{message}</div>
           ))}
         </div>
+        <button
+          type="button"
+          className="glass mt-3 px-3 py-2 rounded-xl text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)] transition"
+          onClick={refreshGameData}
+        >
+          重试
+        </button>
       </div>
     );
   }
@@ -73,8 +79,15 @@ export default function HomePage() {
       ) : null}
 
       {failedEventLoads.length > 0 ? (
-        <div className="glass rounded-2xl px-4 py-3 text-xs text-red-600/90 dark:text-red-400/90 shadow-ink">
-          {failedEventLoads.join("；")}
+        <div className="glass rounded-2xl px-4 py-3 shadow-ink flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs text-red-600/90 dark:text-red-400/90">{failedEventLoads.join("；")}</div>
+          <button
+            type="button"
+            className="shrink-0 px-2.5 py-1.5 rounded-lg text-xs border border-[color:var(--line)] hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)] transition"
+            onClick={refreshGameData}
+          >
+            重试
+          </button>
         </div>
       ) : null}
 

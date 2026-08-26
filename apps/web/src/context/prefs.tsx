@@ -417,7 +417,8 @@ function makeDefaultPrefs(): PrefsState {
     visibleGameIds: [...ALL_GAME_IDS],
     hiddenGameIds: [],
     timeline: {
-      showNotStarted: false,
+      // Default on so new users see upcoming events without digging into settings.
+      showNotStarted: true,
       showWeekSeparators: false,
       showGacha: false,
       showGachaTrialsOnly: false,
