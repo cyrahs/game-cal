@@ -312,12 +312,22 @@ function EventListRow(props: {
     <div
       className={clsx(
         "p-3 flex items-start gap-3 cursor-pointer transition-colors",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--ring)]",
         props.checked && "opacity-60",
         props.isSelected ? "bg-indigo-50/50 dark:bg-indigo-500/10" : "hover:bg-white/50 dark:hover:bg-white/5",
         props.showBottomDivider
           && "relative after:pointer-events-none after:absolute after:left-0 after:right-0 after:-bottom-px after:border-b after:border-[color:var(--line)]"
       )}
+      role="button"
+      tabIndex={0}
       onClick={props.onSelect}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        // Let the checkbox and the 详情 link keep their native key handling.
+        if (e.target !== e.currentTarget) return;
+        e.preventDefault();
+        props.onSelect();
+      }}
     >
       <div className="flex items-center self-center">
         <input
@@ -325,6 +335,7 @@ function EventListRow(props: {
           checked={props.checked}
           onClick={(e) => e.stopPropagation()}
           onChange={() => props.onToggleCompleted()}
+          aria-label={`标记${props.event.title}为已完成`}
           className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
         />
       </div>
@@ -348,7 +359,7 @@ function EventListRow(props: {
           ) : null}
           <span className="min-w-0 flex-1">{props.event.title}</span>
         </div>
-        <div className="mt-1 text-[11px] text-[color:var(--muted)] font-mono">
+        <div className="mt-1 text-xs text-[color:var(--muted)] font-mono">
           {formatEventRange(props.event)}
         </div>
       </div>
@@ -788,6 +799,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   };
   const hScrollRef = useRef<HTMLDivElement | null>(null);
   const monthlyCardInputRef = useRef<HTMLInputElement | null>(null);
+  const detailPanelRef = useRef<HTMLDivElement | null>(null);
   const timelineTitleRefs = useRef(new Map<string, HTMLDivElement>());
 
   const startMonthlyCardEditing = () => {
@@ -839,6 +851,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const t = setInterval(() => setNow(dayjs()), 60_000);
     return () => clearInterval(t);
   }, []);
+
+  // The timeline is often taller than the viewport, so a detail panel opened by
+  // clicking a bar can render entirely below the fold without the user noticing.
+  // Scroll it into view unless its header is already visible.
+  useEffect(() => {
+    if (!selectedKey || selectedFrom !== "timeline") return;
+    const el = detailPanelRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const headerVisible = rect.top >= 0 && rect.top <= window.innerHeight - 160;
+    if (headerVisible) return;
+    const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    el.scrollIntoView({ behavior: prefersReducedMotion ? "auto" : "smooth", block: "start" });
+  }, [selectedKey, selectedFrom]);
 
   useEffect(() => {
     if (!isMonthlyCardEditing) return;
@@ -1624,7 +1650,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   const outsideCompleteToggleLeft = placeCompleteToggleBefore
                     ? 0
                     : width + SHORT_BAR_TRAILING_COMPLETE_GAP_PX;
-                  const hideCountdownForCompleteToggle = showCompleteToggle && !placeCompleteToggleOutside;
+                  // Only countdown-only (very short) bars still overlay the toggle on the
+                  // countdown; wide bars show the toggle beside it so the time stays readable.
+                  const hideCountdownForCompleteToggle =
+                    showCompleteToggle && !placeCompleteToggleOutside && showCountdownOnly;
                   const completeIconSize = clamp(completeChipSize * 0.58, 6, 14);
                   const shortBarTitleCenterX = left + width / 2;
                   const shortBarTitleAlignLeft = shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
@@ -1676,6 +1705,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   } else if (isTruncatedEnd) {
                     borderRadius = "0.75rem 0 0 0.75rem";
                   }
+
+                  const activateBar = () => {
+                    if (!canComplete) return;
+                    // Activating the same timeline event again should hide the detail panel.
+                    if (selectedKey === eventKey && selectedFrom === "timeline") {
+                      setSelectedKey(null);
+                      setSelectedFrom(null);
+                      setIsTimelineCheckboxVisible(false);
+                      return;
+                    }
+                    setSelectedKey(eventKey);
+                    setSelectedFrom("timeline");
+                    setIsTimelineCheckboxVisible(true);
+                  };
 
                   return (
                     <div
@@ -1736,6 +1779,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                             canComplete ? "cursor-pointer" : "cursor-default",
                             "transition-[box-shadow,filter] duration-150 ease-out",
                             "hover:shadow-md hover:brightness-105",
+                            "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
                             isSelected
                               ? "ring-2 ring-[color:var(--ring)]"
                               : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
@@ -1748,18 +1792,22 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                             borderRadius,
                             ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
                           }}
-                          onClick={() => {
+                          role={canComplete ? "button" : undefined}
+                          tabIndex={canComplete ? 0 : undefined}
+                          aria-label={
+                            canComplete
+                              ? hasRelativeDeadline
+                                ? accessibleTitle
+                                : `${accessibleTitle}（${remainingAriaLabel}）`
+                              : undefined
+                          }
+                          onClick={activateBar}
+                          onKeyDown={(ev) => {
                             if (!canComplete) return;
-                            // Clicking the same timeline event again should hide the detail panel.
-                            if (selectedKey === eventKey && selectedFrom === "timeline") {
-                              setSelectedKey(null);
-                              setSelectedFrom(null);
-                              setIsTimelineCheckboxVisible(false);
-                              return;
-                            }
-                            setSelectedKey(eventKey);
-                            setSelectedFrom("timeline");
-                            setIsTimelineCheckboxVisible(true);
+                            if (ev.key !== "Enter" && ev.key !== " ") return;
+                            if (ev.target !== ev.currentTarget) return;
+                            ev.preventDefault();
+                            activateBar();
                           }}
                         >
                           {showBarIcon ? (
@@ -1798,7 +1846,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                             <div
                               className={clsx(
                                 "relative z-10",
-                                showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2"
+                                showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2 flex items-center"
                               )}
                               style={
                                 showCountdownOnly && showBarIcon
@@ -1806,27 +1854,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                                   : undefined
                               }
                             >
-                              {!placeCompleteToggleOutside ? (
+                              {!placeCompleteToggleOutside && showCountdownOnly ? (
                                 <button
                                   type="button"
                                   className={clsx(
+                                    // The bar is too short for both countdown and toggle: overlay the
+                                    // toggle centered, sized to the chip only (not the whole bar).
                                     "absolute inline-flex items-center justify-center",
-                                    // When the bar is very short we render countdown-only text centered.
-                                    // Avoid turning the whole bar into a huge invisible button by sizing
-                                    // the hit-target to the chip only.
-                                    showCountdownOnly
-                                      ? "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-                                      : "inset-0",
+                                    "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
                                     "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
                                     showCompleteToggle
                                       ? "opacity-100 scale-100 pointer-events-auto"
                                       : "opacity-0 scale-95 pointer-events-none"
                                   )}
-                                  style={
-                                    showCountdownOnly
-                                      ? { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
-                                      : undefined
-                                  }
+                                  style={{ width: `${completeChipSize}px`, height: `${completeChipSize}px` }}
                                   onClick={(ev) => {
                                     ev.stopPropagation();
                                     if (!canComplete) return;
@@ -1840,11 +1881,57 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                                 >
                                   <span
                                     className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                                    style={
-                                      showCountdownOnly
-                                        ? { width: "100%", height: "100%" }
-                                        : { width: `${completeChipSize}px`, height: `${completeChipSize}px` }
-                                    }
+                                    style={{ width: "100%", height: "100%" }}
+                                  >
+                                    <svg
+                                      className="flex-none"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="3"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
+                                      aria-hidden="true"
+                                    >
+                                      <path d="M5 12.5l4.2 4.2L19 7" />
+                                    </svg>
+                                  </span>
+                                </button>
+                              ) : null}
+                              {!placeCompleteToggleOutside && !showCountdownOnly ? (
+                                <button
+                                  type="button"
+                                  className={clsx(
+                                    // Wide bars keep the countdown readable: the toggle slides in
+                                    // beside it instead of covering it.
+                                    "inline-flex shrink-0 items-center justify-center overflow-hidden",
+                                    "transition-all duration-200 ease-out motion-reduce:transition-none",
+                                    showCompleteToggle
+                                      ? "opacity-100 scale-100 mr-1.5 pointer-events-auto"
+                                      : "opacity-0 scale-90 mr-0 pointer-events-none"
+                                  )}
+                                  style={{
+                                    width: showCompleteToggle ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX : 0,
+                                    height: TIMELINE_COMPLETE_TOGGLE_SIZE_PX,
+                                  }}
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    if (!canComplete) return;
+                                    toggleTimelineEventCompleted(e);
+                                  }}
+                                  aria-label={`标记${accessibleTitle}为已完成`}
+                                  title="标记为已完成"
+                                  aria-hidden={!showCompleteToggle}
+                                  tabIndex={showCompleteToggle ? 0 : -1}
+                                  disabled={!showCompleteToggle}
+                                >
+                                  <span
+                                    className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
+                                    style={{
+                                      width: `${TIMELINE_COMPLETE_TOGGLE_SIZE_PX}px`,
+                                      height: `${TIMELINE_COMPLETE_TOGGLE_SIZE_PX}px`,
+                                    }}
                                   >
                                     <svg
                                       className="flex-none"
@@ -1869,7 +1956,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                                   showCountdownOnly
                                     ? "w-full min-w-0 text-center whitespace-nowrap"
                                     : "text-[13px]",
-                                  isUrgent ? "text-red-700" : "text-slate-800/70",
+                                  isUrgent ? "text-red-700" : "text-slate-800/80",
                                   hideCountdownForCompleteToggle
                                     ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
                                     : "opacity-100 scale-100 translate-y-0"
@@ -1941,7 +2028,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       </div>
 
       {selectedEvent ? (
-        <div className="glass shadow-ink rounded-2xl overflow-hidden">
+        <div ref={detailPanelRef} className="glass shadow-ink rounded-2xl overflow-hidden scroll-mt-3">
           <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
             <div className="text-sm font-semibold">活动详情</div>
             {canCompleteTimelineEvent(selectedEvent) ? (
@@ -1966,7 +2053,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         </div>
       ) : null}
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2 md:items-start">
         <EventListPanel
           title="限时活动"
           events={activeUpstreamEvents}
@@ -2197,11 +2284,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 </div>
 
                 {recurringForm.kind === "cron" && recurringCronValidationError ? (
-                  <div className="text-[11px] text-red-500">{recurringCronValidationError}</div>
+                  <div className="text-xs text-red-500">{recurringCronValidationError}</div>
                 ) : null}
 
                 <div className="grid gap-2 md:grid-cols-[3fr_1fr] md:items-start">
-                  <div className="min-w-0 text-left text-[11px] text-[color:var(--muted)] break-words md:pr-2 md:min-h-[36px] md:flex md:items-center">
+                  <div className="min-w-0 text-left text-xs text-[color:var(--muted)] break-words md:pr-2 md:min-h-[36px] md:flex md:items-center">
                     {recurringForm.kind === "interval"
                       ? `自 ${recurringForm.intervalStartDate || "（未设置）"} 起每 ${recurringForm.intervalDays || "N"
                       } 天 ${recurringForm.time || "00:00"} 刷新（${recurringTzLabel}）`
@@ -2249,7 +2336,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     >
                       <div className="min-w-0">
                         <div className="text-sm font-medium break-words">{activity.title}</div>
-                        <div className="text-[11px] text-[color:var(--muted)] mt-1">
+                        <div className="text-xs text-[color:var(--muted)] mt-1">
                           {formatRecurringRule(primaryGameId, activity.rule, activity.durationDays)}
                         </div>
                       </div>
@@ -2269,14 +2356,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                                 resetRecurringForm();
                                 return;
                               }
-                              const shouldSave = window.confirm(
-                                "检测到未保存修改，是否先保存？\n点击“确定”保存并退出，点击“取消”直接退出。"
-                              );
-                              if (!shouldSave) {
-                                resetRecurringForm();
-                                return;
-                              }
-                              void handleSubmitRecurring();
+                              // Never discard silently: point at the form's own 保存/取消
+                              // buttons instead of a native confirm dialog.
+                              setRecurringFormError("有未保存的修改：请点击“保存”提交，或点击“取消”放弃修改");
                               return;
                             }
                             setEditingRecurringId(activity.id);
@@ -2346,7 +2428,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       </div>
 
       {completedUpstreamEvents.length > 0 || completedRecurringEvents.length > 0 ? (
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2 md:items-start">
           <EventListPanel
             title="已完成限时活动"
             titleClassName="text-[color:var(--ink2)]"
