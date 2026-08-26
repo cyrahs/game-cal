@@ -52,6 +52,38 @@ function normalizeAnnouncementEventTitle(input: string | undefined): string {
   return title;
 }
 
+function hasAnnouncementPrefix(titleKey: string, existingTitleKey: string): boolean {
+  if (!titleKey.endsWith(existingTitleKey)) return false;
+
+  const prefix = titleKey.slice(0, -existingTitleKey.length);
+  return prefix.length > 0 && prefix.length <= 12 && /[!！:：·—-]$/.test(prefix);
+}
+
+function matchesExistingActivitySchedule(
+  title: string,
+  startIso: string,
+  endIso: string,
+  existingEvents: CalendarEvent[]
+): boolean {
+  const titleKey = normalizeTitleKey(title);
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  if (!titleKey || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+
+  return existingEvents.some((event) => {
+    const existingTitleKey = normalizeTitleKey(event.title);
+    if (!existingTitleKey || !hasAnnouncementPrefix(titleKey, existingTitleKey)) return false;
+
+    const existingStartMs = Date.parse(event.start_time);
+    const existingEndMs = parseEventEndMs(event);
+    return (
+      existingStartMs === startMs &&
+      Number.isFinite(existingEndMs) &&
+      Math.abs(existingEndMs - endMs) <= 60_000
+    );
+  });
+}
+
 export function isZzzSupplementalActivityNotice(
   titleInput: string | undefined,
   contentInput: string | undefined
@@ -415,6 +447,7 @@ function parseSupplementalActivityEventsFromAnnContent(
     versionMaintenanceEndByLabel: Map<string, string>;
     versionEndByLabel: Map<string, string>;
     existingTitleKeys: Set<string>;
+    existingEvents: CalendarEvent[];
   }
 ): CalendarEvent[] {
   const out = new Map<string, CalendarEvent>();
@@ -449,6 +482,9 @@ function parseSupplementalActivityEventsFromAnnContent(
     const sMs = Date.parse(resolvedStart);
     const eMs = Date.parse(endIso);
     if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs <= sMs) continue;
+    if (matchesExistingActivitySchedule(title, resolvedStart, endIso, opts.existingEvents)) {
+      continue;
+    }
 
     const id = `zzz-ann:${item.ann_id ?? titleKey}`;
     out.set(id, {
@@ -751,6 +787,7 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       versionMaintenanceEndByLabel,
       versionEndByLabel,
       existingTitleKeys: new Set(normalEvents.map((event) => normalizeTitleKey(event.title))),
+      existingEvents: normalEvents,
     }
   );
 

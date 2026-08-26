@@ -16,6 +16,7 @@ import {
 import {
   extractZzzTimeRangeFromContent,
   extractZzzVersionEndIsoFromContent,
+  fetchZzzEvents,
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
 
@@ -782,6 +783,93 @@ test("ZZZ recognizes activity notices whose titles omit the activity suffix", ()
     ),
     true
   );
+});
+
+test("ZZZ deduplicates prefixed activity notices against matching activity-list events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            activity_list: [
+              {
+                activity_id: "1415",
+                name: "见习邮差派件中",
+                start_time: "1787882400",
+                end_time: "1789329599",
+              },
+            ],
+          },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1277,
+                  title: "「叮咚！见习邮差派件中」活动说明",
+                  content:
+                    "【活动时间】 2026/08/28 10:00（服务器时间） ~ 2026/09/14 03:59（服务器时间） 【活动奖励】",
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1277,
+                      title: "「叮咚！见习邮差派件中」活动说明",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+
+    assert.deepEqual(
+      events.map((event) => ({
+        id: event.id,
+        title: event.title,
+        start_time: event.start_time,
+        end_time: event.end_time,
+      })),
+      [
+        {
+          id: "1415",
+          title: "见习邮差派件中",
+          start_time: "2026-08-28T10:00:00+08:00",
+          end_time: "2026-09-14T03:59:59+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("ZZZ resolves version-relative ends for supplemental activity notices", () => {
