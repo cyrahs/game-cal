@@ -828,14 +828,19 @@ function extractEndfieldStandaloneTimeText(
   return inlineTimeText || nextLine || "";
 }
 
-function extractEndfieldCoopenedSignIns(
+function extractEndfieldCoopenedActivities(
   lines: string[]
 ): Array<{ title: string; anchorTitle: string | null }> {
   const activities = new Map<string, { title: string; anchorTitle: string | null }>();
   const text = lines.join("\n");
-  const matches = text.matchAll(
-    /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
-  );
+  const matches = [
+    ...text.matchAll(
+      /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
+    ),
+    ...text.matchAll(
+      /(?:同时[，,]?\s*)?开放\s*[「『“"]([^」』”"]+)[」』”"]\s*干员试用活动/g
+    ),
+  ].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 
   for (const match of matches) {
     const title = normalizeTitle(match[1]);
@@ -946,7 +951,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   }
 
   const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
-  for (const activity of extractEndfieldCoopenedSignIns(lines)) {
+  for (const activity of extractEndfieldCoopenedActivities(lines)) {
     const title = activity.title;
     const titleKey = normalizeTitleKey(title);
     if (!titleKey || existingTitleKeys.has(titleKey)) continue;

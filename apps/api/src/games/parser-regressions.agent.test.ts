@@ -541,7 +541,7 @@ test("Endfield keeps distinct same-name permanent and limited activities", async
   }
 });
 
-test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
+test("Endfield inherits a standalone notice window for co-opened activities", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
     new Response(
@@ -558,6 +558,7 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
                 html: [
                   "<p>「晨星于此闪耀」特许寻访开放期间，6星干员获取概率提升！</p>",
                   "<p>「明耀晨星」限时签到活动同步开放，累计签到可获得【明耀晨星寻访凭证】×5等奖励。</p>",
+                  "<p>同时，开放「作战演练」干员试用活动。</p>",
                   "<p>▼//「晨星于此闪耀」特许寻访说明</p>",
                   "<p>· 开放时间：2026/08/09 12:00（服务器时间） - 版本更新维护前</p>",
                   "<p>· 开放条件：完成主线任务「第一章 - 进程Ⅰ - 基地解围」</p>",
@@ -578,23 +579,35 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
       ENDFIELD_CODE: "fixture",
       ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
     });
-    const event = events.find((item) => item.title === "明耀晨星");
-    assert.ok(event);
     assert.deepEqual(
-      {
-        start_time: event.start_time,
-        end_time: event.end_time,
-        end_time_kind: event.end_time_kind,
-        end_time_text: event.end_time_text,
-        is_gacha: event.is_gacha,
-      },
-      {
-        start_time: "2026-08-09T12:00:00+08:00",
-        end_time: null,
-        end_time_kind: "relative",
-        end_time_text: "版本更新维护前",
-        is_gacha: false,
-      }
+      events
+        .filter((item) => item.title === "明耀晨星" || item.title === "作战演练")
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+          end_time_kind: event.end_time_kind,
+          end_time_text: event.end_time_text,
+          is_gacha: event.is_gacha,
+        })),
+      [
+        {
+          title: "明耀晨星",
+          start_time: "2026-08-09T12:00:00+08:00",
+          end_time: null,
+          end_time_kind: "relative",
+          end_time_text: "版本更新维护前",
+          is_gacha: false,
+        },
+        {
+          title: "作战演练",
+          start_time: "2026-08-09T12:00:00+08:00",
+          end_time: null,
+          end_time_kind: "relative",
+          end_time_text: "版本更新维护前",
+          is_gacha: false,
+        },
+      ]
     );
   } finally {
     globalThis.fetch = originalFetch;
