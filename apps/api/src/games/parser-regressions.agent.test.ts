@@ -253,6 +253,78 @@ test("Endfield prefers a full version notice over its maintenance preview", () =
   assert.equal(notices[0]?.title, "「向渊行」版本更新说明");
 });
 
+test("Endfield merges equivalent notices whose finite ends differ by one minute", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「雪凇幽梦」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/09/02 06:00 - 2026/09/02 12:00</p>",
+                  "<p>■ 全新活动</p>",
+                  "<p>1. 「雪降深林」引入活动</p>",
+                  "<p>· 活动时间：「雪凇幽梦」版本更新后 - 2026/09/30 12:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "0771",
+              tab: "events",
+              title: "雪降深林",
+              header: "「雪降深林」引入活动说明",
+              startAt: 1788303600,
+              data: {
+                html: [
+                  "<p>▼//活动时间</p>",
+                  "<p>「雪凇幽梦」版本更新后 - 2026/09/30 11:59（服务器时间）</p>",
+                  "<p>▼//活动说明</p>",
+                  "<p>完成活动任务可获得奖励。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    assert.deepEqual(
+      events
+        .filter((event) => event.title.includes("雪降深林"))
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+        })),
+      [
+        {
+          title: "雪降深林",
+          start_time: "2026-09-02T12:00:00+08:00",
+          end_time: "2026-09-30T11:59:00+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Endfield ignores example dates outside the authoritative activity-time section", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
