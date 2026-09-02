@@ -53,6 +53,7 @@ const ENDFIELD_AGGREGATE_API_DEFAULT =
   "https://game-hub.hypergryph.com/bulletin/v2/aggregate";
 const ENDFIELD_SOURCE_TZ_OFFSET = "+08:00";
 const ENDFIELD_MAINTENANCE_AFTER_RESET_MS = 2 * 60 * 60 * 1000;
+const ENDFIELD_DUPLICATE_END_TOLERANCE_MS = 60 * 1000;
 const ENDFIELD_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN = `${ENDFIELD_DATE_TIME_PATTERN}(?:\\s*[（(][^）)]{0,32}[）)])?`;
 const ENDFIELD_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -100,6 +101,21 @@ function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
   const keys = getEndfieldEventTitleKeys(event);
   const endKey = event.end_time ?? event.end_time_text ?? "";
   return keys.map((key) => `${key}|${event.start_time}|${endKey}`);
+}
+
+function hasNearDuplicateEndTime(a: CalendarEvent, b: CalendarEvent): boolean {
+  if (a.start_time !== b.start_time || !a.end_time || !b.end_time) return false;
+  if (!getEndfieldEventTitleKeys(a).some((key) => getEndfieldEventTitleKeys(b).includes(key))) {
+    return false;
+  }
+
+  const aEndMs = Date.parse(a.end_time);
+  const bEndMs = Date.parse(b.end_time);
+  return (
+    Number.isFinite(aEndMs) &&
+    Number.isFinite(bEndMs) &&
+    Math.abs(aEndMs - bEndMs) <= ENDFIELD_DUPLICATE_END_TOLERANCE_MS
+  );
 }
 
 function isEndfieldPermanentEvent(event: CalendarEvent): boolean {
@@ -981,7 +997,8 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   return out;
 }
 
-function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {  const merged = new Map<string, CalendarEvent>();
+function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
+  const merged = new Map<string, CalendarEvent>();
   const aliases = new Map<string, string>();
 
   for (const event of events) {
@@ -990,7 +1007,10 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {  const merged =
       const primaryKey = aliases.get(key) ?? key;
       return merged.has(primaryKey);
     });
-    const permanentPrimaryKey = exactPrimaryKey
+    const nearDuplicatePrimaryKey = exactPrimaryKey
+      ? undefined
+      : [...merged.entries()].find(([, existing]) => hasNearDuplicateEndTime(existing, event))?.[0];
+    const permanentPrimaryKey = exactPrimaryKey || nearDuplicatePrimaryKey
       ? undefined
       : [...merged.entries()].find(([, existing]) => {
           if (existing.start_time !== event.start_time) return false;
@@ -1003,7 +1023,7 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {  const merged =
           const seriesFamilyKey = extractEndfieldVersionSeriesFamilyKey(finiteEvent);
           return seriesFamilyKey === normalizeTitleKey(permanentEvent.title);
         })?.[0];
-    const existingPrimaryKey = exactPrimaryKey ?? permanentPrimaryKey;
+    const existingPrimaryKey = exactPrimaryKey ?? nearDuplicatePrimaryKey ?? permanentPrimaryKey;
     const primaryKey = existingPrimaryKey ? aliases.get(existingPrimaryKey) ?? existingPrimaryKey : mergeKeys[0];
     if (!primaryKey) continue;
 
