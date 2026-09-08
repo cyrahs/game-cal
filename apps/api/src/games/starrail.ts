@@ -449,12 +449,48 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
   return null;
 }
 
+function extractStarRailProseLaunchStart(
+  text: string,
+  listStartIso: string | undefined
+): string | null {
+  const matches = [...text.matchAll(
+    /(?:联名|联动|活动)\s*(?:将于|于)\s*(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:正式)?(?:上线|开启|开放)/g
+  )];
+  if (matches.length !== 1) return null;
+
+  const [, yearText, month, day, hour, minute, second] = matches[0]!;
+  const referenceMs = Date.parse(listStartIso ?? "");
+  const referenceYear = Number(listStartIso?.slice(0, 4));
+  const years = yearText
+    ? [Number(yearText)]
+    : Number.isFinite(referenceMs)
+      ? [referenceYear - 1, referenceYear, referenceYear + 1]
+      : [];
+  const candidates = years
+    .map((year) => toStarRailSourceIso(
+      `${year}/${month}/${day!.padStart(2, "0")} ${hour!.padStart(2, "0")}:${minute}:${second ?? "00"}`
+    ))
+    .filter((candidate): candidate is string => {
+      if (!candidate) return false;
+      const candidateMs = Date.parse(candidate);
+      return Number.isFinite(candidateMs) &&
+        unixSecondsToIsoWithSourceOffset(candidateMs / 1000, STARRAIL_SOURCE_TZ_OFFSET) === candidate;
+    });
+  if (!yearText) {
+    candidates.sort((left, right) =>
+      Math.abs(Date.parse(left) - referenceMs) - Math.abs(Date.parse(right) - referenceMs)
+    );
+  }
+  return candidates[0] ?? null;
+}
+
 export function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
     title: string;
     versionMaintenanceEndByLabel: Map<string, string>;
     singleVersionMaintenanceEndIso: string | null;
+    listStartIso?: string;
     listEndIso: string;
   }
 ): StarRailParsedTimeRange {
@@ -497,7 +533,12 @@ export function extractStarRailTimeRangeFromContent(
   if (titleLongTermRange) return titleLongTermRange;
 
   const section = extractStarRailTimeSection(content);
-  if (!section) return longTermFallback(text);
+  if (!section) {
+    const fallback = longTermFallback(text);
+    return fallback.startIso
+      ? fallback
+      : { startIso: extractStarRailProseLaunchStart(text, opts.listStartIso), endIso: null };
+  }
 
   const dates = collectDateTimeCandidates(section);
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
@@ -1029,6 +1070,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       title,
       versionMaintenanceEndByLabel,
       singleVersionMaintenanceEndIso,
+      listStartIso,
       listEndIso,
     });
     if (contentRange.unresolvedVersionStart) return [];
