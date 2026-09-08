@@ -20,6 +20,96 @@ import {
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
 
+test("Star Rail uses a prose collaboration launch instead of the list publication time", async () => {
+  const title = "大白兔联名 | 那刻夏风堇联名开启！";
+  const content = "<p>亲爱的开拓者，《崩坏：星穹铁道》× 大白兔 联名将于9月10日10:00正式上线！与那刻夏、风堇一起分享奶糖，让甜意盈满树庭~ 点击链接查看更多联动信息</p>";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [{
+          type_id: 4,
+          type_label: "公告",
+          list: [{
+            ann_id: 1425,
+            title,
+            subtitle: "「大白兔联名」现已开启",
+            start_time: "2026-09-07 19:00:00",
+            end_time: "2026-09-15 12:00:00",
+          }],
+        }]
+      : [{ ann_id: 1425, title, content }];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.title, title);
+    assert.equal(events[0]!.start_time, "2026-09-10T10:00:00+08:00");
+    assert.equal(events[0]!.end_time, "2026-09-15T12:00:00+08:00");
+    assert.equal(events[0]!.end_time_kind, undefined);
+    assert.equal(events[0]!.end_time_text, undefined);
+    assert.equal(events[0]!.is_gacha, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail confines prose launch inference to unambiguous dated event openings", () => {
+  const opts = {
+    title: "联名活动",
+    versionMaintenanceEndByLabel: new Map<string, string>(),
+    singleVersionMaintenanceEndIso: null,
+    listStartIso: "2026-09-07T19:00:00+08:00",
+    listEndIso: "2026-09-15T12:00:00+08:00",
+  };
+  for (const content of [
+    "联名将于9月10日10:00正式上线！",
+    "联动将于2026年9月10日10:00正式开启！",
+    "活动于9月10日10:00开放！",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: "2026-09-10T10:00:00+08:00",
+      endIso: null,
+    });
+  }
+  for (const content of [
+    "视频将于9月10日10:00正式上线！",
+    "联名预告于9月10日10:00发布！",
+    "联名将于9月31日10:00正式上线！",
+    "联名将于9月10日25:00正式上线！",
+    "联名将于9月10日10:00正式上线！活动将于9月11日10:00开启！",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: null,
+    });
+  }
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "联名将于9月10日10:00正式上线！",
+    { ...opts, listStartIso: undefined }
+  ), { startIso: null, endIso: null });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "联名将于1月2日10:00正式上线！",
+    { ...opts, listStartIso: "2026-12-30T19:00:00+08:00" }
+  ), { startIso: "2027-01-02T10:00:00+08:00", endIso: null });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>联名将于9月10日10:00正式上线！</p><p>活动时间</p><p>2026/09/11 10:00 - 2026/09/15 12:00</p><p>参与条件</p>",
+    opts
+  ), {
+    startIso: "2026-09-11T10:00:00+08:00",
+    endIso: "2026-09-15T12:00:00+08:00",
+  });
+});
+
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
     "<p>活动时间</p><p>4.2版本更新后 - 4.4版本结束前</p><p>参与条件</p>",
