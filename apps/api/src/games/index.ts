@@ -17,13 +17,18 @@ export const GAMES: Array<{ id: GameId; name: string }> = [
   { id: "endfield", name: "明日方舟：终末地" },
 ];
 
+/**
+ * `previousEvents` is the caller's last cached result for this game; its
+ * livestream code events are kept when the code sources fail this time.
+ */
 export async function fetchEventsForGame(
   game: GameId,
-  env: RuntimeEnv = {}
+  env: RuntimeEnv = {},
+  previousEvents: readonly CalendarEvent[] = []
 ): Promise<CalendarEvent[]> {
   const [events, codeEvents] = await Promise.all([
     fetchNoticeEventsForGame(game, env),
-    fetchLivestreamCodeEvents(game, env),
+    fetchLivestreamCodeEvents(game, env, previousEvents),
   ]);
   return [...events, ...codeEvents];
 }

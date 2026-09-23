@@ -1,4 +1,4 @@
-import { fetchJson } from "../lib/fetch.js";
+import { FetchError, fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameId } from "../types.js";
@@ -21,6 +21,11 @@ const SOURCE_TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_POST_AGE_MS = 60 * DAY_MS;
 const FETCH_TIMEOUT_MS = 12_000;
+// Whole-game budget. The notice feed waits on this, and a Worker refresh that
+// runs from a request's waitUntil() only has ~30s in total.
+const LIVESTREAM_FETCH_BUDGET_MS = 15_000;
+
+const LIVESTREAM_CODE_ID_MARKER = ":livestream-code:";
 
 const LIVESTREAM_KEYWORD = "前瞻";
 const CODE_KEYWORD = "兑换码";
@@ -94,6 +99,13 @@ function toNumberOrNull(value: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+// Timeouts, network errors, 429 and 5xx may pass on the next refresh; other
+// HTTP errors mean the resource itself is gone or refused.
+function isTransientFetchFailure(err: unknown): boolean {
+  if (err instanceof FetchError) return err.status === 429 || err.status >= 500;
+  return true;
 }
 
 function sourceYearFromMs(ms: number): number {
@@ -217,7 +229,7 @@ function buildLivestreamCodeEvent(opts: {
 }): CalendarEvent {
   const title = `${opts.versionLabel ? `${opts.versionLabel}版本` : ""}前瞻兑换码`;
   const base = {
-    id: `${opts.game}:livestream-code:${opts.sourceId}`,
+    id: `${opts.game}${LIVESTREAM_CODE_ID_MARKER}${opts.sourceId}`,
     title,
     start_time: msToSourceIso(opts.startMs),
     is_gacha: false,
@@ -237,6 +249,22 @@ function buildLivestreamCodeEvent(opts: {
     end_time_kind: "relative",
     end_time_text: RELATIVE_EXPIRY_TEXT,
   };
+}
+
+export function isLivestreamCodeEvent(event: CalendarEvent): boolean {
+  return String(event.id).includes(LIVESTREAM_CODE_ID_MARKER);
+}
+
+// The livestream API failed transiently. `events` holds what the official
+// posts alone still support: the expiry, plus Star Rail's plain-text codes.
+class DegradedLivestreamCodesError extends Error {
+  readonly events: CalendarEvent[];
+
+  constructor(events: CalendarEvent[]) {
+    super("livestream API unavailable; only post-derived code events");
+    this.name = "DegradedLivestreamCodesError";
+    this.events = events;
+  }
 }
 
 function dedupeByCodes(events: CalendarEvent[]): CalendarEvent[] {
@@ -324,8 +352,17 @@ async function fetchMiyousheOfficialPosts(
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { referer: "https://www.miyoushe.com/" },
   });
-  const list =
-    isRecord(res) && isRecord(res.data) && Array.isArray(res.data.list) ? res.data.list : [];
+  // A rejected or malformed page is a failure, not "no posts": an empty result
+  // would replace the cached code events until the next refresh.
+  if (
+    !isRecord(res) ||
+    toNumberOrNull(res.retcode) !== 0 ||
+    !isRecord(res.data) ||
+    !Array.isArray(res.data.list)
+  ) {
+    throw new Error(`Unexpected 米游社 userPost response for uid ${config.officialUid}`);
+  }
+  const list = res.data.list;
 
   const out: MiyoushePost[] = [];
   for (const item of list) {
@@ -480,16 +517,27 @@ async function fetchMiyousheLivestreamCodeEvents(
   env: RuntimeEnv,
   nowMs: number
 ): Promise<CalendarEvent[]> {
-  const posts = await fetchMiyousheOfficialPosts(config, env, nowMs);
-  const navigatorActIds = await fetchMiyousheNavigatorLiveActIds(config, env).catch(() => []);
+  const [posts, navigatorActIds] = await Promise.all([
+    fetchMiyousheOfficialPosts(config, env, nowMs),
+    fetchMiyousheNavigatorLiveActIds(config, env).catch(() => []),
+  ]);
   const postActIds = posts
     .filter((post) => `${post.subject}\n${post.text}`.includes(LIVESTREAM_KEYWORD))
     .flatMap((post) => extractLiveActIds(post.links));
   const actIds = [...new Set([...navigatorActIds, ...postActIds])].slice(0, MIYOLIVE_MAX_ACTS);
 
+  // An ended or foreign stream answers normally and yields null. A transport
+  // failure is reported after the post fallback below has run, so the caller
+  // can prefer previously fetched codes over the post-only result.
+  let livestreamApiFailed = false;
   const lives = (
     await Promise.all(
-      actIds.map((actId) => fetchMiyoliveCodes(actId, config, env, nowMs).catch(() => null))
+      actIds.map((actId) =>
+        fetchMiyoliveCodes(actId, config, env, nowMs).catch((err: unknown) => {
+          if (isTransientFetchFailure(err)) livestreamApiFailed = true;
+          return null;
+        })
+      )
     )
   ).filter((live): live is MiyoliveCodes => live != null);
 
@@ -548,6 +596,7 @@ async function fetchMiyousheLivestreamCodeEvents(
     );
   }
 
+  if (livestreamApiFailed) throw new DegradedLivestreamCodesError(events);
   return events;
 }
 
@@ -629,18 +678,22 @@ export async function fetchWwLivestreamCodeEvents(
       })
     )
   );
-  if (pageResults.every((result) => result.status === "rejected")) {
-    throw (pageResults[0] as PromiseRejectedResult).reason;
+  const postLists = pageResults.map((result) =>
+    result.status === "fulfilled" &&
+    isRecord(result.value) &&
+    isRecord(result.value.data) &&
+    Array.isArray(result.value.data.postList)
+      ? result.value.data.postList
+      : null
+  );
+  if (postLists.every((posts) => posts == null)) {
+    const rejected = pageResults.find((result) => result.status === "rejected");
+    throw rejected ? rejected.reason : new Error("Unexpected 库街区 search response");
   }
-  const pages = pageResults.map((result) => (result.status === "fulfilled" ? result.value : null));
 
   const candidates = new Map<string, WwCodePostCandidate>();
-  for (const page of pages) {
-    const posts =
-      isRecord(page) && isRecord(page.data) && Array.isArray(page.data.postList)
-        ? page.data.postList
-        : [];
-    for (const post of posts) {
+  for (const posts of postLists) {
+    for (const post of posts ?? []) {
       if (!isRecord(post) || !isKurobbsOfficialUser(post.userId)) continue;
       const postId = toStringOrUndefined(post.postId);
       const title = stripKurobbsHighlight(toStringOrUndefined(post.postTitle) ?? "");
@@ -722,26 +775,56 @@ export async function fetchWwLivestreamCodeEvents(
 // Dispatch
 // ---------------------------------------------------------------------------
 
+function isLivestreamCodesDisabled(env: RuntimeEnv): boolean {
+  const value = env.LIVESTREAM_CODES_DISABLED?.trim().toLowerCase();
+  return value === "1" || value === "true";
+}
+
+async function fetchLivestreamCodeEventsUnguarded(
+  game: GameId,
+  env: RuntimeEnv
+): Promise<CalendarEvent[]> {
+  switch (game) {
+    case "genshin":
+    case "starrail":
+    case "zzz":
+      return await fetchMiyousheLivestreamCodeEventsForGame(game, env);
+    case "ww":
+      return await fetchWwLivestreamCodeEvents(env);
+    default:
+      return [];
+  }
+}
+
 /**
- * Best-effort: code events are an add-on to the regular notice feed, so any
- * upstream failure here yields an empty list instead of failing the game.
+ * Best-effort: code events are an add-on to the regular notice feed, so an
+ * upstream failure never fails the game. It keeps the code events from
+ * `previousEvents` (the caller's last cached snapshot) instead, because the
+ * result is cached for a full TTL and codes only stay valid for a few days.
  */
 export async function fetchLivestreamCodeEvents(
   game: GameId,
-  env: RuntimeEnv = {}
+  env: RuntimeEnv = {},
+  previousEvents: readonly CalendarEvent[] = []
 ): Promise<CalendarEvent[]> {
+  if (isLivestreamCodesDisabled(env)) return [];
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("livestream code fetch exceeded its budget")),
+      LIVESTREAM_FETCH_BUDGET_MS
+    );
+  });
   try {
-    switch (game) {
-      case "genshin":
-      case "starrail":
-      case "zzz":
-        return await fetchMiyousheLivestreamCodeEventsForGame(game, env);
-      case "ww":
-        return await fetchWwLivestreamCodeEvents(env);
-      default:
-        return [];
-    }
-  } catch {
-    return [];
+    return await Promise.race([fetchLivestreamCodeEventsUnguarded(game, env), deadline]);
+  } catch (err) {
+    const previousCodeEvents = previousEvents.filter(isLivestreamCodeEvent);
+    if (!(err instanceof DegradedLivestreamCodesError)) return previousCodeEvents;
+    // Keep the codes fetched before; add only versions they do not cover yet.
+    const covered = new Set(previousCodeEvents.map((event) => event.title));
+    return [...previousCodeEvents, ...err.events.filter((event) => !covered.has(event.title))];
+  } finally {
+    if (timer != null) clearTimeout(timer);
   }
 }

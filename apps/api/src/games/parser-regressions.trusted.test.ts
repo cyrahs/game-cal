@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { FetchError } from "../lib/fetch.js";
+import type { CalendarEvent } from "../types.js";
 import {
   classifyZzzSnapshotRelayError,
   getZzzSnapshotBundle,
@@ -1233,7 +1234,10 @@ test("livestream codes: upstream failures degrade to an empty list", async () =>
   }
 });
 
-test("livestream codes: fetchEventsForGame appends code events to the notice feed", async () => {
+test("livestream codes: fetchEventsForGame appends code events to the notice feed", async (t) => {
+  // fetchEventsForGame reads the clock; the fixture posts must stay inside the
+  // 60-day retention window whenever this suite runs.
+  t.mock.method(Date, "now", () => NOW_MS);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = String(input);
@@ -1246,6 +1250,111 @@ test("livestream codes: fetchEventsForGame appends code events to the notice fee
     const events = await fetchEventsForGame("starrail");
     assert.equal(events.length, 1);
     assert.equal(events[0]!.title, "4.6版本前瞻兑换码");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+function previousCodeEvent(game: string, sourceId: string, title: string): CalendarEvent {
+  return {
+    id: `${game}:livestream-code:${sourceId}`,
+    title,
+    start_time: "2026-09-20T19:30:00+08:00",
+    end_time: "2026-09-21T23:59:59+08:00",
+    end_time_kind: "explicit",
+    is_gacha: false,
+    redeem_codes: ["KXHN8W7FGB6U"],
+  };
+}
+
+const PREVIOUS_NOTICE_EVENT: CalendarEvent = {
+  id: 1001,
+  title: "「星芒战幕」活动说明",
+  start_time: "2026-09-10T10:00:00+08:00",
+  end_time: "2026-09-30T03:59:59+08:00",
+  is_gacha: false,
+};
+
+test("livestream codes: a failed refresh keeps the previous code events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("Bad Gateway", { status: 502 });
+  const starRailCodes = previousCodeEvent("starrail", STARRAIL_ACT_ID, "4.6版本前瞻兑换码");
+  const wwCodes = previousCodeEvent("ww", "1550916937441083392", "3.7版本前瞻兑换码");
+
+  try {
+    assert.deepEqual(
+      await fetchLivestreamCodeEvents("starrail", {}, [PREVIOUS_NOTICE_EVENT, starRailCodes]),
+      [starRailCodes]
+    );
+    assert.deepEqual(await fetchLivestreamCodeEvents("ww", {}, [PREVIOUS_NOTICE_EVENT, wwCodes]), [wwCodes]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("livestream codes: a rejected 米游社 post page is a failure, not an empty feed", async () => {
+  const previous = previousCodeEvent("starrail", STARRAIL_ACT_ID, "4.6版本前瞻兑换码");
+  const mock = installMiyousheMock({
+    userPost: { retcode: -1, message: "请求过于频繁", data: null },
+  });
+
+  try {
+    assert.deepEqual(await fetchLivestreamCodeEvents("starrail", {}, [previous]), [previous]);
+  } finally {
+    mock.restore();
+  }
+});
+
+test("livestream codes: a livestream API outage keeps the previous codes over the post-only fallback", async (t) => {
+  t.mock.method(Date, "now", () => NOW_MS);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/post/wapi/userPost")) return jsonResponse(miyousheUserPostFixture(starRailPosts()));
+    if (url.includes("/apihub/api/home/new")) return jsonResponse(navigatorFixture([STARRAIL_ACT_ID]));
+    return new Response("Service Unavailable", { status: 503 });
+  };
+  const previous = previousCodeEvent("starrail", STARRAIL_ACT_ID, "4.6版本前瞻兑换码");
+  const older = previousCodeEvent("starrail", "ea202608011754373603", "4.5版本前瞻兑换码");
+
+  try {
+    // Same version already cached: keep it instead of the post-derived event.
+    assert.deepEqual(await fetchLivestreamCodeEvents("starrail", {}, [previous]), [previous]);
+
+    // Only an older version cached: keep it and add the new post-derived event.
+    const merged = await fetchLivestreamCodeEvents("starrail", {}, [older]);
+    assert.deepEqual(
+      merged.map((event) => event.id),
+      [older.id, "starrail:livestream-code:78287359"]
+    );
+    assert.deepEqual(merged[1]!.redeem_codes, ["KXHN8W7FGB6U", "XEZNQE6FZSNY", "ZXH68F7WYTN4"]);
+
+    // Nothing cached: the post-derived event still reaches the calendar.
+    assert.deepEqual(
+      (await fetchLivestreamCodeEvents("starrail")).map((event) => event.id),
+      ["starrail:livestream-code:78287359"]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("livestream codes: LIVESTREAM_CODES_DISABLED skips every code source", async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    return jsonResponse({ retcode: 0, message: "OK", data: { list: [] } });
+  };
+  const previous = previousCodeEvent("starrail", STARRAIL_ACT_ID, "4.6版本前瞻兑换码");
+
+  try {
+    for (const value of ["1", "true", " TRUE "]) {
+      const env = { LIVESTREAM_CODES_DISABLED: value };
+      assert.deepEqual(await fetchLivestreamCodeEvents("starrail", env, [previous]), []);
+      assert.deepEqual(await fetchLivestreamCodeEvents("ww", env), []);
+    }
+    assert.equal(requests, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

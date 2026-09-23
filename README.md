@@ -125,6 +125,7 @@ pnpm --filter @game-cal/api start
   - `MIYOUSHE_USER_POST_API_URL` / `MIYOUSHE_HOME_API_URL`（前瞻兑换码；默认：米游社官方账号动态列表 / 米游社版区首页导航）
   - `MIYOLIVE_INDEX_API_URL` / `MIYOLIVE_CODE_API_URL`（前瞻兑换码；默认：米游社直播间信息 / 直播兑换码接口）
   - `WW_KUROBBS_SEARCH_API_URL` / `WW_KUROBBS_POST_DETAIL_API_URL`（前瞻兑换码；默认：库街区帖子搜索 / 帖子详情）
+  - `LIVESTREAM_CODES_DISABLED`（设为 `1` / `true` 时完全跳过前瞻兑换码抓取；上游自动修复 workflow 使用）
   - `ENDFIELD_WEBVIEW_URL`
   - `ENDFIELD_AGGREGATE_API_URL`
   - `ENDFIELD_CODE`
@@ -348,7 +349,9 @@ Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，
 | 原神 / 崩坏：星穹铁道 / 绝区零 | 米游社直播间「直播兑换码」接口（兑换码正文）+ 官方账号动态（失效时间） | 1) `apihub/api/home/new`（`x-rpc-client_type: 2`）导航里的「直播兑换码」入口与官方动态里的直播链接给出 `act_id`；2) `event/miyolive/index` 校验主播为官方账号并取 `code_ver`，`event/miyolive/refreshCode` 返回兑换码与奖励；3) 官方账号 `post/wapi/userPost` 动态中「前瞻…兑换码将于…失效」给出截止时间。直播接口不可用时退化为动态正文：星铁「x.x版本前瞻节目速览」含明文兑换码，原神/绝区零仅有失效时间（兑换码在图片里），此时事件不带兑换码但仍有截止提醒 |
 | 鸣潮 | 库街区官方账号（userId `10012001`）在「x.x版本前瞻通讯 \| 回顾影像」帖子下的一楼评论 | `forum/search/v2/post` 按「前瞻通讯」搜索（版块推荐流是随机排序，搜索结果按时间倒序），筛出官方「前瞻」帖后用 `forum/getPostDetail`（`isOnlyPublisher=1`）读取楼主评论 |
 
-实现位于 `apps/api/src/games/livestreamCodes.ts`，在 `fetchEventsForGame()` 中与公告事件合并；抓取失败只会缺少兑换码事件，不影响公告事件。仅保留最近 60 天内的动态/帖子。
+实现位于 `apps/api/src/games/livestreamCodes.ts`，在 `fetchEventsForGame()` 中与公告事件合并。抓取失败或超过 15 秒预算时沿用上一次缓存里的兑换码事件（Node 取内存快照，Worker 取 D1 旧行），不影响公告事件；直播间接口临时故障时，已缓存的版本保持原样，新版本先用动态正文补上。仅保留最近 60 天内的动态/帖子。
+
+这类事件没有游戏内公告可供比对，也不在自动修复可改动的文件范围内，因此上游自动修复 workflow 会设置 `LIVESTREAM_CODES_DISABLED=1`，评审、确认和运行时回放的数据集也按事件 id（`:livestream-code:`）剔除它们。
 
 ## 循环活动
 

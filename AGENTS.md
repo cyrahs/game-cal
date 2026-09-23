@@ -78,6 +78,7 @@ Upstream override URLs (optional):
   - `MIYOUSHE_USER_POST_API_URL` / `MIYOUSHE_HOME_API_URL` (米游社 official account posts / app home navigator)
   - `MIYOLIVE_INDEX_API_URL` / `MIYOLIVE_CODE_API_URL` (米游社 livestream info / livestream codes)
   - `WW_KUROBBS_SEARCH_API_URL` / `WW_KUROBBS_POST_DETAIL_API_URL` (库街区 post search / post detail)
+  - `LIVESTREAM_CODES_DISABLED` (`1`/`true` skips all livestream code fetching; set by the upstream autopatch workflow)
 
 Notes:
 - The API imports `dotenv/config`, so `.env` is loaded from the process working directory.
