@@ -484,6 +484,23 @@ function extractStarRailProseLaunchStart(
   return candidates[0] ?? null;
 }
 
+function extractStarRailSharingDeadline(text: string): string | null {
+  const pattern = new RegExp(
+    `(${STARRAIL_DATE_TIME_PATTERN})\\s*前[，,：:\\s]*(?:首次\\s*)?(?:进行\\s*)?(?:网页|页面)分享\\s*(?:即可|可)(?:获得|领取)`,
+    "g"
+  );
+  const deadlines = [...new Set([...text.matchAll(pattern)].map((match) => match[1]!))];
+  if (deadlines.length !== 1) return null;
+
+  const deadline = toStarRailSourceIso(deadlines[0]);
+  if (!deadline) return null;
+  const deadlineMs = Date.parse(deadline);
+  return Number.isFinite(deadlineMs) &&
+    unixSecondsToIsoWithSourceOffset(deadlineMs / 1000, STARRAIL_SOURCE_TZ_OFFSET) === deadline
+    ? deadline
+    : null;
+}
+
 export function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
@@ -537,7 +554,10 @@ export function extractStarRailTimeRangeFromContent(
     const fallback = longTermFallback(text);
     return fallback.startIso
       ? fallback
-      : { startIso: extractStarRailProseLaunchStart(text, opts.listStartIso), endIso: null };
+      : {
+          startIso: extractStarRailProseLaunchStart(text, opts.listStartIso),
+          endIso: extractStarRailSharingDeadline(text),
+        };
   }
 
   const dates = collectDateTimeCandidates(section);

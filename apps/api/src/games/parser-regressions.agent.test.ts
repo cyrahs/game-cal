@@ -20,6 +20,85 @@ import {
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
 
+test("Star Rail prefers the body sharing deadline while retaining the list start", async () => {
+  const title = "4.6版本「月升之前，与兽共舞」专题展示页现已上线";
+  const content = '<p>浏览版本专题展示页，分享页面即可领取信用点*20000奖励。</p><p>※<t class="t_gl">2026/10/09 04:00:00</t>前，首次进行网页分享可获得信用点*20000。</p>';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [{
+          type_id: 3,
+          type_label: "资讯",
+          list: [{
+            ann_id: 1390,
+            title,
+            start_time: "2026-09-20 20:35:00",
+            end_time: "2026-09-28 00:00:00",
+          }],
+        }]
+      : [{ ann_id: 1390, title, content }];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.title, title);
+    assert.equal(events[0]!.start_time, "2026-09-20T20:35:00+08:00");
+    assert.equal(events[0]!.end_time, "2026-10-09T04:00:00+08:00");
+    assert.equal(events[0]!.end_time_kind, undefined);
+    assert.equal(events[0]!.is_gacha, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail limits sharing deadlines to unambiguous reward cutoffs without a time section", () => {
+  const opts = {
+    title: "专题展示页现已上线",
+    versionMaintenanceEndByLabel: new Map<string, string>(),
+    singleVersionMaintenanceEndIso: null,
+    listStartIso: "2026-09-20T20:35:00+08:00",
+    listEndIso: "2026-09-28T00:00:00+08:00",
+  };
+  for (const content of [
+    "2026/10/09 04:00:00前，首次进行网页分享可获得信用点*20000。",
+    "2026-10-09 04:00前，页面分享即可领取奖励。",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: "2026-10-09T04:00:00+08:00",
+    });
+  }
+  for (const content of [
+    "2026/10/09 04:00:00前，达到等级要求。网页分享可获得奖励。",
+    "2026/10/09 04:00:00后，首次进行网页分享可获得奖励。",
+    "2026/10/09 04:00:00前，首次进行网页分享。",
+    "2026/09/31 04:00:00前，首次进行网页分享可获得奖励。",
+    "2026/09/28 00:00:00前，网页分享可获得奖励。2026/10/09 04:00:00前，网页分享可获得奖励。",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: null,
+    });
+  }
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>2026/09/20 20:35:00 - 2026/09/28 00:00:00</p><p>活动奖励</p><p>2026/10/09 04:00:00前，网页分享可获得奖励。</p>",
+    opts
+  ), {
+    startIso: "2026-09-20T20:35:00+08:00",
+    endIso: "2026-09-28T00:00:00+08:00",
+  });
+});
+
 test("Star Rail uses a prose collaboration launch instead of the list publication time", async () => {
   const title = "大白兔联名 | 那刻夏风堇联名开启！";
   const content = "<p>亲爱的开拓者，《崩坏：星穹铁道》× 大白兔 联名将于9月10日10:00正式上线！与那刻夏、风堇一起分享奶糖，让甜意盈满树庭~ 点击链接查看更多联动信息</p>";
