@@ -166,6 +166,35 @@ test("runtime input freezes exact-head candidate API results", async () => {
   }
 });
 
+test("runtime input drops livestream code events from candidate datasets", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        data: [
+          { id: 1, title: "event", start_time: "2026-01-01" },
+          { id: "zzz:livestream-code:77827033", title: "3.2版本前瞻兑换码", start_time: "2026-08-28" },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  try {
+    const input = await buildRuntimeInput({
+      fixInput: fixInput(),
+      cycleId: "e".repeat(64),
+      attempt: 1,
+      headSha: "d".repeat(40),
+      apiBaseUrl: "http://127.0.0.1:8787",
+    });
+    assert.deepEqual(
+      input.candidate_datasets[0].events.map((event) => event.title),
+      ["event"]
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("an aborted repair surfaces the agent's own explanation", () => {
   const attemptInput = { allowed_files: ["apps/api/src/games/zzz.ts"] };
   assert.throws(

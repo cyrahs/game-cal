@@ -39,6 +39,9 @@ test("autopatch runs daily, accepts manual budgets, and resolves them exactly on
   assert.match(workflow, /AUTOPATCH_ROUNDS_PER_RUN: \$\{\{ inputs\.rounds_per_run \|\| '3' \}\}/);
   assert.match(workflow, /AUTOPATCH_ISSUES_PER_RUN: \$\{\{ inputs\.issues_per_run \|\| '2' \}\}/);
   assert.doesNotMatch(workflow, /fromJSON\(inputs/);
+  // Collector and runtime-replay APIs skip livestream code sources: those
+  // events have no notice evidence and sit outside the repair scope.
+  assert.match(workflow, /^  LIVESTREAM_CODES_DISABLED: "1"$/m);
   // The copied attempt chain is replaced by one reconciling remediate job.
   assert.doesNotMatch(workflow, /attempt_\d|resolve_terminal|terminal_guard|rework_round_/);
   assert.match(workflow, /^  remediate:$/m);

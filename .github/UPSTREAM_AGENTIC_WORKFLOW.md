@@ -73,6 +73,11 @@ through a permanently red schedule.
 - Reviews and approvals come from `UPSTREAM_REVIEW_APPROVAL_TOKEN`, an identity
   distinct from the PR author (`github-actions[bot]`), always bound to the exact
   `commit_id`. The token is never in the environment of a model subprocess.
+- Livestream redemption code events (`apps/api/src/games/livestreamCodes.ts`)
+  have no notice evidence and sit outside the repair scope. The workflow sets
+  `LIVESTREAM_CODES_DISABLED=1` for the collector and runtime-replay APIs, and
+  the review scripts drop any `:livestream-code:` event from every dataset, so
+  they can never become findings, confirmations, or replay evidence.
 - `upstream-agentic-pr-gate.yml` provides the same required
   `upstream-agentic/validate` context for ordinary human PRs into `main`.
 

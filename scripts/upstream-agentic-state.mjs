@@ -67,6 +67,15 @@ function sha256(value) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// Livestream redemption code events (apps/api/src/games/livestreamCodes.ts)
+// come from community posts and livestream APIs, not the notice feeds this
+// review collects, so reviewers would see them without any raw evidence. The
+// repair scope cannot touch their source either. Keep them out of every
+// review, confirmation and runtime-replay dataset.
+function isLivestreamCodeApiEvent(event) {
+  return String(event?.id ?? "").includes(":livestream-code:");
+}
+
 function normalizeText(value, maximum = 2000) {
   return String(value ?? "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
@@ -550,6 +559,7 @@ export {
   classifyValidation,
   createCycle,
   createFeedback,
+  isLivestreamCodeApiEvent,
   sha256,
   terminalAttempt,
   transition,

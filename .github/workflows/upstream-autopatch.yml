@@ -41,6 +41,10 @@ env:
   AUTOPATCH_STALE_MISS_LIMIT: "2"
   AUTOPATCH_DEADLINE_MINUTES: "120"
   ZZZ_SNAPSHOT_API_URL: https://gamecal.nv5.me/api/upstream/zzz/snapshot
+  # Livestream code events have no notice evidence and live outside the repair
+  # scope; skipping their fetch keeps the collector and runtime replay API fast
+  # and deterministic. The review scripts also drop them by event id.
+  LIVESTREAM_CODES_DISABLED: "1"
 
 jobs:
   preflight:

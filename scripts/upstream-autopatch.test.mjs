@@ -383,6 +383,7 @@ test("candidate code (gates, runtime API) never sees GitHub or model credentials
     PATH: "/usr/bin",
     HOME: "/home/runner",
     ZZZ_SNAPSHOT_API_URL: "https://example.test/snapshot",
+    LIVESTREAM_CODES_DISABLED: "1",
     GITHUB_TOKEN: "ghs_secret",
     UPSTREAM_REVIEW_APPROVAL_TOKEN: "ghp_secret",
     OPENAI_API_KEY: "sk-x",
@@ -393,6 +394,8 @@ test("candidate code (gates, runtime API) never sees GitHub or model credentials
   assert.equal(env.OPENAI_API_KEY, undefined);
   assert.equal(env.OPENAI_BASE_URL, undefined);
   assert.equal(env.ZZZ_SNAPSHOT_API_URL, "https://example.test/snapshot");
+  // The runtime replay API must skip livestream code fetching like the collector.
+  assert.equal(env.LIVESTREAM_CODES_DISABLED, "1");
 });
 
 // ---------------------------------------------------------------------------
