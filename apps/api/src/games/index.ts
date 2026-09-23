@@ -6,6 +6,7 @@ import { fetchWwCurrentVersion, fetchWwEvents } from "./ww.js";
 import { fetchZzzCurrentVersion, fetchZzzEvents } from "./zzz.js";
 import { fetchEndfieldCurrentVersion, fetchEndfieldEvents } from "./endfield.js";
 import { fetchSnowbreakCurrentVersion, fetchSnowbreakEvents } from "./snowbreak.js";
+import { fetchLivestreamCodeEvents } from "./livestreamCodes.js";
 
 export const GAMES: Array<{ id: GameId; name: string }> = [
   { id: "genshin", name: "原神" },
@@ -19,6 +20,17 @@ export const GAMES: Array<{ id: GameId; name: string }> = [
 export async function fetchEventsForGame(
   game: GameId,
   env: RuntimeEnv = {}
+): Promise<CalendarEvent[]> {
+  const [events, codeEvents] = await Promise.all([
+    fetchNoticeEventsForGame(game, env),
+    fetchLivestreamCodeEvents(game, env),
+  ]);
+  return [...events, ...codeEvents];
+}
+
+async function fetchNoticeEventsForGame(
+  game: GameId,
+  env: RuntimeEnv
 ): Promise<CalendarEvent[]> {
   switch (game) {
     case "genshin":

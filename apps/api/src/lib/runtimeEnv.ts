@@ -13,6 +13,14 @@ export interface RuntimeEnv {
   SNOWBREAK_ANNOUNCE_API_URL?: string;
   WW_NOTICE_API_URL?: string;
 
+  // Livestream ("前瞻") redemption code sources (optional overrides).
+  MIYOUSHE_USER_POST_API_URL?: string;
+  MIYOUSHE_HOME_API_URL?: string;
+  MIYOLIVE_INDEX_API_URL?: string;
+  MIYOLIVE_CODE_API_URL?: string;
+  WW_KUROBBS_SEARCH_API_URL?: string;
+  WW_KUROBBS_POST_DETAIL_API_URL?: string;
+
   // Endfield (Hypergryph bulletin) overrides (optional).
   // If ENDFIELD_CODE is set, we won't scrape the webview bundle to discover it.
   ENDFIELD_WEBVIEW_URL?: string;

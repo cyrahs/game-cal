@@ -23,6 +23,8 @@ export interface CalendarEvent {
   banner?: string;
   content?: string;
   linkUrl?: string;
+  // Livestream ("前瞻") redemption codes; end_time is the official expiry.
+  redeem_codes?: string[];
 }
 
 export interface GameVersionInfo {

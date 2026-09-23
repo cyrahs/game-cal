@@ -195,6 +195,46 @@ const EVENT_DETAIL_VARIANT_BY_GAME: Record<GameId, EventDetailVariant> = {
   endfield: "none",
 };
 
+function RedeemCodeList(props: { codes: string[] }) {
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!copiedCode) return;
+    const timer = window.setTimeout(() => setCopiedCode(null), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copiedCode]);
+
+  return (
+    <div className="grid gap-1.5">
+      <div className="text-xs text-[color:var(--muted)]">前瞻兑换码（点击复制，请在失效前于游戏内兑换）</div>
+      <div className="flex flex-wrap gap-2">
+        {props.codes.map((code) => (
+          <button
+            key={code}
+            type="button"
+            className="glass px-3 py-1.5 rounded-xl text-sm font-mono tracking-wide border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+            aria-label={`复制兑换码 ${code}`}
+            onClick={async (e) => {
+              e.stopPropagation();
+              try {
+                await navigator.clipboard.writeText(code);
+                setCopiedCode(code);
+              } catch {
+                // ignore
+              }
+            }}
+          >
+            {code}
+            {copiedCode === code ? (
+              <span className="ml-1.5 text-xs text-[color:var(--muted)]">已复制</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function EventDetail(props: {
   event: ParsedEvent;
   checked: boolean;
@@ -251,6 +291,10 @@ function EventDetail(props: {
       >
         {props.event.title}
       </div>
+
+      {props.event.redeem_codes && props.event.redeem_codes.length > 0 ? (
+        <RedeemCodeList codes={props.event.redeem_codes} />
+      ) : null}
 
       {props.variant === "titleBanner" && showBanner ? (
         <div className="justify-self-start w-fit max-w-full rounded-xl overflow-hidden border border-[color:var(--line)] bg-[color:var(--tile)]">
@@ -347,6 +391,11 @@ function EventListRow(props: {
             />
           ) : null}
           <span className="min-w-0 flex-1">{props.event.title}</span>
+          {props.event.redeem_codes && props.event.redeem_codes.length > 0 ? (
+            <span className="shrink-0 rounded-md px-1.5 py-[1px] text-[10px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
+              兑换码
+            </span>
+          ) : null}
         </div>
         <div className="mt-1 text-[11px] text-[color:var(--muted)] font-mono">
           {formatEventRange(props.event)}

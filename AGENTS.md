@@ -74,6 +74,10 @@ Upstream override URLs (optional):
 - `ZZZ_CONTENT_API_URL`
 - Wuthering Waves official notice JSON:
   - `WW_NOTICE_API_URL`
+- Livestream (前瞻) redemption code sources:
+  - `MIYOUSHE_USER_POST_API_URL` / `MIYOUSHE_HOME_API_URL` (米游社 official account posts / app home navigator)
+  - `MIYOLIVE_INDEX_API_URL` / `MIYOLIVE_CODE_API_URL` (米游社 livestream info / livestream codes)
+  - `WW_KUROBBS_SEARCH_API_URL` / `WW_KUROBBS_POST_DETAIL_API_URL` (库街区 post search / post detail)
 
 Notes:
 - The API imports `dotenv/config`, so `.env` is loaded from the process working directory.
@@ -90,6 +94,7 @@ Backend (`apps/api`):
   - `apps/api/src/games/starrail.ts`
   - `apps/api/src/games/ww.ts`
   - `apps/api/src/games/zzz.ts`
+  - Livestream (前瞻) redemption codes for Genshin / Star Rail / ZZZ (米游社) + Wuthering Waves (库街区), merged in `fetchEventsForGame()`: `apps/api/src/games/livestreamCodes.ts`
 - Shared utilities:
   - Fetch with timeout + UA: `apps/api/src/lib/fetch.ts`
   - In-memory TTL cache + in-flight dedupe: `apps/api/src/lib/cache.ts`
