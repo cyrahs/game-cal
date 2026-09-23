@@ -5,7 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
-import { canonicalJson, createCycle, sha256 } from "./upstream-agentic-state.mjs";
+import {
+  canonicalJson,
+  createCycle,
+  isLivestreamCodeApiEvent,
+  sha256,
+} from "./upstream-agentic-state.mjs";
 
 const execFileAsync = promisify(execFile);
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -285,7 +290,10 @@ async function buildRuntimeInput({ fixInput, cycleId, attempt, headSha, apiBaseU
       Buffer.byteLength(JSON.stringify(payload.data)) <= 512 * 1024,
       `candidate API returned an oversized ${game} dataset`
     );
-    candidateDatasets.push({ game, events: payload.data });
+    candidateDatasets.push({
+      game,
+      events: payload.data.filter((event) => !isLivestreamCodeApiEvent(event)),
+    });
   }
 
   const context = {

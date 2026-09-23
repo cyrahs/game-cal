@@ -122,6 +122,10 @@ pnpm --filter @game-cal/api start
   - `ZZZ_CONTENT_API_URL`
   - `SNOWBREAK_ANNOUNCE_API_URL`
   - `WW_NOTICE_API_URL`（默认：鸣潮官方公告 JSON）
+  - `MIYOUSHE_USER_POST_API_URL` / `MIYOUSHE_HOME_API_URL`（前瞻兑换码；默认：米游社官方账号动态列表 / 米游社版区首页导航）
+  - `MIYOLIVE_INDEX_API_URL` / `MIYOLIVE_CODE_API_URL`（前瞻兑换码；默认：米游社直播间信息 / 直播兑换码接口）
+  - `WW_KUROBBS_SEARCH_API_URL` / `WW_KUROBBS_POST_DETAIL_API_URL`（前瞻兑换码；默认：库街区帖子搜索 / 帖子详情）
+  - `LIVESTREAM_CODES_DISABLED`（设为 `1` / `true` 时完全跳过前瞻兑换码抓取；上游自动修复 workflow 使用）
   - `ENDFIELD_WEBVIEW_URL`
   - `ENDFIELD_AGGREGATE_API_URL`
   - `ENDFIELD_CODE`
@@ -335,6 +339,19 @@ Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，
 
 若上游公告只有相对截止条件，事件会返回 `end_time: null`、`end_time_kind: "relative"` 和
 `end_time_text`。前端会将这类事件显示为右端截断的时间轴条，并在详情中展示原始相对截止描述。
+
+## 前瞻兑换码
+
+前瞻直播发放的兑换码不在游戏内公告里。米哈游三款游戏的兑换码由米游社直播间接口提供，官方社区账号在直播结束后的动态里注明失效时间；鸣潮由库街区官方账号发布并注明失效时间。后端会把它们抓取成普通日历事件（标题形如「4.6版本前瞻兑换码」，`end_time` 为官方失效时间，`redeem_codes` 携带兑换码列表），前端在活动详情里显示可一键复制的兑换码，并按剩余时间高亮提醒。
+
+| 游戏 | 来源 | 抓取方式 |
+| --- | --- | --- |
+| 原神 / 崩坏：星穹铁道 / 绝区零 | 米游社直播间「直播兑换码」接口（兑换码正文）+ 官方账号动态（失效时间） | 1) `apihub/api/home/new`（`x-rpc-client_type: 2`）导航里的「直播兑换码」入口与官方动态里的直播链接给出 `act_id`；2) `event/miyolive/index` 校验主播为官方账号并取 `code_ver`，`event/miyolive/refreshCode` 返回兑换码与奖励；3) 官方账号 `post/wapi/userPost` 动态中「前瞻…兑换码将于…失效」给出截止时间。直播接口不可用时退化为动态正文：星铁「x.x版本前瞻节目速览」含明文兑换码，原神/绝区零仅有失效时间（兑换码在图片里），此时事件不带兑换码但仍有截止提醒 |
+| 鸣潮 | 库街区官方账号（userId `10012001`）在「x.x版本前瞻通讯 \| 回顾影像」帖子下的一楼评论 | `forum/search/v2/post` 按「前瞻通讯」搜索（版块推荐流是随机排序，搜索结果按时间倒序），筛出官方「前瞻」帖后用 `forum/getPostDetail`（`isOnlyPublisher=1`）读取楼主评论 |
+
+实现位于 `apps/api/src/games/livestreamCodes.ts`，在 `fetchEventsForGame()` 中与公告事件合并。抓取失败或超过 15 秒预算时沿用上一次缓存里的兑换码事件（Node 取内存快照，Worker 取 D1 旧行），不影响公告事件；直播间接口临时故障时，已缓存的版本保持原样，新版本先用动态正文补上。仅保留最近 60 天内的动态/帖子。
+
+这类事件没有游戏内公告可供比对，也不在自动修复可改动的文件范围内，因此上游自动修复 workflow 会设置 `LIVESTREAM_CODES_DISABLED=1`，评审、确认和运行时回放的数据集也按事件 id（`:livestream-code:`）剔除它们。
 
 ## 循环活动
 

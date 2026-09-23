@@ -870,7 +870,10 @@ function scheduleBackgroundTask(ctx: ExecutionContext | undefined, label: string
 }
 
 async function refreshGameEventsToD1(env: Env, game: GameId): Promise<EventsWithUpdatedAt> {
-  const events = await fetchEventsForGame(game, env);
+  // The previous row lets a failed livestream code fetch keep the cached codes.
+  const previousRow = await readEventCacheRow(env, game).catch(() => null);
+  const previousEvents = previousRow ? decodeEventPayload(previousRow.payload) ?? [] : [];
+  const events = await fetchEventsForGame(game, env, previousEvents);
   const updatedAtMs = Date.now();
   await writeEventCacheRow(env, game, JSON.stringify(events), updatedAtMs);
   invalidateEventCaches(game);

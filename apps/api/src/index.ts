@@ -135,13 +135,18 @@ type GameSnapshotData = {
   updatedAtMs: number;
 };
 
+// Last successful events per game, so a failed livestream code refresh can
+// keep the previous codes instead of caching none for a full TTL.
+const lastGameEvents = new Map<GameId, GameSnapshotData["events"]>();
+
 async function getGameSnapshotData(game: GameId): Promise<GameSnapshotData> {
   return await cache.getOrSet(`snapshot:${game}`, cacheTtlMs, async () => {
     const runtimeEnv = process.env as unknown as RuntimeEnv;
     const [events, version] = await Promise.all([
-      fetchEventsForGame(game, runtimeEnv),
+      fetchEventsForGame(game, runtimeEnv, lastGameEvents.get(game)),
       fetchCurrentVersionForGame(game, runtimeEnv),
     ]);
+    lastGameEvents.set(game, events);
     return { events, version, updatedAtMs: Date.now() };
   });
 }

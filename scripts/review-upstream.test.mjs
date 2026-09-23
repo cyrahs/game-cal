@@ -16,6 +16,7 @@ import {
   buildRemediationVerificationInput,
   collectUpstreamReview,
   extractGameReviewInput,
+  fetchApiEvents,
   fetchZzzRawNotices,
   finalizeFindingConfirmation,
   finalizeRemediationIssue,
@@ -5907,5 +5908,56 @@ test("finalizes a valid agent result without GitHub writes in dry-run mode", asy
       }
     }
     await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("livestream code events never enter the reviewer's API evidence", async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(
+      JSON.stringify({
+        code: 200,
+        data: [
+          {
+            id: 21886,
+            title: "「银翎溯月」活动",
+            start_time: "2026-09-24T10:00:00+08:00",
+            end_time: "2026-10-12T03:59:59+08:00",
+            is_gacha: false,
+          },
+          {
+            id: "genshin:livestream-code:ea202609041755176692",
+            title: "7.1版本前瞻兑换码",
+            start_time: "2026-09-12T20:04:30+08:00",
+            end_time: "2026-09-15T12:00:00+08:00",
+            end_time_kind: "explicit",
+            is_gacha: false,
+            redeem_codes: ["往冥府的安魂歌"],
+          },
+          {
+            id: "genshin:livestream-code:78118185",
+            title: "前瞻兑换码",
+            start_time: "2026-09-12T21:27:09+08:00",
+            end_time: null,
+            end_time_kind: "relative",
+            end_time_text: "有效期以官方说明为准",
+            is_gacha: false,
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+  try {
+    const events = await fetchApiEvents("http://127.0.0.1:8787", "genshin");
+    assert.deepEqual(calls, ["http://127.0.0.1:8787/api/events/genshin"]);
+    assert.deepEqual(
+      events.map((event) => event.title),
+      ["「银翎溯月」活动"]
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });

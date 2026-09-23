@@ -7,6 +7,8 @@ import process from "node:process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
+import { isLivestreamCodeApiEvent } from "./upstream-agentic-state.mjs";
+
 const execFileAsync = promisify(execFile);
 
 const GENSHIN_LIST_API =
@@ -401,7 +403,7 @@ async function fetchApiEvents(apiBaseUrl, game) {
     throw new Error(`Unexpected API response for ${game}`);
   }
 
-  return json.data.map((item) => ({
+  return json.data.filter((item) => !isLivestreamCodeApiEvent(item)).map((item) => ({
     title: normalizeWhitespace(item?.title),
     start_time: String(item?.start_time ?? ""),
     end_time: item?.end_time == null ? null : String(item.end_time),
@@ -9456,6 +9458,7 @@ export {
   finalizeFindingConfirmation,
   finalizeRemediationIssue,
   finalizeRemediationVerification,
+  fetchApiEvents,
   fetchZzzRawNotices,
   getFixBranch,
   getFindingFingerprint,
