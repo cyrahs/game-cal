@@ -53,6 +53,7 @@ const ENDFIELD_AGGREGATE_API_DEFAULT =
   "https://game-hub.hypergryph.com/bulletin/v2/aggregate";
 const ENDFIELD_SOURCE_TZ_OFFSET = "+08:00";
 const ENDFIELD_MAINTENANCE_AFTER_RESET_MS = 2 * 60 * 60 * 1000;
+const ENDFIELD_DUPLICATE_END_TOLERANCE_MS = 60 * 1000;
 const ENDFIELD_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const ENDFIELD_DATE_TIME_WITH_SUFFIX_PATTERN = `${ENDFIELD_DATE_TIME_PATTERN}(?:\\s*[（(][^）)]{0,32}[）)])?`;
 const ENDFIELD_RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -102,8 +103,35 @@ function getEndfieldEventMergeKeys(event: CalendarEvent): string[] {
   return keys.map((key) => `${key}|${event.start_time}|${endKey}`);
 }
 
+function hasNearDuplicateEndTime(a: CalendarEvent, b: CalendarEvent): boolean {
+  if (a.start_time !== b.start_time || !a.end_time || !b.end_time) return false;
+  if (!getEndfieldEventTitleKeys(a).some((key) => getEndfieldEventTitleKeys(b).includes(key))) {
+    return false;
+  }
+
+  const aEndMs = Date.parse(a.end_time);
+  const bEndMs = Date.parse(b.end_time);
+  return (
+    Number.isFinite(aEndMs) &&
+    Number.isFinite(bEndMs) &&
+    Math.abs(aEndMs - bEndMs) <= ENDFIELD_DUPLICATE_END_TOLERANCE_MS
+  );
+}
+
 function isEndfieldPermanentEvent(event: CalendarEvent): boolean {
   return event.end_time == null && /(?:长期|常驻)开放/.test(event.end_time_text ?? "");
+}
+
+function extractEndfieldVersionSeriesFamilyKey(event: CalendarEvent): string | null {
+  const title = normalizeTitle(event.title);
+  const match =
+    /^[「『“"]([^」』”"]+)[」』”"]\s*挑战玩法更新[，,]?\s*开放[「『“"][^」』”"]+[」』”"]系列关卡$/u.exec(
+      title
+    );
+  if (!match?.[1]) return null;
+
+  const key = normalizeTitleKey(match[1]);
+  return key || null;
 }
 
 function stripHtml(input: string): string {
@@ -816,14 +844,19 @@ function extractEndfieldStandaloneTimeText(
   return inlineTimeText || nextLine || "";
 }
 
-function extractEndfieldCoopenedSignIns(
+function extractEndfieldCoopenedActivities(
   lines: string[]
 ): Array<{ title: string; anchorTitle: string | null }> {
   const activities = new Map<string, { title: string; anchorTitle: string | null }>();
   const text = lines.join("\n");
-  const matches = text.matchAll(
-    /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
-  );
+  const matches = [
+    ...text.matchAll(
+      /[「『“"]([^」』”"]+)[」』”"]\s*(?:限时)?签到活动\s*(?:同步|同时)开放/g
+    ),
+    ...text.matchAll(
+      /(?:同时[，,]?\s*)?开放\s*[「『“"]([^」』”"]+)[」』”"]\s*干员试用活动/g
+    ),
+  ].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 
   for (const match of matches) {
     const title = normalizeTitle(match[1]);
@@ -856,6 +889,7 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
   const banner = extractFirstImgSrc(html);
   let currentTitle: string | null = null;
   let inheritedWindow: EndfieldParsedWindow | null = null;
+  let noticeWindow: EndfieldParsedWindow | null = null;
   const sectionWindows = new Map<string, EndfieldParsedWindow>();
   let standaloneSectionCount = 0;
   let standaloneWindowCount = 0;
@@ -869,7 +903,28 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
       continue;
     }
 
-    if (!currentTitle) continue;
+    if (!currentTitle) {
+      // A permanent window ahead of the first quoted section belongs to the
+      // bulletin itself; quoted sub-activities below would otherwise hide it.
+      if (!noticeWindow && isEndfieldTimeSectionLabel(line)) {
+        const sectionLines = [line];
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const next = lines[j]!;
+          if (isEndfieldTimeSectionBoundary(next)) break;
+          sectionLines.push(next);
+        }
+        const window = parseEndfieldWindowText(sectionLines.join(" "));
+        if (
+          window.start &&
+          !window.end &&
+          window.endText &&
+          /(?:长期|常驻)开放/.test(window.endText)
+        ) {
+          noticeWindow = window;
+        }
+      }
+      continue;
+    }
     const timeText = extractEndfieldStandaloneTimeText(line, lines[i + 1]);
     if (timeText == null) continue;
     const window = parseEndfieldWindowText(timeText);
@@ -891,8 +946,28 @@ function parseStandaloneSectionEvents(item: HypergryphAggregateItem): CalendarEv
     if (event) out.push(event);
   }
 
+  if (out.length > 0 && noticeWindow?.start) {
+    const noticeTitle = normalizeTitle(item.title);
+    const noticeTitleKey = normalizeTitleKey(noticeTitle);
+    if (
+      noticeTitleKey &&
+      !out.some((event) => getEndfieldEventTitleKeys(event).includes(noticeTitleKey))
+    ) {
+      const event = buildEndfieldEvent({
+        id: `${item.cid ?? "event"}:${noticeTitleKey}:${noticeWindow.start}:${noticeWindow.endText ?? ""}`,
+        title: noticeTitle,
+        startNaive: noticeWindow.start,
+        endTimeText: noticeWindow.endText ?? undefined,
+        banner,
+        content: html,
+        classificationContent: "",
+      });
+      if (event) out.unshift(event);
+    }
+  }
+
   const existingTitleKeys = new Set(out.map((event) => normalizeTitleKey(event.title)));
-  for (const activity of extractEndfieldCoopenedSignIns(lines)) {
+  for (const activity of extractEndfieldCoopenedActivities(lines)) {
     const title = activity.title;
     const titleKey = normalizeTitleKey(title);
     if (!titleKey || existingTitleKeys.has(titleKey)) continue;
@@ -932,16 +1007,23 @@ function mergeEvents(events: CalendarEvent[]): CalendarEvent[] {
       const primaryKey = aliases.get(key) ?? key;
       return merged.has(primaryKey);
     });
-    const eventTitleKeys = getEndfieldEventTitleKeys(event);
-    const permanentPrimaryKey = exactPrimaryKey
+    const nearDuplicatePrimaryKey = exactPrimaryKey
+      ? undefined
+      : [...merged.entries()].find(([, existing]) => hasNearDuplicateEndTime(existing, event))?.[0];
+    const permanentPrimaryKey = exactPrimaryKey || nearDuplicatePrimaryKey
       ? undefined
       : [...merged.entries()].find(([, existing]) => {
           if (existing.start_time !== event.start_time) return false;
-          if (!isEndfieldPermanentEvent(existing) && !isEndfieldPermanentEvent(event)) return false;
-          const existingTitleKeys = getEndfieldEventTitleKeys(existing);
-          return eventTitleKeys.some((key) => existingTitleKeys.includes(key));
+          const existingIsPermanent = isEndfieldPermanentEvent(existing);
+          const eventIsPermanent = isEndfieldPermanentEvent(event);
+          if (existingIsPermanent === eventIsPermanent) return false;
+
+          const permanentEvent = existingIsPermanent ? existing : event;
+          const finiteEvent = existingIsPermanent ? event : existing;
+          const seriesFamilyKey = extractEndfieldVersionSeriesFamilyKey(finiteEvent);
+          return seriesFamilyKey === normalizeTitleKey(permanentEvent.title);
         })?.[0];
-    const existingPrimaryKey = exactPrimaryKey ?? permanentPrimaryKey;
+    const existingPrimaryKey = exactPrimaryKey ?? nearDuplicatePrimaryKey ?? permanentPrimaryKey;
     const primaryKey = existingPrimaryKey ? aliases.get(existingPrimaryKey) ?? existingPrimaryKey : mergeKeys[0];
     if (!primaryKey) continue;
 

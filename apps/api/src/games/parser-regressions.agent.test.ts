@@ -11,12 +11,183 @@ import {
 import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
+  isStarRailVersionMaintenanceAnchorText,
 } from "./starrail.js";
 import {
   extractZzzTimeRangeFromContent,
   extractZzzVersionEndIsoFromContent,
+  fetchZzzEvents,
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
+
+test("Star Rail prefers the body sharing deadline while retaining the list start", async () => {
+  const title = "4.6版本「月升之前，与兽共舞」专题展示页现已上线";
+  const content = '<p>浏览版本专题展示页，分享页面即可领取信用点*20000奖励。</p><p>※<t class="t_gl">2026/10/09 04:00:00</t>前，首次进行网页分享可获得信用点*20000。</p>';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [{
+          type_id: 3,
+          type_label: "资讯",
+          list: [{
+            ann_id: 1390,
+            title,
+            start_time: "2026-09-20 20:35:00",
+            end_time: "2026-09-28 00:00:00",
+          }],
+        }]
+      : [{ ann_id: 1390, title, content }];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.title, title);
+    assert.equal(events[0]!.start_time, "2026-09-20T20:35:00+08:00");
+    assert.equal(events[0]!.end_time, "2026-10-09T04:00:00+08:00");
+    assert.equal(events[0]!.end_time_kind, undefined);
+    assert.equal(events[0]!.is_gacha, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail limits sharing deadlines to unambiguous reward cutoffs without a time section", () => {
+  const opts = {
+    title: "专题展示页现已上线",
+    versionMaintenanceEndByLabel: new Map<string, string>(),
+    singleVersionMaintenanceEndIso: null,
+    listStartIso: "2026-09-20T20:35:00+08:00",
+    listEndIso: "2026-09-28T00:00:00+08:00",
+  };
+  for (const content of [
+    "2026/10/09 04:00:00前，首次进行网页分享可获得信用点*20000。",
+    "2026-10-09 04:00前，页面分享即可领取奖励。",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: "2026-10-09T04:00:00+08:00",
+    });
+  }
+  for (const content of [
+    "2026/10/09 04:00:00前，达到等级要求。网页分享可获得奖励。",
+    "2026/10/09 04:00:00后，首次进行网页分享可获得奖励。",
+    "2026/10/09 04:00:00前，首次进行网页分享。",
+    "2026/09/31 04:00:00前，首次进行网页分享可获得奖励。",
+    "2026/09/28 00:00:00前，网页分享可获得奖励。2026/10/09 04:00:00前，网页分享可获得奖励。",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: null,
+    });
+  }
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>2026/09/20 20:35:00 - 2026/09/28 00:00:00</p><p>活动奖励</p><p>2026/10/09 04:00:00前，网页分享可获得奖励。</p>",
+    opts
+  ), {
+    startIso: "2026-09-20T20:35:00+08:00",
+    endIso: "2026-09-28T00:00:00+08:00",
+  });
+});
+
+test("Star Rail uses a prose collaboration launch instead of the list publication time", async () => {
+  const title = "大白兔联名 | 那刻夏风堇联名开启！";
+  const content = "<p>亲爱的开拓者，《崩坏：星穹铁道》× 大白兔 联名将于9月10日10:00正式上线！与那刻夏、风堇一起分享奶糖，让甜意盈满树庭~ 点击链接查看更多联动信息</p>";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [{
+          type_id: 4,
+          type_label: "公告",
+          list: [{
+            ann_id: 1425,
+            title,
+            subtitle: "「大白兔联名」现已开启",
+            start_time: "2026-09-07 19:00:00",
+            end_time: "2026-09-15 12:00:00",
+          }],
+        }]
+      : [{ ann_id: 1425, title, content }];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.title, title);
+    assert.equal(events[0]!.start_time, "2026-09-10T10:00:00+08:00");
+    assert.equal(events[0]!.end_time, "2026-09-15T12:00:00+08:00");
+    assert.equal(events[0]!.end_time_kind, undefined);
+    assert.equal(events[0]!.end_time_text, undefined);
+    assert.equal(events[0]!.is_gacha, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail confines prose launch inference to unambiguous dated event openings", () => {
+  const opts = {
+    title: "联名活动",
+    versionMaintenanceEndByLabel: new Map<string, string>(),
+    singleVersionMaintenanceEndIso: null,
+    listStartIso: "2026-09-07T19:00:00+08:00",
+    listEndIso: "2026-09-15T12:00:00+08:00",
+  };
+  for (const content of [
+    "联名将于9月10日10:00正式上线！",
+    "联动将于2026年9月10日10:00正式开启！",
+    "活动于9月10日10:00开放！",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: "2026-09-10T10:00:00+08:00",
+      endIso: null,
+    });
+  }
+  for (const content of [
+    "视频将于9月10日10:00正式上线！",
+    "联名预告于9月10日10:00发布！",
+    "联名将于9月31日10:00正式上线！",
+    "联名将于9月10日25:00正式上线！",
+    "联名将于9月10日10:00正式上线！活动将于9月11日10:00开启！",
+  ]) {
+    assert.deepEqual(extractStarRailTimeRangeFromContent(content, opts), {
+      startIso: null,
+      endIso: null,
+    });
+  }
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "联名将于9月10日10:00正式上线！",
+    { ...opts, listStartIso: undefined }
+  ), { startIso: null, endIso: null });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "联名将于1月2日10:00正式上线！",
+    { ...opts, listStartIso: "2026-12-30T19:00:00+08:00" }
+  ), { startIso: "2027-01-02T10:00:00+08:00", endIso: null });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>联名将于9月10日10:00正式上线！</p><p>活动时间</p><p>2026/09/11 10:00 - 2026/09/15 12:00</p><p>参与条件</p>",
+    opts
+  ), {
+    startIso: "2026-09-11T10:00:00+08:00",
+    endIso: "2026-09-15T12:00:00+08:00",
+  });
+});
 
 test("Star Rail rejects unresolved version-relative starts instead of using list metadata", () => {
   const range = extractStarRailTimeRangeFromContent(
@@ -93,6 +264,129 @@ test("Star Rail chooses the nearest eligible later version anchor", () => {
   });
 });
 
+test("Star Rail resolves version starts from maintenance previews with expected durations", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/list")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                type_id: 4,
+                type_label: "公告",
+                list: [
+                  {
+                    ann_id: 1403,
+                    title: "4.5版本更新维护预告",
+                    start_time: "2026-08-24 14:00:00",
+                    end_time: "2026-08-26 06:00:00",
+                  },
+                ],
+              },
+              {
+                type_id: 3,
+                type_label: "资讯",
+                list: [
+                  {
+                    ann_id: 1330,
+                    title: "4.5版本活动跃迁（其一）",
+                    start_time: "2026-08-25 14:00:00",
+                    end_time: "2026-09-12 11:59:00",
+                  },
+                  {
+                    ann_id: 1335,
+                    title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+                    start_time: "2026-08-25 13:00:00",
+                    end_time: "2026-09-28 03:59:00",
+                  },
+                ],
+              },
+            ],
+          },
+        }
+      : {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                ann_id: 1403,
+                title: "4.5版本更新维护预告",
+                content: [
+                  "<h1>更新时间</h1>",
+                  "<p>2026/08/26 06:00:00 开始，预计需要<strong>5</strong>个小时。</p>",
+                ].join(""),
+              },
+              {
+                ann_id: 1330,
+                title: "4.5版本活动跃迁（其一）",
+                content: [
+                  "<p>本期活动跃迁时间为</p>",
+                  "<p>4.5版本更新后 - 2026/09/12 11:59:00</p>",
+                  "<p>跃迁说明</p>",
+                ].join(""),
+              },
+              {
+                ann_id: 1335,
+                title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+                content: [
+                  "<p>限时活动期</p>",
+                  "<p>4.5版本更新后 - 2026/09/28 03:59:00</p>",
+                  "<p>参与条件</p>",
+                ].join(""),
+              },
+            ],
+          },
+        };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    assert.equal(
+      isStarRailVersionMaintenanceAnchorText("4.5版本更新维护预告"),
+      true
+    );
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(
+      events
+        .filter(
+          (event) =>
+            String(event.id).includes("starrail:1330|") ||
+            String(event.id).includes("starrail:1335|")
+        )
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+        })),
+      [
+        {
+          title: "4.5版本活动跃迁（其一）",
+          start_time: "2026-08-26T11:00:00+08:00",
+          end_time: "2026-09-12T11:59:00+08:00",
+        },
+        {
+          title: "「超限：狂飙大奖赛」：夺得赛事冠军，获取自塑尘脂、命运的足迹、星琼等奖励！",
+          start_time: "2026-08-26T11:00:00+08:00",
+          end_time: "2026-09-28T03:59:00+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Endfield uses maintenance previews to resolve version-relative returner events", () => {
   const window = parseEndfieldWindowText(
     "「向渊行」版本更新维护后，激活「协议重连」活动当天至激活起第14天的次日04:00（服务器时间）结束"
@@ -126,6 +420,78 @@ test("Endfield prefers a full version notice over its maintenance preview", () =
   ].sort(compareEndfieldVersionNoticeOrder);
 
   assert.equal(notices[0]?.title, "「向渊行」版本更新说明");
+});
+
+test("Endfield merges equivalent notices whose finite ends differ by one minute", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「雪凇幽梦」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/09/02 06:00 - 2026/09/02 12:00</p>",
+                  "<p>■ 全新活动</p>",
+                  "<p>1. 「雪降深林」引入活动</p>",
+                  "<p>· 活动时间：「雪凇幽梦」版本更新后 - 2026/09/30 12:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "0771",
+              tab: "events",
+              title: "雪降深林",
+              header: "「雪降深林」引入活动说明",
+              startAt: 1788303600,
+              data: {
+                html: [
+                  "<p>▼//活动时间</p>",
+                  "<p>「雪凇幽梦」版本更新后 - 2026/09/30 11:59（服务器时间）</p>",
+                  "<p>▼//活动说明</p>",
+                  "<p>完成活动任务可获得奖励。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    assert.deepEqual(
+      events
+        .filter((event) => event.title.includes("雪降深林"))
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+        })),
+      [
+        {
+          title: "雪降深林",
+          start_time: "2026-09-02T12:00:00+08:00",
+          end_time: "2026-09-30T11:59:00+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Endfield ignores example dates outside the authoritative activity-time section", async () => {
@@ -273,7 +639,10 @@ test("Endfield preserves permanent availability after an explicit start", async 
                   "<p>▼//开放时间</p>",
                   "<p>2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放</p>",
                   "<p>▼//玩法说明</p>",
-                  "<p>挑战玩法更新系列关卡。</p>",
+                  "<p>· 本次「影拓丰碑」挑战玩法更新系列「山中见犼」，包含4个关卡。</p>",
+                  "<p>▼//「丰碑留名·兽犼」限时挑战活动</p>",
+                  "<p>· 活动时间：2026/08/06 12:00 - 2026/08/20 04:00（服务器时间）</p>",
+                  "<p>· 活动说明：「影拓丰碑 - 山中见犼」系列开放后，将开启「丰碑留名·兽犼」限时活动。</p>",
                 ].join(""),
               },
             },
@@ -311,12 +680,109 @@ test("Endfield preserves permanent availability after an explicit start", async 
         end_time_text: "系列开启后常驻开放",
       }
     );
+    const limitedEvent = events.find((item) => item.title === "丰碑留名·兽犼");
+    assert.ok(limitedEvent);
+    assert.deepEqual(
+      {
+        start_time: limitedEvent.start_time,
+        end_time: limitedEvent.end_time,
+      },
+      {
+        start_time: "2026-08-06T12:00:00+08:00",
+        end_time: "2026-08-20T04:00:00+08:00",
+      }
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("Endfield inherits a standalone notice window for a co-opened sign-in activity", async () => {
+test("Endfield keeps distinct same-name permanent and limited activities", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「向渊行」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/07/16 06:00 - 2026/07/16 12:00</p>",
+                  "<p>■ 活动及玩法更新</p>",
+                  "<p>1. 「同名企划」限时挑战活动</p>",
+                  "<p>· 开放时间：2026/08/06 12:00 - 2026/08/20 04:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "permanent-challenge",
+              tab: "events",
+              title: "同名企划 系列更新",
+              startAt: 1785902400,
+              data: {
+                html: [
+                  "<p>▼//开放时间</p>",
+                  "<p>2026/08/06 12:00（服务器时间）开启，系列开启后常驻开放</p>",
+                  "<p>▼//玩法说明</p>",
+                  "<p>常驻玩法说明。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const matchingEvents = events.filter((item) => item.title.includes("同名企划"));
+    assert.equal(matchingEvents.length, 2);
+    const permanentEvent = matchingEvents.find((event) => event.end_time == null);
+    const limitedEvent = matchingEvents.find((event) => event.end_time != null);
+    assert.ok(permanentEvent);
+    assert.ok(limitedEvent);
+    assert.deepEqual(
+      {
+        title: permanentEvent.title,
+        end_time: permanentEvent.end_time,
+        end_time_text: permanentEvent.end_time_text,
+      },
+      {
+        title: "同名企划 系列更新",
+        end_time: null,
+        end_time_text: "系列开启后常驻开放",
+      }
+    );
+    assert.deepEqual(
+      {
+        title: limitedEvent.title,
+        end_time: limitedEvent.end_time,
+        end_time_text: limitedEvent.end_time_text,
+      },
+      {
+        title: "「同名企划」限时挑战活动",
+        end_time: "2026-08-20T04:00:00+08:00",
+        end_time_text: undefined,
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Endfield inherits a standalone notice window for co-opened activities", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
     new Response(
@@ -333,6 +799,7 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
                 html: [
                   "<p>「晨星于此闪耀」特许寻访开放期间，6星干员获取概率提升！</p>",
                   "<p>「明耀晨星」限时签到活动同步开放，累计签到可获得【明耀晨星寻访凭证】×5等奖励。</p>",
+                  "<p>同时，开放「作战演练」干员试用活动。</p>",
                   "<p>▼//「晨星于此闪耀」特许寻访说明</p>",
                   "<p>· 开放时间：2026/08/09 12:00（服务器时间） - 版本更新维护前</p>",
                   "<p>· 开放条件：完成主线任务「第一章 - 进程Ⅰ - 基地解围」</p>",
@@ -353,23 +820,35 @@ test("Endfield inherits a standalone notice window for a co-opened sign-in activ
       ENDFIELD_CODE: "fixture",
       ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
     });
-    const event = events.find((item) => item.title === "明耀晨星");
-    assert.ok(event);
     assert.deepEqual(
-      {
-        start_time: event.start_time,
-        end_time: event.end_time,
-        end_time_kind: event.end_time_kind,
-        end_time_text: event.end_time_text,
-        is_gacha: event.is_gacha,
-      },
-      {
-        start_time: "2026-08-09T12:00:00+08:00",
-        end_time: null,
-        end_time_kind: "relative",
-        end_time_text: "版本更新维护前",
-        is_gacha: false,
-      }
+      events
+        .filter((item) => item.title === "明耀晨星" || item.title === "作战演练")
+        .map((event) => ({
+          title: event.title,
+          start_time: event.start_time,
+          end_time: event.end_time,
+          end_time_kind: event.end_time_kind,
+          end_time_text: event.end_time_text,
+          is_gacha: event.is_gacha,
+        })),
+      [
+        {
+          title: "明耀晨星",
+          start_time: "2026-08-09T12:00:00+08:00",
+          end_time: null,
+          end_time_kind: "relative",
+          end_time_text: "版本更新维护前",
+          is_gacha: false,
+        },
+        {
+          title: "作战演练",
+          start_time: "2026-08-09T12:00:00+08:00",
+          end_time: null,
+          end_time_kind: "relative",
+          end_time_text: "版本更新维护前",
+          is_gacha: false,
+        },
+      ]
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -558,6 +1037,93 @@ test("ZZZ recognizes activity notices whose titles omit the activity suffix", ()
     ),
     true
   );
+});
+
+test("ZZZ deduplicates prefixed activity notices against matching activity-list events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            activity_list: [
+              {
+                activity_id: "1415",
+                name: "见习邮差派件中",
+                start_time: "1787882400",
+                end_time: "1789329599",
+              },
+            ],
+          },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1277,
+                  title: "「叮咚！见习邮差派件中」活动说明",
+                  content:
+                    "【活动时间】 2026/08/28 10:00（服务器时间） ~ 2026/09/14 03:59（服务器时间） 【活动奖励】",
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  type_id: 3,
+                  type_label: "游戏公告",
+                  list: [
+                    {
+                      ann_id: 1277,
+                      title: "「叮咚！见习邮差派件中」活动说明",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+
+    assert.deepEqual(
+      events.map((event) => ({
+        id: event.id,
+        title: event.title,
+        start_time: event.start_time,
+        end_time: event.end_time,
+      })),
+      [
+        {
+          id: "1415",
+          title: "见习邮差派件中",
+          start_time: "2026-08-28T10:00:00+08:00",
+          end_time: "2026-09-14T03:59:59+08:00",
+        },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("ZZZ resolves version-relative ends for supplemental activity notices", () => {

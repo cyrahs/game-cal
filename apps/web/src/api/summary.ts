@@ -32,3 +32,9 @@ export async function fetchGameSummaryEntry(game: GameId): Promise<GameSummaryEn
   const byGame = await getSummaryByGame();
   return byGame.get(game) ?? { game, ok: false, error: "No data for game" };
 }
+
+// Drops the shared summary cache so the next fetch hits the network, e.g. when
+// the user explicitly retries after a failure.
+export function invalidateSummaryCache(): void {
+  cached = null;
+}

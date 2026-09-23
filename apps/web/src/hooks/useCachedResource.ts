@@ -24,11 +24,17 @@ const LOADING = { status: "loading", data: null, error: null, updatedAtMs: null 
  * - mounted hooks revalidate periodically and when the tab becomes visible;
  * - a failed refetch keeps showing the last good data.
  */
+export type GameResourceHook<T> = ((game: GameId) => CachedResourceState<T>) & {
+  /** Drops the cache and forces every mounted hook to refetch (used by retry buttons). */
+  invalidate: () => void;
+};
+
 export function createGameResourceHook<T>(
   fetcher: (game: GameId) => Promise<{ data: T; updatedAtMs: number }>
-) {
+): GameResourceHook<T> {
   const memory = new Map<GameId, CacheEntry<T>>();
   const inFlight = new Map<GameId, Promise<CacheEntry<T>>>();
+  const mountedRevalidators = new Set<() => void>();
 
   function toSuccess(entry: CacheEntry<T>): CachedResourceState<T> {
     return { status: "success", data: entry.data, error: null, updatedAtMs: entry.updatedAtMs };
@@ -38,7 +44,7 @@ export function createGameResourceHook<T>(
     return Date.now() - entry.at < STALE_AFTER_MS;
   }
 
-  return function useGameResource(game: GameId): CachedResourceState<T> {
+  function useGameResource(game: GameId): CachedResourceState<T> {
     const [state, setState] = useState<{ key: GameId; value: CachedResourceState<T> }>({
       key: game,
       value: LOADING,
@@ -101,6 +107,7 @@ export function createGameResourceHook<T>(
       appliedAtRef.current = null;
       revalidate();
 
+      mountedRevalidators.add(revalidate);
       const interval = setInterval(revalidate, REVALIDATE_CHECK_INTERVAL_MS);
       const onVisibilityChange = () => {
         if (document.visibilityState === "visible") revalidate();
@@ -109,6 +116,7 @@ export function createGameResourceHook<T>(
 
       return () => {
         cancelled = true;
+        mountedRevalidators.delete(revalidate);
         clearInterval(interval);
         document.removeEventListener("visibilitychange", onVisibilityChange);
       };
@@ -122,5 +130,12 @@ export function createGameResourceHook<T>(
     }
 
     return state.value;
-  };
+  }
+
+  return Object.assign(useGameResource, {
+    invalidate: () => {
+      memory.clear();
+      for (const revalidate of mountedRevalidators) revalidate();
+    },
+  });
 }

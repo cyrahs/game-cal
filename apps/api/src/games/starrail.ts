@@ -360,7 +360,7 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   const start = startRe.exec(text);
   if (!start?.[1]) return null;
 
-  const duration = /预计\s*([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
+  const duration = /预计\s*(?:需要\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:个)?\s*小时\s*(?:完成|结束)?/.exec(
     text.slice(start.index)
   );
   const durationHours = Number(duration?.[1]);
@@ -449,12 +449,65 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
   return null;
 }
 
+function extractStarRailProseLaunchStart(
+  text: string,
+  listStartIso: string | undefined
+): string | null {
+  const matches = [...text.matchAll(
+    /(?:联名|联动|活动)\s*(?:将于|于)\s*(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:正式)?(?:上线|开启|开放)/g
+  )];
+  if (matches.length !== 1) return null;
+
+  const [, yearText, month, day, hour, minute, second] = matches[0]!;
+  const referenceMs = Date.parse(listStartIso ?? "");
+  const referenceYear = Number(listStartIso?.slice(0, 4));
+  const years = yearText
+    ? [Number(yearText)]
+    : Number.isFinite(referenceMs)
+      ? [referenceYear - 1, referenceYear, referenceYear + 1]
+      : [];
+  const candidates = years
+    .map((year) => toStarRailSourceIso(
+      `${year}/${month}/${day!.padStart(2, "0")} ${hour!.padStart(2, "0")}:${minute}:${second ?? "00"}`
+    ))
+    .filter((candidate): candidate is string => {
+      if (!candidate) return false;
+      const candidateMs = Date.parse(candidate);
+      return Number.isFinite(candidateMs) &&
+        unixSecondsToIsoWithSourceOffset(candidateMs / 1000, STARRAIL_SOURCE_TZ_OFFSET) === candidate;
+    });
+  if (!yearText) {
+    candidates.sort((left, right) =>
+      Math.abs(Date.parse(left) - referenceMs) - Math.abs(Date.parse(right) - referenceMs)
+    );
+  }
+  return candidates[0] ?? null;
+}
+
+function extractStarRailSharingDeadline(text: string): string | null {
+  const pattern = new RegExp(
+    `(${STARRAIL_DATE_TIME_PATTERN})\\s*前[，,：:\\s]*(?:首次\\s*)?(?:进行\\s*)?(?:网页|页面)分享\\s*(?:即可|可)(?:获得|领取)`,
+    "g"
+  );
+  const deadlines = [...new Set([...text.matchAll(pattern)].map((match) => match[1]!))];
+  if (deadlines.length !== 1) return null;
+
+  const deadline = toStarRailSourceIso(deadlines[0]);
+  if (!deadline) return null;
+  const deadlineMs = Date.parse(deadline);
+  return Number.isFinite(deadlineMs) &&
+    unixSecondsToIsoWithSourceOffset(deadlineMs / 1000, STARRAIL_SOURCE_TZ_OFFSET) === deadline
+    ? deadline
+    : null;
+}
+
 export function extractStarRailTimeRangeFromContent(
   content: string | undefined,
   opts: {
     title: string;
     versionMaintenanceEndByLabel: Map<string, string>;
     singleVersionMaintenanceEndIso: string | null;
+    listStartIso?: string;
     listEndIso: string;
   }
 ): StarRailParsedTimeRange {
@@ -497,7 +550,15 @@ export function extractStarRailTimeRangeFromContent(
   if (titleLongTermRange) return titleLongTermRange;
 
   const section = extractStarRailTimeSection(content);
-  if (!section) return longTermFallback(text);
+  if (!section) {
+    const fallback = longTermFallback(text);
+    return fallback.startIso
+      ? fallback
+      : {
+          startIso: extractStarRailProseLaunchStart(text, opts.listStartIso),
+          endIso: extractStarRailSharingDeadline(text),
+        };
+  }
 
   const dates = collectDateTimeCandidates(section);
   const relativeStartIso = resolveRelativeVersionStartIso(section, opts);
@@ -740,6 +801,12 @@ function isVersionNoticeText(input: string): boolean {
   return text.includes("版本更新说明") || text.includes("版本更新公告");
 }
 
+export function isStarRailVersionMaintenanceAnchorText(input: string): boolean {
+  const text = input.trim();
+  if (!text) return false;
+  return isVersionNoticeText(text) || text.includes("版本更新维护预告");
+}
+
 function pickCurrentVersionNotice(items: MihoyoAnnItem[]): StarRailVersionNotice | null {
   const candidates = items
     .filter((item) => isVersionNoticeText(item.title ?? "") || isVersionNoticeText(item.subtitle ?? ""))
@@ -949,7 +1016,10 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
   for (const noticeItem of allNoticeItems.values()) {
-    if (!isVersionNoticeText(noticeItem.title ?? "") && !isVersionNoticeText(noticeItem.subtitle ?? "")) {
+    if (
+      !isStarRailVersionMaintenanceAnchorText(noticeItem.title ?? "") &&
+      !isStarRailVersionMaintenanceAnchorText(noticeItem.subtitle ?? "")
+    ) {
       continue;
     }
 
@@ -1020,6 +1090,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       title,
       versionMaintenanceEndByLabel,
       singleVersionMaintenanceEndIso,
+      listStartIso,
       listEndIso,
     });
     if (contentRange.unresolvedVersionStart) return [];
