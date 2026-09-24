@@ -12,6 +12,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
   isStarRailVersionMaintenanceAnchorText,
+  shouldIncludeStarRailAnnouncement,
 } from "./starrail.js";
 import {
   extractZzzTimeRangeFromContent,
@@ -264,7 +265,21 @@ test("Star Rail chooses the nearest eligible later version anchor", () => {
   });
 });
 
-test("Star Rail resolves version starts from maintenance previews with expected durations", async () => {
+test("Star Rail excludes maintenance previews regardless of body availability", () => {
+  const title = "4.6版本更新维护预告";
+  const content = [
+    '<p>4.6版本预下载于<t class="t_gl">2026/09/24 14:00:00</t>开启，开拓者可提前下载部分资源，在版本更新维护结束后可更快进入游戏。</p>',
+    '<p>此外，列车组预计于<t class="t_gl">2026/09/28 06:00:00</t>进行版本更新维护，维护完成后将更新至4.6版本「月升之前，与兽共舞」。</p>',
+  ].join("");
+
+  assert.equal(shouldIncludeStarRailAnnouncement(title, content), false);
+  assert.equal(shouldIncludeStarRailAnnouncement(title, undefined), false);
+  assert.equal(isStarRailVersionMaintenanceAnchorText(title), true);
+  assert.equal(shouldIncludeStarRailAnnouncement("4.5版本活动跃迁（其一）", undefined), true);
+  assert.equal(shouldIncludeStarRailAnnouncement("「超限：狂飙大奖赛」活动说明", undefined), true);
+});
+
+test("Star Rail resolves version starts without emitting maintenance previews", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = String(input);
@@ -358,17 +373,11 @@ test("Star Rail resolves version starts from maintenance previews with expected 
       STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
     });
     assert.deepEqual(
-      events
-        .filter(
-          (event) =>
-            String(event.id).includes("starrail:1330|") ||
-            String(event.id).includes("starrail:1335|")
-        )
-        .map((event) => ({
-          title: event.title,
-          start_time: event.start_time,
-          end_time: event.end_time,
-        })),
+      events.map((event) => ({
+        title: event.title,
+        start_time: event.start_time,
+        end_time: event.end_time,
+      })),
       [
         {
           title: "4.5版本活动跃迁（其一）",
