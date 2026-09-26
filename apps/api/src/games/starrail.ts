@@ -586,9 +586,11 @@ export function extractStarRailTimeRangeFromContent(
 
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length === 0) {
     if (relativeStartIso) {
+      const longTermEnd = /版本(?:更新后|开启后|期间)\s*(?:[，,]\s*)?(长期开放|永久开放|持续开放)/.exec(section)?.[1];
       return {
         startIso: relativeStartIso,
-        endIso: opts.listEndIso,
+        endIso: longTermEnd ? null : opts.listEndIso,
+        ...(longTermEnd ? { endText: longTermEnd } : {}),
       };
     }
 

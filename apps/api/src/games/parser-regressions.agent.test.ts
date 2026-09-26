@@ -8,6 +8,7 @@ import {
   isEndfieldVersionNoticeCandidate,
   parseEndfieldWindowText,
 } from "./endfield.js";
+import { fetchGenshinEvents } from "./genshin.js";
 import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
@@ -20,6 +21,58 @@ import {
   fetchZzzEvents,
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
+
+test("Genshin excludes first-purchase bonus reset notices from events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    if (url.endsWith("/content")) throw new Error("Content unavailable");
+    return new Response(JSON.stringify({
+      retcode: 0,
+      message: "OK",
+      data: { list: [{
+        type_id: 1,
+        type_label: "活动公告",
+        list: [{
+          ann_id: 3802,
+          title: "《原神》首充双倍返利重置说明",
+          subtitle: "首充重置",
+          start_time: "2026-09-12 22:00:00",
+          end_time: "2026-11-04 07:00:00",
+        }],
+      }] },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const events = await fetchGenshinEvents({
+      GENSHIN_API_URL: "https://fixture.invalid/list",
+      GENSHIN_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(events, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail preserves permanent version-relative activity windows", () => {
+  const range = extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>4.6版本更新后永久开放</p><p>参与条件</p>",
+    {
+      title: "「星际碰碰好搭档！」：派出你的随宠搭档，获取命运的足迹、星琼等奖励",
+      versionMaintenanceEndByLabel: new Map([["4.6", "2026-09-28T11:00:00+08:00"]]),
+      singleVersionMaintenanceEndIso: null,
+      listEndIso: "2026-11-11T06:00:00+08:00",
+    }
+  );
+
+  assert.deepEqual(range, {
+    startIso: "2026-09-28T11:00:00+08:00",
+    endIso: null,
+    endText: "永久开放",
+  });
+});
 
 test("Star Rail prefers the body sharing deadline while retaining the list start", async () => {
   const title = "4.6版本「月升之前，与兽共舞」专题展示页现已上线";
