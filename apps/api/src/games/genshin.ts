@@ -86,6 +86,7 @@ const IGNORE_TITLE_PATTERNS = [
   /礼包.*(?:限时)?上架/,
   /(?:限时)?上架.*礼包/,
   /「.*纪行」活动说明/,
+  /(?:首充|首次充值).*?(?:双倍|返利).*?重置(?:说明|公告|通知)$/,
 ];
 
 function shouldIgnoreGenshinTitle(title: string): boolean {
