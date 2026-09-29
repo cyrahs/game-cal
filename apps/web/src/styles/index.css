@@ -31,7 +31,6 @@
   --dot: #ef4444;
   --ring: rgba(21, 23, 28, 0.22);
   --shadow-ink: rgba(20, 22, 28, 0.06);
-  --recurring-bar: #c9c4b8;
   --version-band: rgba(227, 191, 91, 0.1);
 
   --game-genshin: #e3bf5b;
@@ -76,7 +75,6 @@ html.dark {
   --dot: #f87171;
   --ring: rgba(232, 235, 241, 0.22);
   --shadow-ink: rgba(0, 0, 0, 0.35);
-  --recurring-bar: #4a5366;
   --version-band: rgba(227, 191, 91, 0.06);
 
   --game-genshin-ink: #f0cf72;
