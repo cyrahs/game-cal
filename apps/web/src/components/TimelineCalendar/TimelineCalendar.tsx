@@ -2160,9 +2160,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <img src={meta.icon} alt={meta.name} className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
-                      <div className="text-[13px] font-semibold truncate">
-                        {row.num ? <span className="font-mono text-[color:var(--ink2)] mr-1.5">{row.num}</span> : null}
-                        {row.name ?? ""}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {row.name ? <span className="text-[13px] font-semibold truncate">{row.name}</span> : null}
+                        {row.num ? (
+                          <span className="shrink-0 px-1.5 py-px rounded-md border border-[color:var(--line)] bg-[color:var(--surface2)] font-mono text-[11px] leading-4 text-[color:var(--ink2)]">
+                            {row.num}
+                          </span>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
@@ -2203,9 +2207,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
-                      <div className="text-[13px] font-semibold truncate">
-                        {row.num ? <span className="font-mono text-[color:var(--ink2)] mr-1.5">{row.num}</span> : null}
-                        {row.name ?? ""}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {row.name ? <span className="text-[13px] font-semibold truncate">{row.name}</span> : null}
+                        {row.num ? (
+                          <span className="shrink-0 px-1.5 py-px rounded-md border border-[color:var(--line)] bg-[color:var(--surface2)] font-mono text-[11px] leading-4 text-[color:var(--ink2)]">
+                            {row.num}
+                          </span>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
