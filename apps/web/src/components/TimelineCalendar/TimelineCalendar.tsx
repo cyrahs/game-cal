@@ -2543,8 +2543,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
                 <span className="font-semibold text-[color:var(--ink2)]">
-                  已进行 <LiveDuration sinceMs={versionProgress.s.valueOf()} />（{Math.round(versionProgress.pct)}%）·{" "}
-                  <LiveDuration untilMs={versionProgress.e.valueOf()} /> 后结束
+                  已进行 <LiveDuration sinceMs={versionProgress.s.valueOf()} /> · <LiveDuration untilMs={versionProgress.e.valueOf()} />（
+                  {Math.round(versionProgress.pct)}%）
                 </span>
                 <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")} 结束</span>
               </div>
