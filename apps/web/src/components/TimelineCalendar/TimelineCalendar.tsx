@@ -2522,7 +2522,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink p-4 md:px-6 md:py-5 flex flex-col md:flex-row md:items-center gap-4 md:gap-7">
       <div className="flex items-start gap-3 md:gap-5 flex-1 min-w-0">
         <img src={gameMeta.icon} alt="" className="w-12 h-12 md:w-16 md:h-16 rounded-xl md:rounded-2xl object-cover shrink-0" referrerPolicy="no-referrer" />
-        <div className="flex-1 min-w-0 grid gap-2.5">
+        {/* The gap under the title leaves room for the percentage floating above the version bar. */}
+        <div className="flex-1 min-w-0 grid gap-4">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
             <h1 className="text-xl md:text-[26px] font-bold leading-tight">{gameMeta.name}</h1>
             {versionProgress?.label.num ? (
