@@ -1479,7 +1479,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   };
 
   const renderRow = (item: TimelineRowItem) => {
-    const { event, completed } = item;
+    const { event, category, completed } = item;
     const key = event.eventKey;
     const isSelected = selectedKey === key;
     const canComplete = canCompleteTimelineEvent(event);
@@ -1545,8 +1545,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             aria-label={`${accessibleTitle}，${remaining.primary}`}
             onClick={() => toggleSelected(key)}
           >
-            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")} title={displayTitle}>
-              {main}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")} title={displayTitle}>
+                {main}
+              </div>
+              {/* Home mixes both kinds in one list, so each row names its kind; game pages group them instead. */}
+              {isHome && category !== "other" ? (
+                <span className="shrink-0 px-1.5 rounded border border-[color:var(--line)] text-[10px] leading-4 font-medium text-[color:var(--muted)]">
+                  {category === "recurring" ? "循环" : "限时"}
+                </span>
+              ) : null}
             </div>
             <div className="md:hidden mt-1.5 h-1 rounded-full bg-[color:var(--line-soft)] overflow-hidden" aria-hidden="true">
               <div className="h-full rounded-full" style={{ width: `${elapsedPct}%`, background: fill }} />
@@ -1850,8 +1858,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       ) : null}
                       <span
                         className={clsx(
-                          "h-[22px] min-w-[26px] px-1.5 rounded-full inline-flex items-center justify-center text-[13px] font-semibold font-mono",
-                          tick.isToday ? "bg-[color:var(--accent)] text-[color:var(--on-accent)]" : "text-[color:var(--ink2)]"
+                          "h-[22px] min-w-[26px] px-1.5 inline-flex items-center justify-center text-[13px] font-semibold font-mono",
+                          // Today is marked by color only: a filled badge would collide with the "now" time label below it.
+                          tick.isToday ? "text-[color:var(--accent)]" : "text-[color:var(--ink2)]"
                         )}
                       >
                         {tick.label}
