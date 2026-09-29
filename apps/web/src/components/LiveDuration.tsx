@@ -1,3 +1,4 @@
+import dayjs from "dayjs";
 import { useSyncExternalStore } from "react";
 import { getClockNowMs, subscribeClock } from "../lib/clock";
 import { formatDuration } from "../lib/time";
@@ -13,5 +14,11 @@ export function LiveDuration(props: { untilMs?: number; sinceMs?: number }) {
     const now = getClockNowMs();
     return formatDuration(untilMs !== undefined ? untilMs - now : now - (sinceMs ?? now));
   });
+  return <>{text}</>;
+}
+
+/** Current local time with live seconds (e.g. "14:05:32"), on the same shared clock. */
+export function LiveClock() {
+  const text = useSyncExternalStore(subscribeClock, () => dayjs(getClockNowMs()).format("HH:mm:ss"));
   return <>{text}</>;
 }

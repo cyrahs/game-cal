@@ -6,7 +6,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
-import { LiveDuration } from "../LiveDuration";
+import { LiveClock, LiveDuration } from "../LiveDuration";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import { type RecurringActivity, type RecurringRule, usePrefs } from "../../context/prefs";
 import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "../../lib/announcement";
@@ -1870,7 +1870,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     className="absolute bottom-0 translate-y-1/2 -translate-x-1/2 z-20 px-1.5 rounded-md bg-[color:var(--accent)] text-[color:var(--on-accent)] text-[10px] font-bold font-mono whitespace-nowrap"
                     style={{ left: `${nowPct}%` }}
                   >
-                    {now.format("HH:mm")}
+                    <LiveClock />
                   </span>
                 ) : null}
               </div>
