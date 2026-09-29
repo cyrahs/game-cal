@@ -2548,7 +2548,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         </div>
       </div>
       <div className="hidden md:block w-px self-stretch bg-[color:var(--line)]" aria-hidden="true" />
-      <div className="flex md:flex-col items-center md:items-start justify-between gap-2 md:w-[180px]">
+      <div className="flex md:flex-col items-center md:items-start justify-between gap-2 md:shrink-0 md:min-w-[84px]">
         <span className="text-xs font-semibold text-[color:var(--muted)]">月卡剩余</span>
         {isMonthlyCardEditing ? (
           <div className="flex items-center gap-2">
@@ -2575,7 +2575,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 }
               }}
               placeholder="天数"
-              className="w-24 h-10 px-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono text-[color:var(--ink)]"
+              className="w-16 h-10 px-2.5 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono text-[color:var(--ink)]"
             />
             <span className="text-sm text-[color:var(--muted)]">天</span>
           </div>
