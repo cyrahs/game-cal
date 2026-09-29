@@ -2160,8 +2160,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
                       <>
-                        <div className="text-[13px] font-semibold font-mono">{row.num ?? ""}</div>
-                        <div className="text-[11px] text-[color:var(--muted)] truncate">{row.name ?? ""}</div>
+                        <div className="text-[13px] font-semibold truncate">{row.name ?? row.num ?? ""}</div>
+                        {row.name && row.num ? (
+                          <div className="text-[11px] font-mono text-[color:var(--muted)]">{row.num}</div>
+                        ) : null}
                       </>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
@@ -2203,8 +2205,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
                       <>
-                        <div className="text-[13px] font-semibold font-mono">{row.num ?? ""}</div>
-                        <div className="text-[11px] text-[color:var(--muted)] truncate">{row.name ?? ""}</div>
+                        <div className="text-[13px] font-semibold truncate">{row.name ?? row.num ?? ""}</div>
+                        {row.name && row.num ? (
+                          <div className="text-[11px] font-mono text-[color:var(--muted)]">{row.num}</div>
+                        ) : null}
                       </>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
