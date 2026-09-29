@@ -2368,22 +2368,25 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 </button>
               );
             }
+            // The divider sits on the wrapper so the selected highlight can be a rounded pill
+            // that extends slightly past the content instead of a hard-edged strip.
             return (
-              <button
-                key={group.key}
-                type="button"
-                aria-expanded={isSelected}
-                onClick={() => toggleSelected(first.eventKey)}
-                className={clsx(
-                  "w-full text-left flex items-center gap-2.5 py-2.5 border-t border-[color:var(--line-soft)]",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isSelected && "bg-[color:var(--accent-soft)]"
-                )}
-              >
-                <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
-                <div className="min-w-0 flex-1 text-[13px] font-semibold truncate">{title}</div>
-                {gachaRemaining(remaining)}
-              </button>
+              <div key={group.key} className="border-t border-[color:var(--line-soft)] py-1">
+                <button
+                  type="button"
+                  aria-expanded={isSelected}
+                  onClick={() => toggleSelected(first.eventKey)}
+                  className={clsx(
+                    "-mx-2 w-[calc(100%+1rem)] px-2 py-1.5 rounded-xl text-left flex items-center gap-2.5 transition-colors",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                    isSelected ? "bg-[color:var(--accent-soft)]" : "hover:bg-[color:var(--tile)]"
+                  )}
+                >
+                  <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                  <div className="min-w-0 flex-1 text-[13px] font-semibold truncate">{title}</div>
+                  {gachaRemaining(remaining)}
+                </button>
+              </div>
             );
           })}
         </div>
