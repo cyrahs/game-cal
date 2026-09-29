@@ -2464,9 +2464,24 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
         </div>
         <div className="grid grid-cols-3 gap-2 md:flex md:gap-2.5">
-          <div className="rounded-xl bg-[color:var(--urgent-soft)] px-3 md:px-4 py-2.5 grid gap-0.5 md:min-w-[120px]">
-            <span className="text-[11px] md:text-xs font-semibold text-[color:var(--urgent)]">24 小时内结束</span>
-            <span className="text-xl md:text-[22px] font-bold font-mono text-[color:var(--urgent)]">{homeStats.urgent}</span>
+          {/* Highlighted only when something actually ends within 24 hours. */}
+          <div
+            className={clsx(
+              "rounded-xl px-3 md:px-4 py-2.5 grid gap-0.5 md:min-w-[120px]",
+              homeStats.urgent > 0 ? "bg-[color:var(--urgent-soft)]" : "border border-[color:var(--line)] bg-[color:var(--card)]"
+            )}
+          >
+            <span
+              className={clsx(
+                "text-[11px] md:text-xs font-semibold",
+                homeStats.urgent > 0 ? "text-[color:var(--urgent)]" : "text-[color:var(--muted)]"
+              )}
+            >
+              24 小时内结束
+            </span>
+            <span className={clsx("text-xl md:text-[22px] font-bold font-mono", homeStats.urgent > 0 && "text-[color:var(--urgent)]")}>
+              {homeStats.urgent}
+            </span>
           </div>
           <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] px-3 md:px-4 py-2.5 grid gap-0.5 md:min-w-[120px]">
             <span className="text-[11px] md:text-xs font-semibold text-[color:var(--muted)]">48 小时内结束</span>
