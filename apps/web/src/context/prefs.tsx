@@ -62,7 +62,7 @@ export type RecurringSettingsImportResult =
       error: string;
     };
 
-const DEFAULT_RECURRING_ACTIVITIES_BY_GAME: Partial<Record<GameId, RecurringActivity[]>> =
+export const DEFAULT_RECURRING_ACTIVITIES_BY_GAME: Partial<Record<GameId, RecurringActivity[]>> =
   parseRecurringSettingsImport(defaultRecurringSettingsTemplate) ?? {};
 
 function cloneRecurringRule(rule: RecurringRule): RecurringRule {
@@ -229,7 +229,7 @@ function coerceMonthlyCardByGame(input: unknown): Partial<Record<GameId, Monthly
   return next;
 }
 
-function parseRecurringSettingsImport(input: unknown): Partial<Record<GameId, RecurringActivity[]>> | null {
+export function parseRecurringSettingsImport(input: unknown): Partial<Record<GameId, RecurringActivity[]>> | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const obj = input as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(obj, "recurringActivitiesByGame")) {
@@ -435,7 +435,7 @@ function toSyncPrefs(input: PrefsState): SyncPrefs {
   return syncPrefs;
 }
 
-function coercePrefs(input: unknown): PrefsState {
+export function coercePrefs(input: unknown): PrefsState {
   const base = makeDefaultPrefs();
   if (!input || typeof input !== "object") return base;
   const obj = input as any;

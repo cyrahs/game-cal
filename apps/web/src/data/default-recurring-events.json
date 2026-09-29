@@ -32,6 +32,16 @@
           "hour": 4,
           "minute": 0
         }
+      },
+      {
+        "id": "ra_mmrigrwv_wgfk0zjn",
+        "title": "商店兑换",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
+          "hour": 4,
+          "minute": 0
+        }
       }
     ],
     "starrail": [
@@ -41,17 +51,6 @@
         "rule": {
           "kind": "weekly",
           "weekday": 1,
-          "hour": 4,
-          "minute": 0
-        }
-      },
-      {
-        "id": "ra_mlhi4rtw_rf3t0v39",
-        "title": "货币战争",
-        "rule": {
-          "kind": "interval",
-          "startDate": "2026-02-02",
-          "everyDays": 14,
           "hour": 4,
           "minute": 0
         }
@@ -69,11 +68,10 @@
       },
       {
         "id": "ra_mlhikmdd_wbqvqlb5",
-        "title": "差分宇宙",
+        "title": "差分宇宙/货币战争",
         "rule": {
-          "kind": "interval",
-          "startDate": "2026-02-09",
-          "everyDays": 14,
+          "kind": "weekly",
+          "weekday": 1,
           "hour": 4,
           "minute": 0
         }
@@ -96,6 +94,16 @@
           "kind": "interval",
           "startDate": "2026-01-19",
           "everyDays": 42,
+          "hour": 4,
+          "minute": 0
+        }
+      },
+      {
+        "id": "ra_mmrifrof_uyrwurhl",
+        "title": "商店兑换&合成",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
           "hour": 4,
           "minute": 0
         }
@@ -126,7 +134,7 @@
       },
       {
         "id": "ra_mlhjy8qq_hu8u0v96",
-        "title": "零号空洞",
+        "title": "零号空洞/贝果行动",
         "rule": {
           "kind": "weekly",
           "weekday": 1,
@@ -143,6 +151,16 @@
           "hour": 4,
           "minute": 0
         }
+      },
+      {
+        "id": "ra_mmrigc4c_p9493ysh",
+        "title": "商店兑换",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
+          "hour": 4,
+          "minute": 0
+        }
       }
     ],
     "ww": [
@@ -150,15 +168,16 @@
         "id": "ra_mlhk2q5z_ayams3rh",
         "title": "冥歌海墟",
         "rule": {
-          "kind": "monthly",
-          "day": 16,
+          "kind": "interval",
+          "startDate": "2026-04-13",
+          "everyDays": 28,
           "hour": 4,
           "minute": 0
         }
       },
       {
         "id": "ra_mlhk3u41_kzp3119t",
-        "title": "千道门扉的异想",
+        "title": "乐园",
         "rule": {
           "kind": "weekly",
           "weekday": 1,
@@ -170,8 +189,9 @@
         "id": "ra_mlhk4xey_1pzv2lo1",
         "title": "逆境深塔",
         "rule": {
-          "kind": "monthly",
-          "day": 1,
+          "kind": "interval",
+          "startDate": "2026-04-27",
+          "everyDays": 28,
           "hour": 4,
           "minute": 0
         }
@@ -206,12 +226,22 @@
           "hour": 4,
           "minute": 0
         }
+      },
+      {
+        "id": "ra_mmrio61o_2ktvr4mc",
+        "title": "商店兑换",
+        "rule": {
+          "kind": "monthly",
+          "day": 1,
+          "hour": 4,
+          "minute": 0
+        }
       }
     ],
     "endfield": [
       {
         "id": "ra_mlhjz53j_ih83s0v9",
-        "title": "周常",
+        "title": "周常&兑换",
         "rule": {
           "kind": "weekly",
           "weekday": 1,
