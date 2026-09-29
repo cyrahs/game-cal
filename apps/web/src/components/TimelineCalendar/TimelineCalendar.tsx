@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import { LiveClock, LiveDuration } from "../LiveDuration";
+import VersionProgressBar from "../VersionProgressBar";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import { type RecurringActivity, type RecurringRule, usePrefs } from "../../context/prefs";
 import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "../../lib/announcement";
@@ -2514,8 +2515,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const s = parseDateTime(currentVersion.start_time);
     const e = parseDateTime(currentVersion.end_time);
     if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
-    const pct = clamp(((now.valueOf() - s.valueOf()) / (e.valueOf() - s.valueOf())) * 100, 0, 100);
-    return { s, e, pct, label: splitVersionLabel(currentVersion) };
+    return { s, e, label: splitVersionLabel(currentVersion) };
   })();
 
   const gameHero = !isHome ? (
@@ -2534,24 +2534,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
           {versionProgress ? (
             <div className="grid gap-1.5">
-              {/* The percentage rides on the bar at the end of the filled part (kept inside the track),
-                  so it does not need a row of its own above the bar. */}
-              <div className="relative h-5 flex items-center">
-                <div className="w-full h-2.5 rounded-full bg-[color:var(--line-soft)]">
-                  <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
-                </div>
-                <span
-                  className="absolute top-1/2 h-5 px-1.5 rounded-full border-2 bg-[color:var(--card)] text-[11px] leading-4 font-mono font-semibold whitespace-nowrap"
-                  style={{
-                    left: `${versionProgress.pct}%`,
-                    transform: `translate(-${versionProgress.pct}%, -50%)`,
-                    borderColor: gameColorVar(primaryGameId),
-                    color: gameInkVar(primaryGameId),
-                  }}
-                >
-                  {Math.round(versionProgress.pct)}%
-                </span>
-              </div>
+              <VersionProgressBar
+                startMs={versionProgress.s.valueOf()}
+                endMs={versionProgress.e.valueOf()}
+                color={gameColorVar(primaryGameId)}
+                ink={gameInkVar(primaryGameId)}
+              />
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")}</span>
                 <span className="font-semibold text-[color:var(--ink2)]">
