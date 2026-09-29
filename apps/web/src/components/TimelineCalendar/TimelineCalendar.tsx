@@ -1487,16 +1487,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               border: notStarted ? "1.5px dashed var(--muted)" : undefined,
               borderRadius: `${radiusStart} ${radiusEnd} ${radiusEnd} ${radiusStart}`,
               opacity: isEnded ? 0.5 : 1,
+              // Bars running past the visible range fade out at the edge; the end date
+              // is already shown in the remaining column, so no label sits on the bar.
+              ...(truncatedEnd
+                ? {
+                    maskImage: "linear-gradient(to right, #000 calc(100% - 28px), transparent)",
+                    WebkitMaskImage: "linear-gradient(to right, #000 calc(100% - 28px), transparent)",
+                  }
+                : null),
             }}
           />
-          {!isHome && truncatedEnd ? (
-            <div className="absolute top-1/2 -translate-y-1/2 right-1 h-5 px-1.5 rounded-md bg-[color:var(--card)] inline-flex items-center gap-1 text-[11px] font-mono text-[color:var(--ink2)] whitespace-nowrap">
-              {event._hasRelativeEnd ? "见公告" : `至 ${event._e.format("YYYY/MM/DD")}`}
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M5 12h14M13 6l6 6-6 6" />
-              </svg>
-            </div>
-          ) : null}
         </div>
 
         <div className={clsx("shrink-0 w-[96px] md:w-[112px] pr-3 md:pr-5 text-right", completed && "opacity-70")}>
