@@ -15,7 +15,7 @@ import {
   fetchEndfieldEvents,
   parseEndfieldWindowText,
 } from "./endfield.js";
-import { classifyGachaEvent } from "./gacha.js";
+import { classifyGachaEvent, extractGachaFeatured, formatGachaFeaturedTitle } from "./gacha.js";
 import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
@@ -1358,4 +1358,138 @@ test("livestream codes: LIVESTREAM_CODES_DISABLED skips every code source", asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+function featuredTitle(game: Parameters<typeof extractGachaFeatured>[0], title: string, content?: string) {
+  const featured = extractGachaFeatured(game, title, content);
+  return { featured, label: formatGachaFeaturedTitle(game, featured) };
+}
+
+test("Genshin banner labels use the featured 5-star character or weapons", () => {
+  const character = featuredTitle(
+    "genshin",
+    "「煦风欢舞时」祈愿：「雪宴之锋·薇斯纳(风)」概率UP！",
+    [
+      "<p>●活动期间，限定5星角色<span>「雪宴之锋·薇斯纳(风)」</span>的祈愿获取概率将大幅提升！</p>",
+      "<p>●活动期间，4星角色「猫尾特调·迪奥娜(冰)」「机逐封秘·珐露珊(风)」「雪融有踪·重云(冰)」的祈愿获取概率将大幅提升！</p>",
+    ].join("")
+  );
+  assert.deepEqual(character.featured, { characters: ["薇斯纳"], weapons: [] });
+  assert.equal(character.label, "薇斯纳");
+
+  const weapon = featuredTitle(
+    "genshin",
+    "「神铸赋形」祈愿：「单手剑·蝶变」「法器·漩流颂歌」概率UP！",
+    [
+      "<p>●活动期间，限定5星武器「单手剑·蝶变」「法器·漩流颂歌」的祈愿获取概率将大幅提升！</p>",
+      "<p>●活动期间，限定4星武器「单手剑·新枝」「法器·凝雪沉心」的祈愿获取概率将大幅提升！</p>",
+    ].join("")
+  );
+  assert.deepEqual(weapon.featured, { characters: [], weapons: ["蝶变", "漩流颂歌"] });
+  assert.equal(weapon.label, "武器：蝶变、漩流颂歌");
+
+  // Without body text the wish title itself still names the featured character.
+  assert.equal(featuredTitle("genshin", "「涌浪叙歌」祈愿：「幽歌萦渊·沃雅妮莎(水)」概率UP！").label, "沃雅妮莎");
+});
+
+test("Star Rail banner labels list each limited 5-star character of a warp notice", () => {
+  const { featured, label } = featuredTitle(
+    "starrail",
+    "4.6版本活动跃迁（其一）",
+    [
+      "<p>限定5星角色「真珠（欢愉•冰）」与限定5星光锥「献给明日的色彩（欢愉）」跃迁成功概率限时提升，",
+      "4星角色「青雀（智识•量子）」「雪衣（毁灭•量子）」跃迁成功概率限时提升，跃迁时间为 4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;。</p>",
+      "<p>限定5星角色「绯英（欢愉•物理）」与限定5星光锥「邂逅于下一个花季（欢愉）」将会返场。</p>",
+      "<p>※联动跃迁期间，限定5星角色</p><p>「真珠（欢愉•冰）」</p><p>仅可在「沧海萃珠」角色活动跃迁中获取。</p>",
+    ].join("")
+  );
+  assert.deepEqual(featured, {
+    characters: ["真珠", "绯英"],
+    weapons: ["献给明日的色彩", "邂逅于下一个花季"],
+  });
+  assert.equal(label, "真珠、绯英");
+
+  assert.equal(
+    featuredTitle(
+      "starrail",
+      "Fate[UBW] 联动跃迁说明",
+      "<p>「万华骄芒」光锥联动跃迁期间，联动限定5星光锥「星火悄然闪耀（智识）」跃迁成功概率提升。</p>"
+    ).label,
+    "光锥：星火悄然闪耀"
+  );
+});
+
+test("ZZZ banner labels use the limited S-rank agents of a phase notice", () => {
+  const { featured, label } = featuredTitle(
+    "zzz",
+    "3.2版本限时频段（上期）",
+    [
+      "<p>活动期间，限定S级代理人[克拉蕾(电·锋御)]以及默认A级代理人[安东(电·强攻)]、[妮可(以太·支援)]的调频获取概率将大幅提升！</p>",
+      "<p>活动期间，限定S级音擎[猩红渴望(锋御)]以及默认A级音擎[旋钻机-赤轴(强攻)]的调频获取概率将大幅提升！</p>",
+      "<p>活动期间，限定S级代理人「南宫羽(以太·击破)」以及默认A级代理人[安东(电·强攻)]的调频获取概率将大幅提升！</p>",
+      "<p>※ 以上信号中，限定S级代理人与限定S级音擎均不会进入「热门卡司」常驻频段。</p>",
+    ].join("")
+  );
+  assert.deepEqual(featured, { characters: ["克拉蕾", "南宫羽"], weapons: ["猩红渴望"] });
+  assert.equal(label, "克拉蕾、南宫羽");
+});
+
+test("Wuthering Waves banner labels ignore the shared 4-star rate-ups", () => {
+  const character = featuredTitle(
+    "ww",
+    "[身赴三途]\n角色活动唤取",
+    "<p>活动期间，5星角色「景燃」，4星角色「莫特斐」、「秋水」、「渊武」唤取概率限时提升！</p><p>- 所有归属于【角色活动唤取】的活动共享5星保底机制，漂泊者未获得5星角色的保底计数将合并计算。</p>"
+  );
+  assert.deepEqual(character.featured, { characters: ["景燃"], weapons: [] });
+  assert.equal(character.label, "景燃");
+
+  const weapon = featuredTitle(
+    "ww",
+    "「千般渡」武器活动唤取",
+    "<p>活动期间，5星武器「千般渡」，4星武器「凋亡频移」、「异响空灵」、「飞逝」唤取概率限时提升！</p>"
+  );
+  assert.equal(weapon.label, "武器：千般渡");
+});
+
+test("Endfield banner labels use the rate-up 6-star operator or weapon", () => {
+  const operator = featuredTitle(
+    "endfield",
+    "冬猎 特许寻访",
+    [
+      "<p>「冬猎」特许寻访开放期间，6星干员【提弗洛斯】获取概率提升！</p>",
+      "<p>· 「冬猎」特许寻访中，全部可能出现的6星干员包括：提弗洛斯/梨诺/诀/余烬。</p>",
+      "<p>· 在每次「特许寻访」中，每累计寻访240次，将额外获得【该寻访中概率提升的6星干员的信物】×1。</p>",
+    ].join("")
+  );
+  assert.deepEqual(operator.featured, { characters: ["提弗洛斯"], weapons: [] });
+  assert.equal(operator.label, "提弗洛斯");
+
+  const mixed = featuredTitle(
+    "endfield",
+    "重构寻访 重构申领",
+    [
+      "<p>「绚丽异彩」重构寻访#1开放期间，6星干员【伊冯】获取概率提升！</p>",
+      "<p>· 「点绘申领」重构申领中，概率提升的6星武器为【艺术暴君（手铳）】。</p>",
+    ].join("")
+  );
+  assert.deepEqual(mixed.featured, { characters: ["伊冯"], weapons: ["艺术暴君"] });
+  assert.equal(mixed.label, "伊冯");
+
+  assert.equal(
+    featuredTitle("endfield", "幽寒申领", "<p>「幽寒申领」开放期间，6星武器【寒夜幽影（施术单元）】获取概率提升！</p>").label,
+    "武器：寒夜幽影"
+  );
+});
+
+test("Banner labels fall back to the notice title when nothing is featured", () => {
+  assert.equal(featuredTitle("starrail", "4.6版本活动跃迁（其一）").label, null);
+  assert.equal(
+    featuredTitle(
+      "genshin",
+      "「巡历雪境，凝铸锋锐」活动：自选邀请「奔行世间」常驻祈愿5星角色",
+      "<p>活动期间，旅行者可通过活动界面自选邀请一名「奔行世间」常驻祈愿5星角色加入队伍！</p>"
+    ).label,
+    null
+  );
+  assert.equal(featuredTitle("snowbreak", "「竹影」共鸣开启", "<p>限定角色「芬妮」</p>").label, null);
 });

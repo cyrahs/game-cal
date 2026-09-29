@@ -198,3 +198,118 @@ export function classifyGachaEvent(game: GameId, title: string, content?: string
     }
   }
 }
+
+export interface GachaFeatured {
+  characters: string[];
+  weapons: string[];
+}
+
+type FeaturedPattern = {
+  // Group 1 is the item kind word, group 2 the run of bracketed names that follows it.
+  regex: RegExp;
+  characterWords: string[];
+};
+
+// Only the top-rarity limited items are "featured"; the 4-star / A-rank rate-ups
+// are shared across banners and would just repeat on every line.
+const FEATURED_PATTERNS: Record<GameId, FeaturedPattern[]> = {
+  genshin: [
+    { regex: /限定5星(角色|武器)\s*((?:「[^」]+」[、，,\s]*)+)/g, characterWords: ["角色"] },
+  ],
+  starrail: [
+    { regex: /限定5星(角色|光锥)\s*((?:「[^」]+」[、，,\s]*)+)/g, characterWords: ["角色"] },
+  ],
+  zzz: [
+    {
+      regex: /限定S级(代理人|音擎)\s*((?:[[「【][^\]」】]+[\]」】][、，,\s]*)+)/g,
+      characterWords: ["代理人"],
+    },
+  ],
+  ww: [
+    { regex: /(?<!\d)5星(角色|武器)\s*((?:「[^」]+」[、，,\s]*)+)/g, characterWords: ["角色"] },
+  ],
+  endfield: [
+    { regex: /概率提升的6星(干员|武器)为\s*((?:【[^】]+】[、，,\s]*)+)/g, characterWords: ["干员"] },
+    { regex: /6星(干员|武器)\s*((?:【[^】]+】[、，,\s]*)+)\s*获取概率提升/g, characterWords: ["干员"] },
+  ],
+  // No banner announcement sample is available for Snowbreak yet; it keeps the notice title.
+  snowbreak: [],
+};
+
+const WEAPON_NOUN: Record<GameId, string> = {
+  genshin: "武器",
+  starrail: "光锥",
+  zzz: "音擎",
+  ww: "武器",
+  endfield: "武器",
+  snowbreak: "武器",
+};
+
+function normalizeForFeatured(input: string): string {
+  return input
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;|&#160;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitBracketedNames(run: string): string[] {
+  return [...run.matchAll(/[[「【]([^\]」】]+)[\]」】]/g)].map((m) => m[1]!);
+}
+
+function cleanFeaturedName(game: GameId, raw: string): string {
+  // Drop element / path / weapon-type annotations: 真珠（欢愉•冰）, 克拉蕾(电·锋御), 寒夜幽影（施术单元）.
+  let name = raw.replace(/\s*[（(][^（）()]*[）)]\s*$/, "").trim();
+  // Genshin prefixes an epithet or a weapon type: 雪宴之锋·薇斯纳, 单手剑·蝶变.
+  if (game === "genshin") {
+    const parts = name.split(/[·•・]/);
+    name = parts[parts.length - 1]!.trim();
+  }
+  return name;
+}
+
+function pushUnique(list: string[], name: string): void {
+  if (name && !list.includes(name)) list.push(name);
+}
+
+/**
+ * Extracts the featured (limited top-rarity) characters and weapons a banner
+ * announcement promotes. Returns empty lists when the text does not match the
+ * game's known wording, so callers can fall back to the notice title.
+ */
+export function extractGachaFeatured(game: GameId, title: string, content?: string): GachaFeatured {
+  const featured: GachaFeatured = { characters: [], weapons: [] };
+  const text = normalizeForFeatured(content ?? "");
+
+  for (const pattern of FEATURED_PATTERNS[game]) {
+    for (const match of text.matchAll(pattern.regex)) {
+      const target = pattern.characterWords.includes(match[1]!) ? featured.characters : featured.weapons;
+      for (const raw of splitBracketedNames(match[2]!)) pushUnique(target, cleanFeaturedName(game, raw));
+    }
+  }
+
+  // Genshin wish titles name the featured items directly: 「X」祈愿：「雪宴之锋·薇斯纳(风)」概率UP！
+  if (game === "genshin" && featured.characters.length === 0 && featured.weapons.length === 0) {
+    const run = /祈愿[：:]\s*((?:「[^」]+」\s*)+)/.exec(normalizeForFeatured(title))?.[1];
+    if (run) {
+      const target = classifyGachaEvent(game, title, content) === "weapon" ? featured.weapons : featured.characters;
+      for (const raw of splitBracketedNames(run)) pushUnique(target, cleanFeaturedName(game, raw));
+    }
+  }
+
+  return featured;
+}
+
+/**
+ * Short banner label built from the featured items: characters when there are
+ * any, otherwise the weapons prefixed with the game's weapon noun. Returns null
+ * when nothing was extracted.
+ */
+export function formatGachaFeaturedTitle(game: GameId, featured: GachaFeatured): string | null {
+  if (featured.characters.length > 0) return featured.characters.join("、");
+  if (featured.weapons.length > 0) return `${WEAPON_NOUN[game]}：${featured.weapons.join("、")}`;
+  return null;
+}
