@@ -629,9 +629,10 @@ function splitEventTitle(title: string): { main: string; sub: string | null } {
 function splitVersionLabel(version: GameVersionInfo): { num: string | null; name: string | null } {
   const raw = version.version.trim();
   const titleNum = version.title?.match(/(\d+\.\d+)/)?.[1] ?? null;
-  const titleName = version.title?.match(/「[^」]+」/)?.[0] ?? null;
+  // Version names are shown bare, without the 「」 the upstream titles wrap them in.
+  const titleName = version.title?.match(/「([^」]+)」/)?.[1] ?? null;
   if (/^\d+(\.\d+)*$/.test(raw)) return { num: raw, name: titleName };
-  return { num: titleNum, name: raw.match(/「[^」]+」/)?.[0] ?? (raw || null) };
+  return { num: titleNum, name: raw.match(/「([^」]+)」/)?.[1] ?? (raw || null) };
 }
 
 function toneColor(tone: RemainingTone): string {
@@ -2159,12 +2160,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <img src={meta.icon} alt={meta.name} className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
-                      <>
-                        <div className="text-[13px] font-semibold truncate">{row.name ?? row.num ?? ""}</div>
-                        {row.name && row.num ? (
-                          <div className="text-[11px] font-mono text-[color:var(--muted)]">{row.num}</div>
-                        ) : null}
-                      </>
+                      <div className="text-[13px] font-semibold truncate">
+                        {row.num ? <span className="font-mono text-[color:var(--ink2)] mr-1.5">{row.num}</span> : null}
+                        {row.name ?? ""}
+                      </div>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
                     )}
@@ -2204,12 +2203,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
-                      <>
-                        <div className="text-[13px] font-semibold truncate">{row.name ?? row.num ?? ""}</div>
-                        {row.name && row.num ? (
-                          <div className="text-[11px] font-mono text-[color:var(--muted)]">{row.num}</div>
-                        ) : null}
-                      </>
+                      <div className="text-[13px] font-semibold truncate">
+                        {row.num ? <span className="font-mono text-[color:var(--ink2)] mr-1.5">{row.num}</span> : null}
+                        {row.name ?? ""}
+                      </div>
                     ) : (
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
                     )}
