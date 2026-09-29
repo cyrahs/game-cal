@@ -728,6 +728,16 @@ function CheckIcon(props: { className?: string; strokeWidth?: number }) {
   );
 }
 
+// Marks anything ending within 24 hours, wherever its remaining time is shown.
+function ClockIcon() {
+  return (
+    <svg className="w-3 h-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
 function RowCheckbox(props: { checked: boolean; label: string; onToggle: () => void }) {
   return (
     <button
@@ -1576,12 +1586,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             className="inline-flex items-center justify-end gap-1 font-mono text-xs font-semibold whitespace-nowrap"
             style={{ color: toneColor(remaining.tone) }}
           >
-            {remaining.tone === "urgent" ? (
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 7v5l3 2" />
-              </svg>
-            ) : null}
+            {remaining.tone === "urgent" ? <ClockIcon /> : null}
             {remaining.primary}
           </div>
           <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
@@ -2255,7 +2260,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     <div className="flex-1 h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
                       <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
                     </div>
-                    <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}>
+                    <span
+                      className="inline-flex items-center gap-1 text-xs font-semibold font-mono whitespace-nowrap"
+                      style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}
+                    >
+                      {urgent ? <ClockIcon /> : null}
                       剩 {formatRemainingShort(row.remainingMs)}
                     </span>
                   </div>
@@ -2297,9 +2306,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     )}
                   </div>
                   <span
-                    className="text-xs font-semibold font-mono whitespace-nowrap"
+                    className="inline-flex items-center gap-1 text-xs font-semibold font-mono whitespace-nowrap"
                     style={{ color: !row.valid ? "var(--muted)" : urgent ? "var(--urgent)" : "var(--ink2)" }}
                   >
+                    {urgent ? <ClockIcon /> : null}
                     {row.valid ? `剩 ${formatRemainingShort(row.remainingMs)}` : "—"}
                   </span>
                 </div>
@@ -2318,7 +2328,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   // Remaining time with the end time underneath, matching the 即将结束 rows.
   const gachaRemaining = (remaining: ReturnType<typeof describeRemaining>) => (
     <span className="shrink-0 max-w-[128px] text-right">
-      <span className="block text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
+      <span className="flex items-center justify-end gap-1 text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
+        {remaining.tone === "urgent" ? <ClockIcon /> : null}
         {remaining.primary}
       </span>
       <span className="block font-mono text-[10px] text-[color:var(--muted)] truncate" title={remaining.secondary}>
