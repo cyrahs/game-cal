@@ -6,6 +6,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
+import { LiveDuration } from "../LiveDuration";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import { type RecurringActivity, type RecurringRule, usePrefs } from "../../context/prefs";
 import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "../../lib/announcement";
@@ -32,8 +33,7 @@ import {
 } from "../../lib/recurring";
 import {
   DAY_MS,
-  HOUR_MS,
-  MINUTE_MS,
+  formatDuration,
   formatFixedUtcOffset,
   formatLocalUtcOffsetLabel,
   pad2,
@@ -129,21 +129,6 @@ function formatRange(s: string, e: string | null | undefined) {
   return `${sd.format("MM/DD HH:mm")} ~ ${ed.format("MM/DD HH:mm")}`;
 }
 
-function formatRemainingTimeLabel(end: Dayjs, now: Dayjs): string | null {
-  const remainingMs = end.valueOf() - now.valueOf();
-  if (remainingMs <= 0) return null;
-
-  const remainingDays = Math.floor(remainingMs / DAY_MS);
-  const remainingHours = Math.floor(remainingMs / HOUR_MS);
-  const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
-  const showMinutes = remainingMs < HOUR_MS;
-  const showHours = remainingMs < DAY_MS && !showMinutes;
-
-  if (showMinutes) return `${remainingMinutes}m`;
-  if (showHours) return `${remainingHours}h`;
-  return `${remainingDays}d`;
-}
-
 type EventDetailVariant = "titleBanner" | "none";
 
 const EVENT_DETAIL_VARIANT_BY_GAME: Record<GameId, EventDetailVariant> = {
@@ -208,7 +193,7 @@ function EventDetail(props: {
   const shouldStrike = isEnd && !props.checked;
   const hasBanner = Boolean(props.event.banner);
   const showBanner = props.variant !== "none" && hasBanner;
-  const remainingLabel = props.event._hasRelativeEnd ? null : formatRemainingTimeLabel(props.event._e, props.now);
+  const showRemaining = !props.event._hasRelativeEnd && props.event._e.isAfter(props.now);
   const gameMeta = GAME_META[props.event.sourceGameId];
   const renderedContent = useMemo(() => {
     const raw = props.event.content;
@@ -240,7 +225,12 @@ function EventDetail(props: {
       ) : null}
       <div className="text-xs text-[color:var(--muted)] font-mono">
         {formatEventRange(props.event)}
-        {remainingLabel ? <span>{` (${remainingLabel})`}</span> : null}
+        {showRemaining ? (
+          <span>
+            {" ("}
+            <LiveDuration untilMs={props.event._e.valueOf()} />)
+          </span>
+        ) : null}
       </div>
       <div
         className={clsx(
@@ -618,16 +608,6 @@ function writeHideCompleted(value: boolean) {
   } catch {
     // ignore
   }
-}
-
-function formatRemainingShort(ms: number): string {
-  const totalMinutes = Math.max(0, Math.floor(ms / MINUTE_MS));
-  const days = Math.floor(totalMinutes / 1440);
-  const hours = Math.floor((totalMinutes % 1440) / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) return hours > 0 ? `${days}天${hours}时` : `${days}天`;
-  if (hours > 0) return minutes > 0 ? `${hours}时${minutes}分` : `${hours}时`;
-  return `${Math.max(1, minutes)}分`;
 }
 
 function formatDayLabel(d: Dayjs): string {
@@ -1465,7 +1445,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     setRecurringFormError(null);
   };
 
-  const describeRemaining = (event: AnyParsedEvent, completed: boolean): { primary: string; secondary: string; tone: RemainingTone } => {
+  // `primary` is the plain text (used for aria labels); `untilMs` marks a countdown that
+  // renders through <LiveDuration> so it ticks every second without re-rendering the page.
+  const describeRemaining = (
+    event: AnyParsedEvent,
+    completed: boolean
+  ): { primary: string; secondary: string; tone: RemainingTone; untilMs?: number } => {
     const nowMs = now.valueOf();
     const endLabel = event._hasRelativeEnd ? getRelativeEndText(event) : event._e.format("MM/DD HH:mm");
     if (completed) return { primary: "已完成", secondary: endLabel, tone: "ok" };
@@ -1475,8 +1460,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     if (event._hasRelativeEnd) return { primary: "见公告", secondary: endLabel, tone: "muted" };
     const remainingMs = event._e.valueOf() - nowMs;
     if (remainingMs <= 0) return { primary: "已结束", secondary: endLabel, tone: "muted" };
-    return { primary: `剩 ${formatRemainingShort(remainingMs)}`, secondary: endLabel, tone: remainingMs <= DAY_MS ? "urgent" : "normal" };
+    return {
+      primary: formatDuration(remainingMs),
+      secondary: endLabel,
+      tone: remainingMs <= DAY_MS ? "urgent" : "normal",
+      untilMs: event._e.valueOf(),
+    };
   };
+
+  const renderRemainingPrimary = (remaining: ReturnType<typeof describeRemaining>) =>
+    remaining.untilMs !== undefined ? <LiveDuration untilMs={remaining.untilMs} /> : remaining.primary;
 
   const barFill = (event: RowEvent, urgent: boolean): string => {
     if (event.kind === "monthlyCard") return "var(--urgent)";
@@ -1587,7 +1580,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             style={{ color: toneColor(remaining.tone) }}
           >
             {remaining.tone === "urgent" ? <ClockIcon /> : null}
-            {remaining.primary}
+            {renderRemainingPrimary(remaining)}
           </div>
           <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
         </div>
@@ -1684,9 +1677,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 min-w-0">
             <h3 className="text-sm font-bold">{group.title}</h3>
             <span className="text-xs text-[color:var(--muted)]">
-              {endLabel} 刷新 · 剩{" "}
+              {endLabel} 刷新 ·{" "}
               <span className="font-mono font-semibold text-[color:var(--ink2)]">
-                {formatRemainingShort(group.end.valueOf() - now.valueOf())}
+                <LiveDuration untilMs={group.end.valueOf()} />
               </span>
             </span>
           </div>
@@ -2265,7 +2258,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}
                     >
                       {urgent ? <ClockIcon /> : null}
-                      剩 {formatRemainingShort(row.remainingMs)}
+                      <LiveDuration untilMs={row.endMs} />
                     </span>
                   </div>
                 ) : null}
@@ -2310,7 +2303,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     style={{ color: !row.valid ? "var(--muted)" : urgent ? "var(--urgent)" : "var(--ink2)" }}
                   >
                     {urgent ? <ClockIcon /> : null}
-                    {row.valid ? `剩 ${formatRemainingShort(row.remainingMs)}` : "—"}
+                    {row.valid ? <LiveDuration untilMs={row.endMs} /> : "—"}
                   </span>
                 </div>
                 {row.valid ? (
@@ -2330,7 +2323,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     <span className="shrink-0 max-w-[128px] text-right">
       <span className="flex items-center justify-end gap-1 text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
         {remaining.tone === "urgent" ? <ClockIcon /> : null}
-        {remaining.primary}
+        {renderRemainingPrimary(remaining)}
       </span>
       <span className="block font-mono text-[10px] text-[color:var(--muted)] truncate" title={remaining.secondary}>
         {remaining.secondary}
@@ -2507,9 +2500,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const e = parseDateTime(currentVersion.end_time);
     if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
     const pct = clamp(((now.valueOf() - s.valueOf()) / (e.valueOf() - s.valueOf())) * 100, 0, 100);
-    const elapsedMs = Math.max(0, now.valueOf() - s.valueOf());
-    const remainingMs = Math.max(0, e.valueOf() - now.valueOf());
-    return { s, e, pct, elapsedMs, remainingMs, label: splitVersionLabel(currentVersion) };
+    return { s, e, pct, label: splitVersionLabel(currentVersion) };
   })();
 
   const gameHero = !isHome ? (
@@ -2539,8 +2530,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
                 <span className="font-semibold text-[color:var(--ink2)]">
-                  已进行 {formatRemainingShort(versionProgress.elapsedMs)} · 剩 {formatRemainingShort(versionProgress.remainingMs)}（
-                  {Math.round(versionProgress.pct)}%）
+                  已进行 <LiveDuration sinceMs={versionProgress.s.valueOf()} />（{Math.round(versionProgress.pct)}%）·{" "}
+                  <LiveDuration untilMs={versionProgress.e.valueOf()} /> 后结束
                 </span>
                 <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")} 结束</span>
               </div>
