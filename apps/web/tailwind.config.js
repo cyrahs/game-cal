@@ -9,7 +9,7 @@ export default {
         mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo"],
       },
       boxShadow: {
-        ink: "0 18px 60px var(--shadow-ink)",
+        ink: "0 1px 2px rgba(20, 22, 28, 0.04), 0 10px 30px var(--shadow-ink)",
       },
     },
   },

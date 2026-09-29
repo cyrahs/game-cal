@@ -5,43 +5,86 @@
 :root {
   color-scheme: light;
 
-  --bg0: #faf7f0;
-  --bg1: #f3efe6;
-  --ink: #0f172a;
-  --ink2: rgba(15, 23, 42, 0.82);
-  --muted: rgba(15, 23, 42, 0.62);
-  --card: rgba(255, 255, 255, 0.78);
-  --wash: rgba(255, 255, 255, 0.4);
-  --wash-strong: rgba(255, 255, 255, 0.7);
-  --tile: rgba(255, 255, 255, 0.5);
-  --tile-strong: rgba(255, 255, 255, 0.6);
-  --popover: rgba(255, 255, 255, 0.96);
-  --line: rgba(15, 23, 42, 0.14);
-  --accent: #0ea5e9;
+  --bg0: #f6f3ec;
+  --bg1: #f6f3ec;
+  --ink: #15171c;
+  --ink2: #3a3f4b;
+  --muted: #666b77;
+  --card: #ffffff;
+  --surface2: #faf8f3;
+  --wash: #faf8f3;
+  --wash-strong: rgba(255, 255, 255, 0.94);
+  --tile: #faf8f3;
+  --tile-strong: #f0ebe0;
+  --popover: #ffffff;
+  --line: #e7e1d4;
+  --line-soft: #f0ebe0;
+  --accent: #0a7fbf;
+  --accent-soft: #eaf4fb;
+  --on-accent: #ffffff;
   --accent2: #f97316;
-  --ring: rgba(15, 23, 42, 0.22);
-  --shadow-ink: rgba(16, 24, 40, 0.18);
+  --urgent: #c2410c;
+  --urgent-soft: #ffefe3;
+  --ok: #15803d;
+  --ok-soft: #e8f5ec;
+  --weekend: #fbf8f1;
+  --dot: #ef4444;
+  --ring: rgba(21, 23, 28, 0.22);
+  --shadow-ink: rgba(20, 22, 28, 0.06);
+  --recurring-bar: #c9c4b8;
+  --version-band: rgba(227, 191, 91, 0.1);
+
+  --game-genshin: #e3bf5b;
+  --game-genshin-ink: #7a5200;
+  --game-starrail: #a98fe6;
+  --game-starrail-ink: #5b3fb0;
+  --game-zzz: #ee9b5e;
+  --game-zzz-ink: #a2440f;
+  --game-ww: #5fc0ac;
+  --game-ww-ink: #0f6a59;
+  --game-snowbreak: #7daee3;
+  --game-snowbreak-ink: #245c99;
+  --game-endfield: #afc258;
+  --game-endfield-ink: #52650c;
 }
 
 html.dark {
   color-scheme: dark;
 
-  --bg0: #0b1020;
-  --bg1: #060913;
-  --ink: #e2e8f0;
-  --ink2: rgba(226, 232, 240, 0.82);
-  --muted: rgba(226, 232, 240, 0.66);
+  --bg0: #0d1016;
+  --bg1: #0d1016;
+  --ink: #e8ebf1;
+  --ink2: #bcc3d0;
+  --muted: #8c94a5;
+  --card: #141821;
+  --surface2: #181d28;
+  --wash: #181d28;
+  --wash-strong: rgba(20, 24, 33, 0.94);
+  --tile: #181d28;
+  --tile-strong: #1f2531;
+  --popover: #141821;
+  --line: #262d3b;
+  --line-soft: #1f2531;
+  --accent: #4cb8f0;
+  --accent-soft: #11263a;
+  --on-accent: #0d1016;
+  --urgent: #fb923c;
+  --urgent-soft: #3a2111;
+  --ok: #4ade80;
+  --ok-soft: #12301f;
+  --weekend: #161b25;
+  --dot: #f87171;
+  --ring: rgba(232, 235, 241, 0.22);
+  --shadow-ink: rgba(0, 0, 0, 0.35);
+  --recurring-bar: #4a5366;
+  --version-band: rgba(227, 191, 91, 0.06);
 
-  --card: rgba(15, 23, 42, 0.62);
-  --wash: rgba(15, 23, 42, 0.35);
-  --wash-strong: rgba(15, 23, 42, 0.55);
-  --tile: rgba(15, 23, 42, 0.45);
-  --tile-strong: rgba(15, 23, 42, 0.55);
-  --popover: rgba(2, 6, 23, 0.92);
-
-  --line: rgba(226, 232, 240, 0.12);
-  --ring: rgba(226, 232, 240, 0.2);
-  --shadow-ink: rgba(0, 0, 0, 0.55);
+  --game-genshin-ink: #f0cf72;
+  --game-starrail-ink: #c4b2f4;
+  --game-zzz-ink: #f5ae7e;
+  --game-ww-ink: #7fd6c4;
+  --game-snowbreak-ink: #9cc4ee;
+  --game-endfield-ink: #c6d77f;
 }
 
 html,
@@ -55,11 +98,7 @@ body {
    scrollbars consume layout width (e.g. Windows). */
 html {
   scrollbar-gutter: stable;
-  background:
-    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.16), transparent 60%),
-    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.14), transparent 62%),
-    linear-gradient(180deg, var(--bg0), var(--bg1));
-  background-attachment: fixed;
+  background: var(--bg0);
 }
 
 @supports not (scrollbar-gutter: stable) {
@@ -68,17 +107,9 @@ html {
   }
 }
 
-html.dark {
-  background:
-    radial-gradient(900px 520px at 10% -10%, rgba(14, 165, 233, 0.22), transparent 60%),
-    radial-gradient(680px 520px at 96% 0%, rgba(249, 115, 22, 0.18), transparent 62%),
-    linear-gradient(180deg, var(--bg0), var(--bg1));
-  background-attachment: fixed;
-}
-
 body {
   position: relative;
-  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   color: var(--ink);
   background: transparent;
 }
@@ -89,37 +120,8 @@ body {
   min-height: 100svh;
 }
 
-/* Subtle "paper" grain without an image. */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    repeating-linear-gradient(0deg,
-      rgba(15, 23, 42, 0.02),
-      rgba(15, 23, 42, 0.02) 1px,
-      transparent 1px,
-      transparent 3px);
-  mix-blend-mode: multiply;
-  opacity: 0.35;
-  z-index: 0;
-}
-
-html.dark body::after {
-  background-image:
-    repeating-linear-gradient(0deg,
-      rgba(255, 255, 255, 0.03),
-      rgba(255, 255, 255, 0.03) 1px,
-      transparent 1px,
-      transparent 3px);
-  mix-blend-mode: overlay;
-  opacity: 0.22;
-}
-
 .glass {
   background: var(--card);
-  backdrop-filter: blur(12px);
   border: 1px solid var(--line);
 }
 

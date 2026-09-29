@@ -36,3 +36,7 @@ export function parseDateTime(input: string | null | undefined): Dayjs {
   }
   return dayjs(input);
 }
+
+export function formatLocalUtcOffsetLabel(date: Date): string {
+  return formatFixedUtcOffset(-date.getTimezoneOffset());
+}

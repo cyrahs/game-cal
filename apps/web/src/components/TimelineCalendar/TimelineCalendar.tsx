@@ -2,7 +2,8 @@ import clsx from "clsx";
 import DOMPurify from "dompurify";
 import dayjs, { type Dayjs } from "dayjs";
 import isoWeek from "dayjs/plugin/isoWeek";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
@@ -10,9 +11,9 @@ import { type RecurringActivity, type RecurringRule, usePrefs } from "../../cont
 import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "../../lib/announcement";
 import { clamp } from "../../lib/color";
 import { validateCronExpression } from "../../lib/cron";
-import { isUrgentByRemainingMs, normalizeEventTitle } from "../../lib/events";
+import { normalizeEventTitle } from "../../lib/events";
 import { isCharacterTrialGachaKind, resolveGachaClassification } from "../../lib/gacha";
-import { ALL_GAME_IDS, GAME_META } from "../../lib/games";
+import { ALL_GAME_IDS, GAME_META, GAME_REGISTRY_BY_ID, gameColorVar, gameInkVar } from "../../lib/games";
 import {
   WEEKDAY_NAMES,
   computeRecurringWindow,
@@ -28,6 +29,7 @@ import {
   HOUR_MS,
   MINUTE_MS,
   formatFixedUtcOffset,
+  formatLocalUtcOffsetLabel,
   pad2,
   parseDateTime,
   toIsoWithOffset,
@@ -35,46 +37,9 @@ import {
 
 dayjs.extend(isoWeek);
 
-const HOME_TIMELINE_PAST_DAYS = 3;
+const HOME_TIMELINE_PAST_DAYS = 1;
 const HOME_TIMELINE_FUTURE_DAYS = 7;
 const RELATIVE_END_LAYOUT_YEARS = 100;
-const MONTH_LABEL_MIN_WIDTH = 36;
-const TIMELINE_BAR_TOP_OFFSET_PX = 8;
-const TIMELINE_ROW_HEIGHT_PX = 56;
-const TIMELINE_BAR_ICON_WIDTH_PX = TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX * 2;
-const TIMELINE_COMPLETE_TOGGLE_SIZE_PX = 24;
-const SHORT_BAR_TRAILING_COMPLETE_GAP_PX = 6;
-const SHORT_BAR_TITLE_POPOVER_OFFSET_PX = 6;
-const SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX = 240;
-const SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX = 12;
-const SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX =
-  SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX / 2 + SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX;
-const TIMELINE_BAR_COLORS = [
-  "#71ADDC",
-  "#B4D27C",
-  "#DEAC7C",
-  "#83ACBB",
-  "#84bab8",
-  "#D6C0A6",
-  "#93B5CF",
-  "#7ebc70",
-  "#C9A68B"
-] as const;
-
-function hashString(value: string): number {
-  let h = 0;
-  for (let i = 0; i < value.length; i++) {
-    h = (h * 31 + value.charCodeAt(i)) | 0;
-  }
-  return h >>> 0;
-}
-
-function timelineColorAt(index: number, startOffset: number): string {
-  const len = TIMELINE_BAR_COLORS.length;
-  const normalizedStart = ((startOffset % len) + len) % len;
-  const colorIndex = (index + normalizedStart) % len;
-  return TIMELINE_BAR_COLORS[colorIndex]!;
-}
 
 export type TimelineCalendarEvent = CalendarEvent & { gameId?: GameId };
 type TimelineCalendarProps =
@@ -160,28 +125,6 @@ function formatRemainingTimeLabel(end: Dayjs, now: Dayjs): string | null {
   if (showMinutes) return `${remainingMinutes}m`;
   if (showHours) return `${remainingHours}h`;
   return `${remainingDays}d`;
-}
-
-type VersionTimelineLabelParts = {
-  versionTitle: string;
-  endLabel: string;
-  remainingLabel: string;
-};
-
-function formatVersionTimelineLabel(version: GameVersionInfo, now: Dayjs): VersionTimelineLabelParts | null {
-  const end = dayjs(version.end_time);
-  if (!end.isValid()) return null;
-
-  const endLabel = end.format("MM/DD HH:mm");
-  const rawVersion = version.version.trim();
-  if (!rawVersion) return null;
-  // Floor to avoid showing "1d" when less than 24h remains.
-  const remainingDays = Math.max(0, Math.floor((end.valueOf() - now.valueOf()) / DAY_MS));
-  return {
-    versionTitle: `${rawVersion}版本`,
-    endLabel,
-    remainingLabel: `${remainingDays}d`,
-  };
 }
 
 type EventDetailVariant = "titleBanner" | "none";
@@ -333,140 +276,6 @@ function EventDetail(props: {
           </div>
         )
       ) : null}
-    </div>
-  );
-}
-
-function EventListRow(props: {
-  event: ParsedEvent;
-  checked: boolean;
-  isSelected: boolean;
-  now: Dayjs;
-  showGameMeta?: boolean;
-  showBottomDivider?: boolean;
-  onSelect: () => void;
-  onToggleCompleted: () => void;
-}) {
-  const isEnd = props.now.isAfter(props.event._e);
-  const isDimmed = props.checked || isEnd;
-  const shouldStrike = isEnd && !props.checked;
-  const gameMeta = GAME_META[props.event.sourceGameId];
-
-  return (
-    <div
-      className={clsx(
-        "p-3 flex items-start gap-3 cursor-pointer transition-colors",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--ring)]",
-        props.checked && "opacity-60",
-        props.isSelected ? "bg-indigo-50/50 dark:bg-indigo-500/10" : "hover:bg-white/50 dark:hover:bg-white/5",
-        props.showBottomDivider
-          && "relative after:pointer-events-none after:absolute after:left-0 after:right-0 after:-bottom-px after:border-b after:border-[color:var(--line)]"
-      )}
-      role="button"
-      tabIndex={0}
-      onClick={props.onSelect}
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        // Let the checkbox and the 详情 link keep their native key handling.
-        if (e.target !== e.currentTarget) return;
-        e.preventDefault();
-        props.onSelect();
-      }}
-    >
-      <div className="flex items-center self-center">
-        <input
-          type="checkbox"
-          checked={props.checked}
-          onClick={(e) => e.stopPropagation()}
-          onChange={() => props.onToggleCompleted()}
-          aria-label={`标记${props.event.title}为已完成`}
-          className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
-        />
-      </div>
-
-      <div className="min-w-0 flex-1">
-        <div
-          className={clsx(
-            "flex items-start gap-1.5 text-sm font-semibold leading-snug",
-            isDimmed && "opacity-70",
-            shouldStrike && "line-through"
-          )}
-        >
-          {props.showGameMeta ? (
-            <img
-              src={gameMeta.icon}
-              alt=""
-              aria-hidden="true"
-              className="mt-[1px] w-4 h-4 shrink-0 object-contain rounded"
-              referrerPolicy="no-referrer"
-            />
-          ) : null}
-          <span className="min-w-0 flex-1">{props.event.title}</span>
-          {props.event.redeem_codes && props.event.redeem_codes.length > 0 ? (
-            <span className="shrink-0 rounded-md px-1.5 py-[1px] text-[10px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
-              兑换码
-            </span>
-          ) : null}
-        </div>
-        <div className="mt-1 text-xs text-[color:var(--muted)] font-mono">
-          {formatEventRange(props.event)}
-        </div>
-      </div>
-
-      {props.event.linkUrl ? (
-        <a
-          className="text-xs text-[color:var(--accent)] hover:underline mt-[2px]"
-          href={props.event.linkUrl}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-        >
-          详情
-        </a>
-      ) : null}
-    </div>
-  );
-}
-
-function EventListPanel<T extends ParsedEvent>(props: {
-  title: string;
-  titleClassName?: string;
-  events: T[];
-  emptyText: string;
-  checked: boolean;
-  selectedKey: string | null;
-  now: Dayjs;
-  showGameMeta?: boolean;
-  onSelect: (eventKey: string) => void;
-  onToggleCompleted: (event: T) => void;
-}) {
-  return (
-    <div className="glass shadow-ink rounded-2xl overflow-hidden">
-      <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
-        <div className={clsx("text-sm font-semibold", props.titleClassName)}>{props.title}</div>
-      </div>
-
-      <div className="divide-y divide-[color:var(--line)]">
-        {props.events.length > 0 ? (
-          props.events.map((event, idx) => (
-            <EventListRow
-              key={event.eventKey}
-              event={event}
-              checked={props.checked}
-              isSelected={props.selectedKey === event.eventKey}
-              now={props.now}
-              showGameMeta={props.showGameMeta}
-              showBottomDivider={idx === props.events.length - 1}
-              onSelect={() => {
-                props.onSelect(event.eventKey);
-              }}
-              onToggleCompleted={() => props.onToggleCompleted(event)}
-            />
-          ))
-        ) : (
-          <div className="p-4 text-xs text-[color:var(--muted)]">{props.emptyText}</div>
-        )}
-      </div>
     </div>
   );
 }
@@ -761,6 +570,146 @@ function parseRecurringForm(form: RecurringFormState): { value: Omit<RecurringAc
   };
 }
 
+type TimelineFilter = "all" | "limited" | "recurring";
+type RowCategory = "limited" | "recurring" | "other";
+type RowEvent = ParsedUpstreamEvent | ParsedRecurringEvent | ParsedMonthlyCardEvent;
+type TimelineRowItem = { event: RowEvent; category: RowCategory; completed: boolean };
+type ResetGroup = { key: string; title: string; end: Dayjs; events: ParsedRecurringEvent[] };
+type RemainingTone = "normal" | "urgent" | "ok" | "muted";
+
+const HIDE_COMPLETED_STORAGE_KEY = "gc.timeline.hideCompleted";
+// Recurring activities sharing one refresh moment (e.g. every game's weekly reset)
+// collapse into a single block once at least this many line up.
+const RESET_GROUP_MIN_SIZE = 3;
+const FILTER_OPTIONS: Array<{ id: TimelineFilter; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "limited", label: "限时" },
+  { id: "recurring", label: "循环" },
+];
+
+function readHideCompleted(): boolean {
+  try {
+    return window.localStorage.getItem(HIDE_COMPLETED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeHideCompleted(value: boolean) {
+  try {
+    window.localStorage.setItem(HIDE_COMPLETED_STORAGE_KEY, value ? "1" : "0");
+  } catch {
+    // ignore
+  }
+}
+
+function formatRemainingShort(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / MINUTE_MS));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return hours > 0 ? `${days}天${hours}时` : `${days}天`;
+  if (hours > 0) return minutes > 0 ? `${hours}时${minutes}分` : `${hours}时`;
+  return `${Math.max(1, minutes)}分`;
+}
+
+function formatDayLabel(d: Dayjs): string {
+  return `${d.format("M月D日")} ${WEEKDAY_NAMES[d.day()]}`;
+}
+
+// 「活动名」说明文字 -> title + subtitle, so long announcement titles stay scannable.
+function splitEventTitle(title: string): { main: string; sub: string | null } {
+  const matched = /^(「[^」]+」)\s*[：:·\-—]?\s*(.*)$/.exec(title);
+  if (!matched) return { main: title, sub: null };
+  const rest = (matched[2] ?? "").trim().replace(/^(活动|玩法)[：:]\s*/, "");
+  if (!rest) return { main: title, sub: null };
+  return { main: matched[1]!, sub: rest };
+}
+
+function splitVersionLabel(version: GameVersionInfo): { num: string | null; name: string | null } {
+  const raw = version.version.trim();
+  const titleNum = version.title?.match(/(\d+\.\d+)/)?.[1] ?? null;
+  const titleName = version.title?.match(/「[^」]+」/)?.[0] ?? null;
+  if (/^\d+(\.\d+)*$/.test(raw)) return { num: raw, name: titleName };
+  return { num: titleNum, name: raw.match(/「[^」]+」/)?.[0] ?? (raw || null) };
+}
+
+function toneColor(tone: RemainingTone): string {
+  if (tone === "urgent") return "var(--urgent)";
+  if (tone === "ok") return "var(--ok)";
+  if (tone === "muted") return "var(--muted)";
+  return "var(--ink2)";
+}
+
+function CheckIcon(props: { className?: string; strokeWidth?: number }) {
+  return (
+    <svg
+      className={props.className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={props.strokeWidth ?? 3.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
+function RowCheckbox(props: { checked: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={props.checked}
+      aria-label={props.label}
+      title={props.checked ? "标记为未完成" : "标记为已完成"}
+      onClick={props.onToggle}
+      className="group w-11 h-11 shrink-0 inline-flex items-center justify-center rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+    >
+      <span
+        className={clsx(
+          "w-[18px] h-[18px] rounded-md border-[1.5px] inline-flex items-center justify-center transition-colors",
+          props.checked
+            ? "bg-[color:var(--ink)] border-[color:var(--ink)] text-[color:var(--card)]"
+            : "border-[color:var(--muted)] text-transparent group-hover:border-[color:var(--ink)]"
+        )}
+      >
+        <CheckIcon className="w-3 h-3" />
+      </span>
+    </button>
+  );
+}
+
+function SideCard(props: { title: string; meta?: string; action?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink px-4 pt-4 pb-2">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <h2 className="text-[15px] font-bold">{props.title}</h2>
+        {props.action ?? (props.meta ? <span className="text-xs text-[color:var(--muted)]">{props.meta}</span> : null)}
+      </div>
+      {props.children}
+    </section>
+  );
+}
+
+function EmptyState(props: { title: string; sub?: string; done?: boolean; action?: ReactNode }) {
+  return (
+    <div className="px-6 py-12 md:py-14 flex flex-col items-center gap-2.5 text-center">
+      {props.done ? (
+        <div className="w-12 h-12 rounded-2xl bg-[color:var(--ok-soft)] text-[color:var(--ok)] inline-flex items-center justify-center">
+          <CheckIcon className="w-6 h-6" strokeWidth={2.4} />
+        </div>
+      ) : null}
+      <div className="text-base font-bold">{props.title}</div>
+      {props.sub ? <div className="text-[13px] text-[color:var(--muted)] max-w-[420px] leading-relaxed">{props.sub}</div> : null}
+      {props.action}
+    </div>
+  );
+}
+
 export default function TimelineCalendar(props: TimelineCalendarProps) {
   const {
     prefs,
@@ -775,12 +724,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const isHome = mode === "home";
   const primaryGameId = props.gameId ?? "genshin";
   const showGameMeta = isHome;
-  const [timelineViewportWidth, setTimelineViewportWidth] = useState<number | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [selectedFrom, setSelectedFrom] = useState<"timeline" | "list" | null>(null);
-  const [isTimelineCheckboxVisible, setIsTimelineCheckboxVisible] = useState(false);
-  const [hoveredTimelineEventKey, setHoveredTimelineEventKey] = useState<string | null>(null);
   const [now, setNow] = useState(() => dayjs());
+  const [filter, setFilter] = useState<TimelineFilter>("all");
+  const [hideCompleted, setHideCompletedState] = useState<boolean>(() => readHideCompleted());
+  // Once everything in view is done the timeline collapses into an empty state;
+  // this opts back into seeing the finished rows for the rest of the session.
+  const [revealAllDone, setRevealAllDone] = useState(false);
   const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
   const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
@@ -789,9 +739,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
   const [pendingDeleteRecurringId, setPendingDeleteRecurringId] = useState<string | null>(null);
-  const [truncatedTimelineTitleIds, setTruncatedTimelineTitleIds] = useState<Record<string, true>>({});
   const gameMeta = GAME_META[primaryGameId];
-  const timelineTitle = isHome ? "近期结束" : gameMeta.name;
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
   const showGacha = prefs.timeline.showGacha;
@@ -818,17 +766,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const completedRecurringByGame = prefs.timeline.completedRecurringByGame;
   const recurringDefs = prefs.timeline.recurringActivitiesByGame[primaryGameId] ?? [];
   const homeRangeStart = useMemo(() => now.startOf("day").subtract(HOME_TIMELINE_PAST_DAYS, "day"), [now]);
-  const homeRangeEnd = useMemo(() => now.startOf("day").add(HOME_TIMELINE_FUTURE_DAYS, "day").endOf("day"), [now]);
+  // Exclusive end: midnight after the last shown day.
+  const homeRangeEnd = useMemo(() => now.startOf("day").add(HOME_TIMELINE_FUTURE_DAYS + 1, "day"), [now]);
   const monthlyCardRemainingDays = useMemo(
     () => getMonthlyCardRemainingDays(monthlyCardState, now, recurringTzOffsetMinutes, monthlyCardResetOffsetMinutes),
     [monthlyCardResetOffsetMinutes, monthlyCardState, now, recurringTzOffsetMinutes]
   );
   const isMonthlyCardUrgent = monthlyCardRemainingDays != null && monthlyCardRemainingDays <= 3;
   const recurringTzLabel = useMemo(() => formatFixedUtcOffset(recurringTzOffsetMinutes), [recurringTzOffsetMinutes]);
-  const versionTimelineLabel = useMemo(() => {
-    if (isHome || props.currentVersionState?.status !== "success" || !props.currentVersionState.data) return null;
-    return formatVersionTimelineLabel(props.currentVersionState.data, now);
-  }, [isHome, props.currentVersionState, now]);
+  const currentVersion =
+    !isHome && props.currentVersionState?.status === "success" ? props.currentVersionState.data : null;
 
   const isUpstreamCompleted = (event: ParsedUpstreamEvent) =>
     completedIdsByGame[event.sourceGameId]?.has(event.id) ?? false;
@@ -846,10 +793,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     if (event.kind === "recurring") toggleRecurringCompleted(event);
     else toggleCompleted(event);
   };
-  const hScrollRef = useRef<HTMLDivElement | null>(null);
+  const setHideCompleted = (value: boolean) => {
+    setHideCompletedState(value);
+    writeHideCompleted(value);
+  };
   const monthlyCardInputRef = useRef<HTMLInputElement | null>(null);
   const detailPanelRef = useRef<HTMLDivElement | null>(null);
-  const timelineTitleRefs = useRef(new Map<string, HTMLDivElement>());
 
   const startMonthlyCardEditing = () => {
     setMonthlyCardDraft(monthlyCardRemainingDays == null ? "" : String(monthlyCardRemainingDays));
@@ -876,36 +825,15 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   };
 
   useEffect(() => {
-    if (!selectedKey) return;
-
-    const hideTimelineCheckboxOnOutsideBarInteraction = (e: Event) => {
-      const target = e.target;
-      if (!(target instanceof Element)) return;
-      if (target.closest("[data-event-bar]")) return;
-      setIsTimelineCheckboxVisible(false);
-    };
-
-    document.addEventListener("mousedown", hideTimelineCheckboxOnOutsideBarInteraction);
-    document.addEventListener("touchstart", hideTimelineCheckboxOnOutsideBarInteraction, { passive: true });
-    document.addEventListener("pointerdown", hideTimelineCheckboxOnOutsideBarInteraction);
-
-    return () => {
-      document.removeEventListener("mousedown", hideTimelineCheckboxOnOutsideBarInteraction);
-      document.removeEventListener("touchstart", hideTimelineCheckboxOnOutsideBarInteraction);
-      document.removeEventListener("pointerdown", hideTimelineCheckboxOnOutsideBarInteraction);
-    };
-  }, [selectedKey]);
-
-  useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 60_000);
     return () => clearInterval(t);
   }, []);
 
-  // The timeline is often taller than the viewport, so a detail panel opened by
-  // clicking a bar can render entirely below the fold without the user noticing.
-  // Scroll it into view unless its header is already visible.
+  // The timeline is often taller than the viewport, so a detail panel opened from
+  // a row can render entirely below the fold. Scroll it into view unless its header
+  // is already visible.
   useEffect(() => {
-    if (!selectedKey || selectedFrom !== "timeline") return;
+    if (!selectedKey) return;
     const el = detailPanelRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -913,7 +841,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     if (headerVisible) return;
     const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     el.scrollIntoView({ behavior: prefersReducedMotion ? "auto" : "smooth", block: "start" });
-  }, [selectedKey, selectedFrom]);
+  }, [selectedKey]);
 
   useEffect(() => {
     if (!isMonthlyCardEditing) return;
@@ -925,9 +853,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   // do not briefly show controls from the previous game.
   useLayoutEffect(() => {
     setSelectedKey(null);
-    setSelectedFrom(null);
-    setIsTimelineCheckboxVisible(false);
-    setHoveredTimelineEventKey(null);
     setIsMonthlyCardEditing(false);
     setMonthlyCardDraft("");
     setIsRecurringSettingsOpen(false);
@@ -958,17 +883,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     };
   }, [pendingDeleteRecurringId]);
 
-  const toggleSelectedFromList = (eventKey: string) => {
-    // Mirror the timeline behavior: clicking the same list item again closes the detail panel.
-    if (selectedKey === eventKey && selectedFrom === "list") {
-      setSelectedKey(null);
-      setSelectedFrom(null);
-      setIsTimelineCheckboxVisible(false);
-      return;
-    }
-    setSelectedKey(eventKey);
-    setSelectedFrom("list");
-    setIsTimelineCheckboxVisible(false);
+  const toggleSelected = (eventKey: string) => {
+    setSelectedKey((prev) => (prev === eventKey ? null : eventKey));
   };
 
   const parsedUpstream = useMemo(() => {
@@ -1007,19 +923,38 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now, homeGameRankById), [homeGameRankById, parsedUpstream, now]);
 
+  // Gacha banners live in their own sidebar card instead of the activity timeline.
   const visibleUpstreamSorted = useMemo(() => {
     const nowMs = now.valueOf();
     const homeEndMs = homeRangeEnd.valueOf();
     return sortedUpstream.filter((e) => {
-      if (!showGacha && e.is_gacha) return false;
-      if (showGachaTrialsOnly && e.is_gacha && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
+      if (e.is_gacha) return false;
       if (isHome && e._hasRelativeEnd) return false;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
-  }, [homeRangeEnd, isHome, sortedUpstream, showGacha, showGachaTrialsOnly, showNotStarted, now]);
+  }, [homeRangeEnd, isHome, sortedUpstream, showNotStarted, now]);
+
+  const gachaEvents = useMemo(() => {
+    if (!showGacha) return [] as ParsedUpstreamEvent[];
+    const nowMs = now.valueOf();
+    return sortedUpstream.filter((e) => {
+      if (!e.is_gacha) return false;
+      if (showGachaTrialsOnly && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
+      if (!e._hasRelativeEnd && e._e.valueOf() <= nowMs) return false;
+      if (!isHome && !showNotStarted && nowMs < e._s.valueOf()) return false;
+      return true;
+    });
+  }, [isHome, now, showGacha, showGachaTrialsOnly, showNotStarted, sortedUpstream]);
+
+  const codeEvents = useMemo(() => {
+    const nowMs = now.valueOf();
+    return sortedUpstream.filter(
+      (e) => (e.redeem_codes?.length ?? 0) > 0 && nowMs >= e._s.valueOf() && e._e.valueOf() > nowMs
+    );
+  }, [now, sortedUpstream]);
 
   const parsedRecurring = useMemo(() => {
     const items: ParsedRecurringEvent[] = [];
@@ -1064,31 +999,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return parsedRecurring.filter((e) => e._e.valueOf() >= nowMs && e._e.valueOf() <= homeEndMs);
   }, [homeRangeEnd, isHome, now, parsedRecurring]);
 
-  const { activeUpstreamEvents, completedUpstreamEvents } = useMemo(() => {
-    const active = visibleUpstreamSorted.filter((e) => !isUpstreamCompleted(e));
-    const completed = visibleUpstreamSorted.filter((e) => isUpstreamCompleted(e));
-    return { activeUpstreamEvents: active, completedUpstreamEvents: completed };
-  }, [completedIdsByGame, visibleUpstreamSorted]);
-
-  const { activeRecurringEvents, completedRecurringEvents } = useMemo(() => {
-    if (visibleRecurring.length === 0) {
-      return { activeRecurringEvents: [] as ParsedRecurringEvent[], completedRecurringEvents: [] as ParsedRecurringEvent[] };
-    }
-    const active: ParsedRecurringEvent[] = [];
-    const completed: ParsedRecurringEvent[] = [];
-    for (const e of visibleRecurring) {
-      if (isRecurringCompleted(e)) completed.push(e);
-      else active.push(e);
-    }
-    return { activeRecurringEvents: active, completedRecurringEvents: completed };
-  }, [completedRecurringByGame, visibleRecurring]);
-
-  const timelineOnlyEvents = useMemo(() => {
-    if (!isHome) return [] as TimelineOnlyParsedEvent[];
+  const monthlyCardEvents = useMemo(() => {
+    if (!isHome) return [] as ParsedMonthlyCardEvent[];
 
     const nowMs = now.valueOf();
     const homeEndMs = homeRangeEnd.valueOf();
-    const items: TimelineOnlyParsedEvent[] = [];
+    const items: ParsedMonthlyCardEvent[] = [];
 
     for (const gameId of sourceGameIds) {
       const entry = prefs.timeline.monthlyCardByGame[gameId];
@@ -1128,280 +1044,270 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       });
     }
 
-    for (const version of props.currentVersions ?? []) {
-      if (!sourceGameIdSet.has(version.game)) continue;
-      const start = parseDateTime(version.start_time);
-      const end = parseDateTime(version.end_time);
-      if (!start.isValid() || !end.isValid() || !end.isAfter(start)) continue;
-      if (end.valueOf() < nowMs || end.valueOf() > homeEndMs) continue;
+    return items;
+  }, [homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, sourceGameIds]);
 
-      const versionLabel = version.version.trim();
-      if (!versionLabel) continue;
-
-      const event: CalendarEvent = {
-        id: `version:${version.game}:${versionLabel}`,
-        title: `${versionLabel}版本`,
-        start_time: version.start_time,
-        end_time: version.end_time,
-        content: "游戏版本",
-      };
-
-      items.push({
-        ...event,
-        _s: start,
-        _e: end,
-        _hasRelativeEnd: false,
-        kind: "version",
-        sourceGameId: version.game,
-        eventKey: makeEventKey("version", version.game, event.id),
-      });
+  const resetGroups = useMemo<ResetGroup[]>(() => {
+    if (!isHome) return [];
+    const byEnd = new Map<number, ParsedRecurringEvent[]>();
+    for (const event of visibleRecurring) {
+      const endMs = event._e.valueOf();
+      const list = byEnd.get(endMs);
+      if (list) list.push(event);
+      else byEnd.set(endMs, [event]);
     }
+    return [...byEnd.entries()]
+      .filter(([, list]) => list.length >= RESET_GROUP_MIN_SIZE)
+      .sort((a, b) => a[0] - b[0])
+      .map(([endMs, list]) => {
+        const allWeekly = list.every((event) => {
+          const def = (prefs.timeline.recurringActivitiesByGame[event.sourceGameId] ?? []).find(
+            (a) => a.id === event.recurringActivityId
+          );
+          return def?.rule.kind === "weekly";
+        });
+        return { key: String(endMs), title: allWeekly ? "每周重置" : "同时刷新", end: list[0]!._e, events: list };
+      });
+  }, [isHome, prefs.timeline.recurringActivitiesByGame, visibleRecurring]);
 
-    return sortByPhase(items, now, homeGameRankById);
-  }, [homeGameRankById, homeRangeEnd, isHome, now, prefs.timeline.monthlyCardByGame, props.currentVersions, sourceGameIds, sourceGameIdSet]);
+  const groupedRecurringKeys = useMemo(
+    () => new Set(resetGroups.flatMap((group) => group.events.map((event) => event.eventKey))),
+    [resetGroups]
+  );
 
-  const activeTimelineEvents = useMemo(() => {
-    return sortByPhase(
-      [...timelineOnlyEvents, ...activeRecurringEvents, ...activeUpstreamEvents] satisfies ParsedEvent[],
-      now,
-      homeGameRankById
-    );
-  }, [activeRecurringEvents, activeUpstreamEvents, homeGameRankById, now, timelineOnlyEvents]);
+  const allRowItems = useMemo<TimelineRowItem[]>(() => {
+    const events: RowEvent[] = [
+      ...monthlyCardEvents,
+      ...visibleRecurring.filter((event) => !groupedRecurringKeys.has(event.eventKey)),
+      ...visibleUpstreamSorted,
+    ];
+    let ordered: RowEvent[];
+    if (isHome) {
+      // Home is an agenda: strictly by end time, so the day groups stay contiguous.
+      ordered = [...events].sort(
+        (a, b) =>
+          a._e.valueOf() - b._e.valueOf() ||
+          (homeGameRankById?.get(a.sourceGameId) ?? 0) - (homeGameRankById?.get(b.sourceGameId) ?? 0) ||
+          String(a.id).localeCompare(String(b.id))
+      );
+    } else {
+      ordered = sortByPhase(events, now, homeGameRankById);
+    }
+    return ordered.map((event) => ({
+      event,
+      category: event.kind === "recurring" ? "recurring" : event.kind === "upstream" ? "limited" : "other",
+      completed: isTimelineEventCompleted(event),
+    }));
+  }, [
+    completedIdsByGame,
+    completedRecurringByGame,
+    groupedRecurringKeys,
+    homeGameRankById,
+    isHome,
+    monthlyCardEvents,
+    now,
+    visibleRecurring,
+    visibleUpstreamSorted,
+  ]);
 
-  // Color assignment must ignore completion state: it is derived from the full
-  // (completed included) ordering, so checking a bar off removes it without
-  // shifting the palette index — and thus the color — of every bar below it.
-  const timelineColorIndexByEventKey = useMemo(() => {
-    const ordered = sortByPhase(
-      [...timelineOnlyEvents, ...visibleRecurring, ...visibleUpstreamSorted] satisfies ParsedEvent[],
-      now,
-      homeGameRankById
-    );
-    const indexByKey = new Map<string, number>();
-    ordered.forEach((event, index) => indexByKey.set(event.eventKey, index));
-    return indexByKey;
-  }, [homeGameRankById, now, timelineOnlyEvents, visibleRecurring, visibleUpstreamSorted]);
+  const filteredRowItems = useMemo(
+    () => allRowItems.filter((item) => filter === "all" || item.category === filter),
+    [allRowItems, filter]
+  );
+  const filteredAllDone = filteredRowItems.length > 0 && filteredRowItems.every((item) => item.completed);
+  const displayedRowItems = useMemo(
+    () =>
+      hideCompleted || (filteredAllDone && !revealAllDone)
+        ? filteredRowItems.filter((item) => !item.completed)
+        : filteredRowItems,
+    [filteredAllDone, filteredRowItems, hideCompleted, revealAllDone]
+  );
+  const visibleResetGroups = filter === "limited" ? [] : resetGroups;
+  const filterCounts = useMemo(() => {
+    const resetCount = resetGroups.reduce((sum, group) => sum + group.events.length, 0);
+    const limited = allRowItems.filter((item) => item.category === "limited").length;
+    const recurring = allRowItems.filter((item) => item.category === "recurring").length + resetCount;
+    return { all: allRowItems.length + resetCount, limited, recurring } satisfies Record<TimelineFilter, number>;
+  }, [allRowItems, resetGroups]);
 
   const selectedEvent = useMemo(() => {
     if (selectedKey == null) return null;
     return (
-      (visibleUpstreamSorted.find((e) => e.eventKey === selectedKey) ??
+      (allRowItems.find((item) => item.event.eventKey === selectedKey)?.event ??
+        gachaEvents.find((e) => e.eventKey === selectedKey) ??
+        codeEvents.find((e) => e.eventKey === selectedKey) ??
         visibleRecurring.find((e) => e.eventKey === selectedKey) ??
-        timelineOnlyEvents.find((e) => e.eventKey === selectedKey) ??
         null) as AnyParsedEvent | null
     );
-  }, [visibleUpstreamSorted, visibleRecurring, timelineOnlyEvents, selectedKey]);
+  }, [allRowItems, codeEvents, gachaEvents, selectedKey, visibleRecurring]);
 
-  // If selected ID disappears (data refresh / filter changes), hide the detail panel.
+  // If the selected event disappears (data refresh / filter changes), hide the detail panel.
   useEffect(() => {
     if (selectedKey == null) return;
     if (selectedEvent) return;
     setSelectedKey(null);
-    setSelectedFrom(null);
-    setIsTimelineCheckboxVisible(false);
   }, [selectedEvent, selectedKey]);
 
-  const { rangeStart, rangeEnd, months: monthSegments, weeks } = useMemo(() => {
-    let start = homeRangeStart;
-    let end = homeRangeEnd;
+  const axis = useMemo(() => {
+    type Tick = { key: string; label: string; sub: string | null; startPct: number; widthPct: number; isToday: boolean; isWeekend: boolean };
+    const ticks: Tick[] = [];
 
-    if (!isHome) {
-      const baseMonth = now.startOf("month");
-      const windowStart = baseMonth.subtract(1, "month").startOf("month");
-      const windowEnd = baseMonth.add(1, "month").endOf("month");
-      const todayStart = now.startOf("day");
-      const todayEnd = now.endOf("day");
-
-      // Only consider events that overlap the maximum visible window.
-      // Timeline start/end are then derived from those visible events:
-      // - If any event starts before windowStart, show the full (n-1) month and truncate.
-      // - Otherwise start from the earliest visible event start.
-      // End follows the same rule with windowEnd / latest end.
-      const visible = activeTimelineEvents.filter(
-        (e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf()
-      );
-
-      start = windowStart;
-      end = windowEnd;
-
-      if (visible.length > 0) {
-        let minS = visible[0]!._s;
-        let maxE = visible[0]!._e;
-        let hasBeforeWindowStart = visible[0]!._s.isBefore(windowStart);
-        let hasAfterWindowEnd = visible[0]!._e.isAfter(windowEnd);
-
-        for (const e of visible) {
-          if (e._s.isBefore(minS)) minS = e._s;
-          if (e._e.isAfter(maxE)) maxE = e._e;
-          if (e._s.isBefore(windowStart)) hasBeforeWindowStart = true;
-          if (e._e.isAfter(windowEnd)) hasAfterWindowEnd = true;
-        }
-
-        start = hasBeforeWindowStart ? windowStart : minS;
-        end = hasAfterWindowEnd ? windowEnd : maxE;
+    if (isHome) {
+      const start = homeRangeStart;
+      const end = homeRangeEnd;
+      const totalMs = Math.max(1, end.valueOf() - start.valueOf());
+      const today = now.startOf("day");
+      for (let d = start; d.isBefore(end); d = d.add(1, "day")) {
+        const isToday = d.isSame(today, "day");
+        ticks.push({
+          key: d.format("YYYY-MM-DD"),
+          label: d.date() === 1 ? d.format("M/D") : String(d.date()),
+          sub: isToday ? "今天" : WEEKDAY_NAMES[d.day()]!,
+          startPct: ((d.valueOf() - start.valueOf()) / totalMs) * 100,
+          widthPct: (DAY_MS / totalMs) * 100,
+          isToday,
+          isWeekend: d.day() === 0 || d.day() === 6,
+        });
       }
-
-      // Ensure the timeline always includes "today", even if all visible events are
-      // entirely in the future or past (or only later/earlier within today).
-      // - today is the max timeline start (start cannot be after todayStart)
-      // - today is the min timeline end (end cannot be before todayEnd)
-      if (start.isAfter(todayStart)) start = todayStart;
-      if (end.isBefore(todayEnd)) end = todayEnd;
-      if (end.isBefore(start)) end = start;
+      return { rangeStart: start, rangeEnd: end, ticks };
     }
 
-    const monthSegments: Array<{ key: string; label: string; width: number }> = [];
-    const weekSegments: Array<{ key: string; label: string; tooltip: string; width: number }> = [];
-    // Start from the month containing "start".
-    let m = start.startOf("month");
+    const baseMonth = now.startOf("month");
+    const windowStart = baseMonth.subtract(1, "month").startOf("month");
+    const windowEnd = baseMonth.add(1, "month").endOf("month");
+    const todayStart = now.startOf("day");
+    const todayEnd = now.endOf("day");
+
+    // Only consider events that overlap the maximum visible window. Timeline start/end
+    // are then derived from those events: anything starting before windowStart shows the
+    // full previous month truncated, otherwise start from the earliest visible start
+    // (and the same rule for the end).
+    const visible = allRowItems
+      .map((item) => item.event)
+      .filter((e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf());
+
+    let start = windowStart;
+    let end = windowEnd;
+    if (visible.length > 0) {
+      let minS = visible[0]!._s;
+      let maxE = visible[0]!._e;
+      let hasBeforeWindowStart = false;
+      let hasAfterWindowEnd = false;
+      for (const e of visible) {
+        if (e._s.isBefore(minS)) minS = e._s;
+        if (e._e.isAfter(maxE)) maxE = e._e;
+        if (e._s.isBefore(windowStart)) hasBeforeWindowStart = true;
+        if (e._e.isAfter(windowEnd)) hasAfterWindowEnd = true;
+      }
+      start = hasBeforeWindowStart ? windowStart : minS;
+      end = hasAfterWindowEnd ? windowEnd : maxE;
+    }
+    // The timeline always includes today.
+    if (start.isAfter(todayStart)) start = todayStart;
+    if (end.isBefore(todayEnd)) end = todayEnd;
+
     const totalMs = Math.max(1, end.valueOf() - start.valueOf());
-
-    while (m.isBefore(end) || m.isSame(end, "month")) {
-      const segStart = m.isBefore(start) ? start : m;
-      const segEnd = m.endOf("month").isAfter(end) ? end : m.endOf("month");
-      const segMs = segEnd.valueOf() - segStart.valueOf();
-      const segWidth = (segMs / totalMs) * 100; // percentage
-
-      monthSegments.push({
-        key: segStart.format("YYYY-MM"),
-        label: `${segStart.format("M")}月`,
-        width: segWidth,
+    const pushTick = (key: string, label: string, segStart: Dayjs, segEnd: Dayjs) => {
+      ticks.push({
+        key,
+        label,
+        sub: null,
+        startPct: ((segStart.valueOf() - start.valueOf()) / totalMs) * 100,
+        widthPct: (Math.max(1, segEnd.valueOf() - segStart.valueOf()) / totalMs) * 100,
+        isToday: false,
+        isWeekend: false,
       });
-      m = m.add(1, "month");
-    }
-
-    let w = start.startOf("isoWeek");
-    while (w.isBefore(end) || w.isSame(end, "day")) {
-      const segStart = w.isBefore(start) ? start : w;
-      const segEnd = w.endOf("isoWeek").isAfter(end) ? end : w.endOf("isoWeek");
-      const segMs = Math.max(1, segEnd.valueOf() - segStart.valueOf());
-      const week = segStart.isoWeek();
-      const weekYear = segStart.isoWeekYear();
-
-      weekSegments.push({
-        key: `${weekYear}-W${String(week).padStart(2, "0")}`,
-        label: weekYear === now.year() ? `第${week}周` : `${weekYear}年第${week}周`,
-        tooltip: `${weekYear}年第${week}周`,
-        width: (segMs / totalMs) * 100,
-      });
-      w = w.add(1, "week");
-    }
-
-    return {
-      rangeStart: start,
-      rangeEnd: end,
-      months: monthSegments,
-      weeks: weekSegments,
     };
-  }, [activeTimelineEvents, homeRangeEnd, homeRangeStart, isHome, now]);
 
-  const timelineEvents = useMemo(() => {
-    return activeTimelineEvents.filter(
-      (e) => e._e.valueOf() > rangeStart.valueOf() && e._s.valueOf() < rangeEnd.valueOf()
-    );
-  }, [activeTimelineEvents, rangeStart, rangeEnd]);
+    if (showWeekSeparators) {
+      for (let w = start.startOf("isoWeek"); w.isBefore(end); w = w.add(1, "week")) {
+        const segStart = w.isBefore(start) ? start : w;
+        const segEnd = w.add(1, "week").isAfter(end) ? end : w.add(1, "week");
+        pushTick(`${w.isoWeekYear()}-W${w.isoWeek()}`, w.format("M/D"), segStart, segEnd);
+      }
+    } else {
+      for (let m = start.startOf("month"); m.isBefore(end); m = m.add(1, "month")) {
+        const segStart = m.isBefore(start) ? start : m;
+        const segEnd = m.add(1, "month").isAfter(end) ? end : m.add(1, "month");
+        pushTick(m.format("YYYY-MM"), `${m.format("M")}月`, segStart, segEnd);
+      }
+    }
 
-  // Start from an arbitrary (but stable) palette color per game; keep palette order unchanged.
-  const timelineBarColorStartOffset = useMemo(
-    () => hashString(isHome ? "home" : primaryGameId) % TIMELINE_BAR_COLORS.length,
-    [isHome, primaryGameId]
-  );
+    return { rangeStart: start, rangeEnd: end, ticks };
+  }, [allRowItems, homeRangeEnd, homeRangeStart, isHome, now, showWeekSeparators]);
 
-  const isTimelineEmpty = activeTimelineEvents.length === 0;
+  const rangeStartMs = axis.rangeStart.valueOf();
+  const rangeMs = Math.max(1, axis.rangeEnd.valueOf() - rangeStartMs);
+  const toPct = (ms: number) => clamp(((ms - rangeStartMs) / rangeMs) * 100, 0, 100);
+  const isNowInRange = !now.isBefore(axis.rangeStart) && !now.isAfter(axis.rangeEnd);
+  const nowPct = toPct(now.valueOf());
+  const versionBand = useMemo(() => {
+    if (!currentVersion) return null;
+    const s = parseDateTime(currentVersion.start_time);
+    const e = parseDateTime(currentVersion.end_time);
+    if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
+    const left = toPct(s.valueOf());
+    const right = toPct(e.valueOf());
+    if (right - left <= 0) return null;
+    return { left, width: right - left };
+    // toPct only depends on the axis range.
+  }, [currentVersion, rangeStartMs, rangeMs]);
 
-  // If the detail panel was opened by clicking the timeline, and that event becomes completed
-  // (so it disappears from the timeline), hide the detail panel.
-  useEffect(() => {
-    if (selectedFrom !== "timeline") return;
-    if (selectedKey == null) return;
-    if (!selectedEvent) return;
+  const homeStats = useMemo(() => {
+    if (!isHome) return null;
+    const nowMs = now.valueOf();
+    const items: Array<{ endMs: number; done: boolean }> = [
+      ...allRowItems
+        .filter((item) => item.event.kind !== "monthlyCard")
+        .map((item) => ({ endMs: item.event._e.valueOf(), done: item.completed })),
+      ...resetGroups.flatMap((group) =>
+        group.events.map((event) => ({ endMs: event._e.valueOf(), done: isRecurringCompleted(event) }))
+      ),
+    ];
+    const pending = items.filter((item) => !item.done && item.endMs > nowMs);
+    const done = items.filter((item) => item.done).length;
+    return {
+      urgent: pending.filter((item) => item.endMs - nowMs <= DAY_MS).length,
+      soon: pending.filter((item) => item.endMs - nowMs <= 2 * DAY_MS).length,
+      done,
+      total: items.length,
+    };
+  }, [allRowItems, completedRecurringByGame, isHome, now, resetGroups]);
 
-    if (!isTimelineEventCompleted(selectedEvent)) return;
-    setSelectedKey(null);
-    setSelectedFrom(null);
-  }, [completedIdsByGame, completedRecurringByGame, selectedEvent, selectedFrom, selectedKey]);
-
-  const rangeMs = useMemo(
-    () => Math.max(1, rangeEnd.valueOf() - rangeStart.valueOf()),
-    [rangeEnd, rangeStart]
-  );
-  const rangeDays = rangeMs / DAY_MS;
-  const totalWidth = timelineViewportWidth ?? rangeDays * 26;
-  const dayWidth = totalWidth / rangeDays;
-
-  const months = useMemo(() => {
-    return monthSegments.map((segment) => {
-      const segmentPx = totalWidth * (segment.width / 100);
+  const versionRows = useMemo(() => {
+    if (!isHome) return [];
+    const nowMs = now.valueOf();
+    const rows = sourceGameIds.map((gameId) => {
+      const version = (props.currentVersions ?? []).find((v) => v.game === gameId) ?? null;
+      const s = version ? parseDateTime(version.start_time) : null;
+      const e = version ? parseDateTime(version.end_time) : null;
+      const valid = Boolean(version && s?.isValid() && e?.isValid() && e.isAfter(s));
+      const endMs = valid ? e!.valueOf() : Number.POSITIVE_INFINITY;
+      const label = version ? splitVersionLabel(version) : { num: null, name: null };
       return {
-        ...segment,
-        showLabel: segmentPx >= MONTH_LABEL_MIN_WIDTH,
+        gameId,
+        valid,
+        endMs,
+        num: label.num,
+        name: label.name,
+        pct: valid ? clamp(((nowMs - s!.valueOf()) / (e!.valueOf() - s!.valueOf())) * 100, 0, 100) : 0,
+        remainingMs: valid ? endMs - nowMs : 0,
       };
     });
-  }, [monthSegments, totalWidth]);
+    return rows.sort((a, b) => a.endMs - b.endMs);
+  }, [isHome, now, props.currentVersions, sourceGameIds]);
 
-  const nowX = useMemo(() => {
-    const ms = now.valueOf() - rangeStart.valueOf();
-    return (ms / DAY_MS) * dayWidth;
-  }, [now, rangeStart, dayWidth]);
-
-  const isNowInRange = !now.isBefore(rangeStart) && !now.isAfter(rangeEnd);
-
-  const axisHeights = useMemo(() => {
-    const monthRow = 36;
-    return { monthRow, total: monthRow };
-  }, []);
-
-  useLayoutEffect(() => {
-    const updateWidth = () => {
-      const el = hScrollRef.current;
-      if (!el) return;
-
-      const containerWidth = el.clientWidth;
-      if (containerWidth <= 0) return;
-
-      setTimelineViewportWidth((prev) => {
-        if (prev != null && Math.abs(prev - containerWidth) < 0.5) return prev;
-        return containerWidth;
-      });
-    };
-
-    updateWidth();
-
-    const el = hScrollRef.current;
-    if (el && typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(updateWidth);
-      observer.observe(el);
-      return () => observer.disconnect();
+  const gachaGroups = useMemo(() => {
+    const groups = new Map<string, ParsedUpstreamEvent[]>();
+    for (const event of gachaEvents) {
+      // Home collapses a game's banners that end together (e.g. a whole phase) into one line.
+      const key = isHome ? `${event.sourceGameId}:${event._hasRelativeEnd ? "rel" : event._e.valueOf()}` : event.eventKey;
+      const list = groups.get(key);
+      if (list) list.push(event);
+      else groups.set(key, [event]);
     }
-
-    window.addEventListener("resize", updateWidth);
-    return () => {
-      window.removeEventListener("resize", updateWidth);
-    };
-  }, []);
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const nextTruncatedIds: Record<string, true> = {};
-
-      for (const [eventId, el] of timelineTitleRefs.current) {
-        if (el.scrollWidth - el.clientWidth > 1) {
-          nextTruncatedIds[eventId] = true;
-        }
-      }
-
-      setTruncatedTimelineTitleIds((prev) => {
-        const prevKeys = Object.keys(prev).sort();
-        const nextKeys = Object.keys(nextTruncatedIds).sort();
-        if (prevKeys.length === nextKeys.length && prevKeys.every((key, idx) => key === nextKeys[idx])) {
-          return prev;
-        }
-        return nextTruncatedIds;
-      });
-    });
-
-    return () => window.cancelAnimationFrame(frame);
-  }, [timelineEvents, totalWidth]);
+    return [...groups.entries()].map(([key, events]) => ({ key, events }));
+  }, [gachaEvents, isHome]);
 
   const recurringDefinitionsSorted = useMemo(() => {
     return [...recurringDefs].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
@@ -1448,715 +1354,512 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return true;
   };
 
-  return (
-    <div className="grid gap-3">
-      <div className="glass shadow-ink rounded-2xl overflow-hidden relative">
-        <div className="relative z-40 flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
-          <div className="flex items-center gap-0.5 min-w-0">
-            <div className="flex items-center gap-2 shrink-0">
-              {!isHome ? (
-                <img
-                  src={gameMeta.icon}
-                  alt=""
-                  aria-hidden="true"
-                  className="w-5 h-5 object-contain rounded-md"
-                  referrerPolicy="no-referrer"
-                />
-              ) : null}
-              <div className="text-sm font-semibold leading-none text-[color:var(--ink)]">
-                <span className="text-base leading-none">{timelineTitle}</span>
-              </div>
-            </div>
-            {!isHome && versionTimelineLabel ? (
-              <div className="text-xs text-[color:var(--muted)] min-w-0 truncate leading-none translate-y-[3px]">
-                <span>{versionTimelineLabel.versionTitle}</span>
-                <span className="font-mono"> ~ {versionTimelineLabel.endLabel} ({versionTimelineLabel.remainingLabel})</span>
-              </div>
-            ) : null}
-          </div>
-          {!isHome ? (
-            <div className="shrink-0">
-              <div className="relative z-50">
-                <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
-                  <span>月卡</span>
-                  {isMonthlyCardEditing ? (
-                    <>
-                      <input
-                        ref={monthlyCardInputRef}
-                        type="text"
-                        inputMode="numeric"
-                        value={monthlyCardDraft}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          if (/^\d*$/.test(next)) setMonthlyCardDraft(next);
-                        }}
-                        onBlur={commitMonthlyCardEditing}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            commitMonthlyCardEditing();
-                            return;
-                          }
-                          if (e.key === "Escape") {
-                            e.preventDefault();
-                            cancelMonthlyCardEditing();
-                          }
-                        }}
-                        placeholder="天数"
-                        className="w-14 px-1.5 py-0.5 rounded border border-[color:var(--line)] bg-[color:var(--popover)] text-[color:var(--ink2)] font-mono"
-                      />
-                      <span className="font-mono text-[color:var(--ink2)]">d</span>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={startMonthlyCardEditing}
-                      className={clsx(
-                        "font-mono hover:text-[color:var(--ink)]",
-                        isMonthlyCardUrgent ? "text-red-500" : "text-[color:var(--ink2)]"
-                      )}
-                      title="点击直接输入月卡剩余天数"
-                    >
-                      {monthlyCardRemainingDays == null ? "未设置" : `${monthlyCardRemainingDays}d`}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="shrink-0 invisible" aria-hidden="true">
-              <div className="relative z-50">
-                <div className="h-7 px-2 rounded-md border border-[color:var(--line)] text-xs text-[color:var(--muted)] flex items-center gap-1">
-                  <span>月卡</span>
-                  <span className="font-mono text-[color:var(--ink2)]">未设置</span>
-                </div>
-              </div>
-            </div>
+  const toggleRecurringSettings = () => {
+    if (isRecurringSettingsOpen) {
+      setIsRecurringSettingsOpen(false);
+      resetRecurringForm();
+      return;
+    }
+    setIsRecurringSettingsOpen(true);
+    setRecurringFormError(null);
+  };
+
+  const describeRemaining = (event: AnyParsedEvent, completed: boolean): { primary: string; secondary: string; tone: RemainingTone } => {
+    const nowMs = now.valueOf();
+    const endLabel = event._hasRelativeEnd ? getRelativeEndText(event) : event._e.format("MM/DD HH:mm");
+    if (completed) return { primary: "已完成", secondary: endLabel, tone: "ok" };
+    if (nowMs < event._s.valueOf()) {
+      return { primary: "未开始", secondary: `${event._s.format("MM/DD HH:mm")} 开始`, tone: "muted" };
+    }
+    if (event._hasRelativeEnd) return { primary: "见公告", secondary: endLabel, tone: "muted" };
+    const remainingMs = event._e.valueOf() - nowMs;
+    if (remainingMs <= 0) return { primary: "已结束", secondary: endLabel, tone: "muted" };
+    return { primary: `剩 ${formatRemainingShort(remainingMs)}`, secondary: endLabel, tone: remainingMs <= DAY_MS ? "urgent" : "normal" };
+  };
+
+  const eventKindLabel = (event: RowEvent): string => {
+    if (event.kind === "recurring") return "循环";
+    if (event.kind === "monthlyCard") return "月卡";
+    if ((event.redeem_codes?.length ?? 0) > 0) return "兑换码";
+    return "限时";
+  };
+
+  const barFill = (event: RowEvent, urgent: boolean): string => {
+    if (event.kind === "monthlyCard") return "var(--urgent)";
+    if (isHome) return urgent ? "var(--urgent)" : gameColorVar(event.sourceGameId);
+    if (event.kind === "recurring") return "var(--recurring-bar)";
+    return gameColorVar(event.sourceGameId);
+  };
+
+  const renderRow = (item: TimelineRowItem) => {
+    const { event, completed } = item;
+    const key = event.eventKey;
+    const isSelected = selectedKey === key;
+    const canComplete = canCompleteTimelineEvent(event);
+    const displayTitle =
+      showGachaTrialsOnly && event.kind === "upstream" && event.is_gacha && isCharacterTrialGachaKind(event.gacha_kind)
+        ? `[试用] ${event.title}`
+        : event.title;
+    const { main, sub } = splitEventTitle(displayTitle);
+    const accessibleTitle = getEventAccessibleTitle(event, showGameMeta, displayTitle);
+    const remaining = describeRemaining(event, completed);
+    const nowMs = now.valueOf();
+    const notStarted = nowMs < event._s.valueOf();
+    const isEnded = !event._hasRelativeEnd && nowMs >= event._e.valueOf();
+    const fill = barFill(event, remaining.tone === "urgent");
+    const left = toPct(event._s.valueOf());
+    const right = toPct(event._e.valueOf());
+    const truncatedStart = event._s.valueOf() < rangeStartMs;
+    const truncatedEnd = event._hasRelativeEnd || event._e.valueOf() > axis.rangeEnd.valueOf();
+    const radiusStart = truncatedStart ? "0" : "8px";
+    const radiusEnd = truncatedEnd ? "0" : "8px";
+    const elapsedPct = clamp(((nowMs - event._s.valueOf()) / Math.max(1, event._e.valueOf() - event._s.valueOf())) * 100, 0, 100);
+    const gameShort = GAME_META[event.sourceGameId].shortName;
+
+    return (
+      <div
+        key={key}
+        className={clsx(
+          "relative flex items-center min-h-[60px] md:min-h-0 md:h-[52px] transition-colors",
+          isSelected ? "bg-[color:var(--accent-soft)]" : "hover:bg-[color:var(--tile)]"
+        )}
+      >
+        <div
+          className={clsx(
+            "flex items-center gap-1 min-w-0 flex-1 md:flex-none md:w-[300px] lg:w-[320px] pl-1 md:pl-2 pr-2",
+            completed && "opacity-50"
           )}
+        >
+          {canComplete ? (
+            <RowCheckbox
+              checked={completed}
+              label={`${completed ? "取消完成" : "标记完成"}：${accessibleTitle}`}
+              onToggle={() => toggleTimelineEventCompleted(event)}
+            />
+          ) : (
+            <span className="w-11 shrink-0" aria-hidden="true" />
+          )}
+          {showGameMeta ? (
+            <img
+              src={GAME_META[event.sourceGameId].icon}
+              alt=""
+              aria-hidden="true"
+              className="w-7 h-7 shrink-0 rounded-lg object-cover mr-1.5"
+              referrerPolicy="no-referrer"
+            />
+          ) : null}
+          <button
+            type="button"
+            className="min-w-0 flex-1 text-left py-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+            aria-expanded={isSelected}
+            aria-label={`${accessibleTitle}，${remaining.primary}`}
+            onClick={() => toggleSelected(key)}
+          >
+            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")}>{main}</div>
+            <div className="mt-0.5 text-[11px] text-[color:var(--muted)] truncate">
+              {showGameMeta ? (
+                <>
+                  <span className="font-semibold" style={{ color: gameInkVar(event.sourceGameId) }}>
+                    {gameShort}
+                  </span>
+                  {" · "}
+                </>
+              ) : null}
+              {sub ?? eventKindLabel(event)}
+            </div>
+            <div className="md:hidden mt-1.5 h-1 rounded-full bg-[color:var(--line-soft)] overflow-hidden" aria-hidden="true">
+              <div className="h-full rounded-full" style={{ width: `${elapsedPct}%`, background: fill }} />
+            </div>
+          </button>
         </div>
 
-        <div ref={hScrollRef}>
-          {isTimelineEmpty ? (
-            <div className="min-h-[180px] flex items-center justify-center px-6 py-10">
-              <div className="text-sm text-[color:var(--muted)] select-none">
-                {isHome ? "未来 7 天内暂无将结束的未完成活动" : "所有活动已完成，长草中(´-ω-`)"}
-              </div>
+        <div
+          className={clsx("hidden md:block relative flex-1 self-stretch cursor-pointer", completed && "opacity-50")}
+          onClick={() => toggleSelected(key)}
+          aria-hidden="true"
+        >
+          <div
+            className="absolute top-1/2 -translate-y-1/2 h-4 box-border"
+            style={{
+              left: `${left}%`,
+              width: `max(6px, ${right - left}%)`,
+              background: notStarted ? "transparent" : fill,
+              border: notStarted ? "1.5px dashed var(--muted)" : undefined,
+              borderRadius: `${radiusStart} ${radiusEnd} ${radiusEnd} ${radiusStart}`,
+              opacity: isEnded ? 0.5 : 1,
+            }}
+          />
+          {!isHome && truncatedEnd ? (
+            <div className="absolute top-1/2 -translate-y-1/2 right-1 h-5 px-1.5 rounded-md bg-[color:var(--card)] inline-flex items-center gap-1 text-[11px] font-mono text-[color:var(--ink2)] whitespace-nowrap">
+              {event._hasRelativeEnd ? "见公告" : `至 ${event._e.format("YYYY/MM/DD")}`}
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6" />
+              </svg>
             </div>
-          ) : (
-            <div className="relative" style={{ width: totalWidth }}>
-              {/* Now line */}
-              {isNowInRange ? (
-                <div
-                  className="pointer-events-none absolute top-0 bottom-0 z-30"
-                  style={{ left: nowX }}
+          ) : null}
+        </div>
+
+        <div className={clsx("shrink-0 w-[96px] md:w-[112px] pr-3 md:pr-5 text-right", completed && "opacity-70")}>
+          <div
+            className="inline-flex items-center justify-end gap-1 font-mono text-xs font-semibold whitespace-nowrap"
+            style={{ color: toneColor(remaining.tone) }}
+          >
+            {remaining.tone === "urgent" ? (
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+            ) : null}
+            {remaining.primary}
+          </div>
+          <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderRows = () => {
+    if (!isHome) return displayedRowItems.map(renderRow);
+
+    const tomorrowStart = now.startOf("day").add(1, "day");
+    const dayAfterStart = tomorrowStart.add(1, "day");
+    const groups = [
+      { key: "today", label: "今天", sub: formatDayLabel(now), urgent: true, until: tomorrowStart.valueOf() },
+      { key: "tomorrow", label: "明天", sub: formatDayLabel(tomorrowStart), urgent: false, until: dayAfterStart.valueOf() },
+      {
+        key: "later",
+        label: `未来 ${HOME_TIMELINE_FUTURE_DAYS} 天`,
+        sub: `至 ${formatDayLabel(homeRangeEnd.subtract(1, "minute"))}`,
+        urgent: false,
+        until: Number.POSITIVE_INFINITY,
+      },
+    ];
+    let from = Number.NEGATIVE_INFINITY;
+    return groups.map((group) => {
+      const items = displayedRowItems.filter((item) => {
+        const endMs = item.event._e.valueOf();
+        return endMs >= from && endMs < group.until;
+      });
+      from = group.until;
+      if (items.length === 0) return null;
+      return (
+        <div key={group.key}>
+          <div className="relative h-9 flex items-end gap-2 px-4 md:px-5 pb-1.5 max-md:border-t max-md:border-[color:var(--line-soft)] first:border-t-0">
+            <span className="text-[13px] font-bold" style={{ color: group.urgent ? "var(--urgent)" : "var(--ink)" }}>
+              {group.label}
+            </span>
+            <span className="text-xs text-[color:var(--muted)]">{group.sub}</span>
+            <span className="text-[11px] font-mono text-[color:var(--muted)] px-1.5 rounded-md bg-[color:var(--surface2)] border border-[color:var(--line-soft)]">
+              {items.length}
+            </span>
+          </div>
+          {items.map(renderRow)}
+        </div>
+      );
+    });
+  };
+
+  const hasResetBlock = visibleResetGroups.length > 0;
+  const emptyTimeline =
+    displayedRowItems.length > 0 ? null : filteredAllDone ? (
+      <EmptyState
+        done
+        title="所有活动已完成，长草中 (´-ω-`)"
+        sub={isHome ? "未来 7 天内要结束的活动都已勾选完成，新活动上线后会自动出现在这里。" : "当前的活动都已勾选完成，新活动上线后会自动出现在这里。"}
+        action={
+          <button
+            type="button"
+            onClick={() => {
+              if (hideCompleted) setHideCompleted(false);
+              setRevealAllDone(true);
+            }}
+            className="mt-1 h-9 px-3.5 rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] text-[13px] font-semibold text-[color:var(--ink2)] hover:border-[color:var(--ink)]"
+          >
+            显示已完成的活动
+          </button>
+        }
+      />
+    ) : hasResetBlock && filter === "recurring" ? null : (
+      <EmptyState
+        title={
+          filter === "limited"
+            ? isHome
+              ? "未来 7 天内暂无将结束的限时活动"
+              : "暂无限时活动"
+            : filter === "recurring"
+              ? "暂无循环活动"
+              : isHome
+                ? "未来 7 天内暂无将结束的活动"
+                : "暂无活动"
+        }
+        sub={filter !== "all" ? "可以切换到「全部」查看其他类型的活动。" : undefined}
+      />
+    );
+
+  const renderResetGroup = (group: ResetGroup) => {
+    const doneCount = group.events.filter((event) => isRecurringCompleted(event)).length;
+    const allDone = doneCount === group.events.length;
+    const chips = hideCompleted ? group.events.filter((event) => !isRecurringCompleted(event)) : group.events;
+    const endLabel = `${formatDayLabel(group.end)} ${group.end.format("HH:mm")}`;
+    return (
+      <div key={group.key} className="border-t border-[color:var(--line)] bg-[color:var(--surface2)] px-4 md:px-5 py-4 grid gap-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 min-w-0">
+            <h3 className="text-sm font-bold">{group.title}</h3>
+            <span className="text-xs text-[color:var(--muted)]">
+              {endLabel} 刷新 · 剩{" "}
+              <span className="font-mono font-semibold text-[color:var(--ink2)]">
+                {formatRemainingShort(group.end.valueOf() - now.valueOf())}
+              </span>
+            </span>
+          </div>
+          <span className="text-xs font-mono text-[color:var(--muted)]">
+            {doneCount}/{group.events.length} 完成
+          </span>
+        </div>
+        {allDone ? (
+          <div className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl bg-[color:var(--ok-soft)] text-[color:var(--ok)] text-[13px] font-semibold">
+            <CheckIcon className="w-4 h-4 shrink-0" strokeWidth={2.6} />
+            {group.title === "每周重置" ? "本周事项已全部完成" : "这些事项已全部完成"}，下次刷新在 {endLabel}
+          </div>
+        ) : null}
+        {chips.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {chips.map((event) => {
+              const done = isRecurringCompleted(event);
+              const meta = GAME_META[event.sourceGameId];
+              return (
+                <button
+                  key={event.eventKey}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={done}
+                  aria-label={`${done ? "取消完成" : "标记完成"}：${meta.name} · ${event.title}`}
+                  onClick={() => toggleRecurringCompleted(event)}
+                  className={clsx(
+                    "h-9 pl-1.5 pr-3 rounded-xl border inline-flex items-center gap-2 text-[13px] transition",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                    done
+                      ? "border-[color:var(--line-soft)] bg-transparent opacity-60"
+                      : "border-[color:var(--line)] bg-[color:var(--card)] hover:border-[color:var(--ink)]"
+                  )}
                 >
-                  <div className="w-[2px] h-full bg-indigo-500/80" />
-                </div>
-              ) : null}
+                  <img src={meta.icon} alt="" aria-hidden="true" className="w-[22px] h-[22px] rounded-md object-cover" referrerPolicy="no-referrer" />
+                  <span className={clsx(done && "line-through")}>
+                    <span className="font-semibold" style={{ color: gameInkVar(event.sourceGameId) }}>
+                      {meta.shortName}
+                    </span>{" "}
+                    {event.title}
+                  </span>
+                  {done ? <CheckIcon className="w-3.5 h-3.5 text-[color:var(--ok)]" strokeWidth={3} /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
-              {/* Sticky axis */}
-              <div
-                className="sticky top-0 z-20 bg-[color:var(--wash-strong)] backdrop-blur border-b border-[color:var(--line)]"
-              >
-                <div
-                  className="flex"
-                  style={{ height: axisHeights.monthRow, width: totalWidth }}
+  const timelineCard = (
+    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 md:px-5 py-3 md:py-0 md:h-16 border-b border-[color:var(--line)]">
+        <div className="flex items-baseline gap-2.5 min-w-0">
+          <h2 className="text-base md:text-[17px] font-bold">{isHome ? "即将结束" : "活动"}</h2>
+          <span className="hidden sm:inline text-[13px] text-[color:var(--muted)] truncate">
+            {isHome ? `未来 ${HOME_TIMELINE_FUTURE_DAYS} 天 · 按结束时间` : `${filterCounts.all} 项 · 按结束时间`}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div role="group" aria-label="筛选" className="flex p-[3px] rounded-[10px] bg-[color:var(--surface2)] border border-[color:var(--line)]">
+            {FILTER_OPTIONS.map((option) => {
+              const selected = filter === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => setFilter(option.id)}
+                  className={clsx(
+                    "h-8 md:h-[30px] px-2.5 md:px-3 rounded-lg text-[13px] font-semibold transition",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                    selected
+                      ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]"
+                      : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                  )}
                 >
-                  {months.map((m, idx) => (
-                    <div
-                      key={m.key}
-                      className={clsx(
-                        "flex items-center justify-center overflow-hidden text-sm font-semibold text-[color:var(--ink2)]",
-                        idx < months.length - 1 && "border-r border-[color:var(--line)]"
-                      )}
-                      style={{ width: `${m.width}%` }}
-                    >
-                      {m.showLabel ? <span className="whitespace-nowrap">{m.label}</span> : null}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Bars */}
-              <div className="relative">
-                {/* Month separators */}
-                {!showWeekSeparators ? (
-                  <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
-                    {months.map((m, idx) => (
-                      <div
-                        key={m.key}
-                        className={clsx(
-                          idx < months.length - 1 && "border-r border-[color:var(--line)]"
-                        )}
-                        style={{ width: `${m.width}%` }}
-                      />
-                    ))}
-                  </div>
-                ) : null}
-                {showWeekSeparators ? (
-                  <div className="absolute inset-0 pointer-events-none flex" style={{ width: totalWidth }}>
-                    {weeks.map((w, idx) => (
-                      <div
-                        key={`week-separator-${w.key}`}
-                        className={clsx(
-                          idx < weeks.length - 1 && "border-r border-[color:var(--line)]"
-                        )}
-                        style={{ width: `${w.width}%` }}
-                      />
-                    ))}
-                  </div>
-                ) : null}
-
-                {timelineEvents.map((e, idx) => {
-                  const eventKey = e.eventKey;
-                  const displayTitle =
-                    showGachaTrialsOnly &&
-                    e.kind === "upstream" &&
-                    e.is_gacha &&
-                    isCharacterTrialGachaKind(e.gacha_kind)
-                      ? `[试用] ${e.title}`
-                      : e.title;
-                  const accessibleTitle = getEventAccessibleTitle(e, showGameMeta, displayTitle);
-                  const sourceGameIcon = GAME_META[e.sourceGameId].icon;
-                  const isSelected = selectedKey === eventKey;
-                  const isHovered = hoveredTimelineEventKey === eventKey;
-                  const canComplete = canCompleteTimelineEvent(e);
-                  const showCompleteToggle =
-                    canComplete && ((isSelected && selectedFrom === "timeline" && isTimelineCheckboxVisible) || isHovered);
-                  const isEnd = now.isAfter(e._e);
-                  const hasRelativeDeadline = e._hasRelativeEnd;
-                  const remainingMs = Math.max(0, e._e.valueOf() - now.valueOf());
-                  const remainingDays = Math.floor(remainingMs / DAY_MS);
-                  const remainingHours = Math.floor(remainingMs / HOUR_MS);
-                  const remainingMinutes = Math.floor(remainingMs / MINUTE_MS);
-                  const remainingDayHours = Math.floor((remainingMs % DAY_MS) / HOUR_MS);
-                  const showMinutes = !isEnd && remainingMs < HOUR_MS;
-                  const showHours = !isEnd && remainingMs < DAY_MS && !showMinutes;
-                  const showHomeDayHours = isHome && !isEnd && !showMinutes && !showHours;
-                  const remainingLabel = showMinutes
-                    ? `${remainingMinutes}分`
-                    : showHours
-                      ? `${remainingHours}h`
-                      : showHomeDayHours
-                        ? `${remainingDays}d${remainingDayHours}h`
-                        : `${remainingDays}d`;
-                  const remainingAriaLabel = showMinutes
-                    ? `剩余${remainingMinutes}分钟`
-                    : showHours
-                      ? `剩余${remainingHours}小时`
-                      : showHomeDayHours
-                        ? `剩余${remainingDays}天${remainingDayHours}小时`
-                        : `剩余${remainingDays}天`;
-                  const urgentKind = e.kind === "recurring" ? "recurring" : "upstream";
-                  const isUrgent = !isHome && isUrgentByRemainingMs(urgentKind, remainingMs);
-
-                  const isTruncatedStart = e._s.isBefore(rangeStart);
-                  const isTruncatedEnd = hasRelativeDeadline || e._e.isAfter(rangeEnd);
-
-                  const startMs = Math.max(e._s.valueOf(), rangeStart.valueOf());
-                  const endMs = Math.min(e._e.valueOf(), rangeEnd.valueOf());
-
-                  const left = ((startMs - rangeStart.valueOf()) / DAY_MS) * dayWidth;
-                  const width = Math.max(6, ((endMs - startMs) / DAY_MS) * dayWidth);
-                  const showCountdownOnly = !hasRelativeDeadline && width <= 88;
-                  const showBarIcon = showGameMeta && width >= 32;
-                  const barIconWidth = showBarIcon ? Math.min(TIMELINE_BAR_ICON_WIDTH_PX, width) : 0;
-                  const hasTruncatedTitle = Boolean(truncatedTimelineTitleIds[eventKey]);
-                  const hasHiddenOrTruncatedTitle = showCountdownOnly || hasTruncatedTitle;
-                  const showBarTitlePopover = hasHiddenOrTruncatedTitle && (showCompleteToggle || isHovered);
-                  const countdownPaddingX = showCountdownOnly ? (width <= 56 ? 4 : 8) : 0;
-                  const countdownUnits = Array.from(remainingLabel).reduce(
-                    (sum, ch) => sum + (/[^\x00-\x7F]/.test(ch) ? 1 : 0.62),
-                    0
-                  );
-                  const countdownAvailableWidth = Math.max(0, width - countdownPaddingX * 2);
-                  const countdownFontSize = showCountdownOnly
-                    ? clamp((countdownAvailableWidth / Math.max(countdownUnits, 1)) * 0.95, 10, 13)
-                    : 13;
-                  const preferTrailingCompleteToggle = canComplete && showCountdownOnly;
-                  const canPlaceTrailingCompleteAfter =
-                    left + width + SHORT_BAR_TRAILING_COMPLETE_GAP_PX + TIMELINE_COMPLETE_TOGGLE_SIZE_PX <= totalWidth;
-                  const canPlaceTrailingCompleteBefore =
-                    left >= SHORT_BAR_TRAILING_COMPLETE_GAP_PX + TIMELINE_COMPLETE_TOGGLE_SIZE_PX;
-                  const placeCompleteToggleOutside =
-                    preferTrailingCompleteToggle && (canPlaceTrailingCompleteAfter || canPlaceTrailingCompleteBefore);
-                  const placeCompleteToggleBefore =
-                    placeCompleteToggleOutside && !canPlaceTrailingCompleteAfter && canPlaceTrailingCompleteBefore;
-                  const completeChipSize = placeCompleteToggleOutside
-                    ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX
-                    : showCountdownOnly
-                      ? clamp(width - 4, 8, TIMELINE_COMPLETE_TOGGLE_SIZE_PX)
-                      : TIMELINE_COMPLETE_TOGGLE_SIZE_PX;
-                  const interactionLeft = placeCompleteToggleBefore
-                    ? left - TIMELINE_COMPLETE_TOGGLE_SIZE_PX - SHORT_BAR_TRAILING_COMPLETE_GAP_PX
-                    : left;
-                  const interactionWidth = placeCompleteToggleOutside
-                    ? width + TIMELINE_COMPLETE_TOGGLE_SIZE_PX + SHORT_BAR_TRAILING_COMPLETE_GAP_PX
-                    : width;
-                  const barOffsetX = placeCompleteToggleBefore
-                    ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX + SHORT_BAR_TRAILING_COMPLETE_GAP_PX
-                    : 0;
-                  const outsideCompleteToggleLeft = placeCompleteToggleBefore
-                    ? 0
-                    : width + SHORT_BAR_TRAILING_COMPLETE_GAP_PX;
-                  // Only countdown-only (very short) bars still overlay the toggle on the
-                  // countdown; wide bars show the toggle beside it so the time stays readable.
-                  const hideCountdownForCompleteToggle =
-                    showCompleteToggle && !placeCompleteToggleOutside && showCountdownOnly;
-                  const completeIconSize = clamp(completeChipSize * 0.58, 6, 14);
-                  const shortBarTitleCenterX = left + width / 2;
-                  const shortBarTitleAlignLeft = shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
-                  const shortBarTitleAlignRight =
-                    totalWidth - shortBarTitleCenterX < SHORT_BAR_TITLE_POPOVER_SAFE_CENTER_PX;
-                  const showShortBarTitleBelow = idx === 0;
-                  const shortBarTitleTop = showShortBarTitleBelow
-                    ? TIMELINE_ROW_HEIGHT_PX - TIMELINE_BAR_TOP_OFFSET_PX + SHORT_BAR_TITLE_POPOVER_OFFSET_PX
-                    : TIMELINE_BAR_TOP_OFFSET_PX;
-                  const shortBarTitleTranslateY = showBarTitlePopover
-                    ? showShortBarTitleBelow
-                      ? "0"
-                      : `calc(-100% - ${SHORT_BAR_TITLE_POPOVER_OFFSET_PX}px)`
-                    : showShortBarTitleBelow
-                      ? "-4px"
-                      : "calc(-100% - 2px)";
-                  const shortBarTitlePopoverStyle = shortBarTitleAlignLeft
-                    ? {
-                        top: `${shortBarTitleTop}px`,
-                        left: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
-                        maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
-                        transform: `translateY(${shortBarTitleTranslateY})`,
-                      }
-                    : shortBarTitleAlignRight
-                      ? {
-                          top: `${shortBarTitleTop}px`,
-                          right: `${SHORT_BAR_TITLE_POPOVER_EDGE_PADDING_PX}px`,
-                          maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
-                          transform: `translateY(${shortBarTitleTranslateY})`,
-                        }
-                      : {
-                          top: `${shortBarTitleTop}px`,
-                          left: `${shortBarTitleCenterX}px`,
-                          maxWidth: `${SHORT_BAR_TITLE_POPOVER_MAX_WIDTH_PX}px`,
-                          transform: `translate(-50%, ${shortBarTitleTranslateY})`,
-                        };
-
-                  const barColor = timelineColorAt(
-                    timelineColorIndexByEventKey.get(eventKey) ?? idx,
-                    timelineBarColorStartOffset
-                  );
-
-                  // Determine border radius based on truncation
-                  let borderRadius = "0.75rem"; // rounded-xl
-                  if (isTruncatedStart && isTruncatedEnd) {
-                    borderRadius = "0";
-                  } else if (isTruncatedStart) {
-                    borderRadius = "0 0.75rem 0.75rem 0";
-                  } else if (isTruncatedEnd) {
-                    borderRadius = "0.75rem 0 0 0.75rem";
-                  }
-
-                  const activateBar = () => {
-                    if (!canComplete) return;
-                    // Activating the same timeline event again should hide the detail panel.
-                    if (selectedKey === eventKey && selectedFrom === "timeline") {
-                      setSelectedKey(null);
-                      setSelectedFrom(null);
-                      setIsTimelineCheckboxVisible(false);
-                      return;
-                    }
-                    setSelectedKey(eventKey);
-                    setSelectedFrom("timeline");
-                    setIsTimelineCheckboxVisible(true);
-                  };
-
-                  return (
-                    <div
-                      key={eventKey}
-                      className={clsx(
-                        "relative border-b border-[color:var(--line)]",
-                        "hover:bg-white/20 dark:hover:bg-transparent"
-                      )}
-                      style={{ height: TIMELINE_ROW_HEIGHT_PX }}
-                    >
-                      {hasHiddenOrTruncatedTitle ? (
-                        <div
-                          className={clsx(
-                            "pointer-events-none absolute z-30 px-3 py-2 rounded-xl border border-[color:var(--line)]",
-                            "bg-[color:var(--popover)] text-[13px] text-[color:var(--ink)] shadow-[0_12px_30px_var(--shadow-ink)]",
-                            "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                            showBarTitlePopover ? "opacity-100" : "opacity-0"
-                          )}
-                          style={shortBarTitlePopoverStyle}
-                          aria-hidden="true"
-                        >
-                          <div className="flex items-start gap-1.5 leading-5">
-                            {showGameMeta ? (
-                              <img
-                                src={sourceGameIcon}
-                                alt=""
-                                aria-hidden="true"
-                                className="mt-0.5 w-4 h-4 shrink-0 object-contain rounded"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : null}
-                            <span
-                              className="min-w-0 overflow-hidden break-words"
-                              style={{
-                                display: "-webkit-box",
-                                WebkitBoxOrient: "vertical",
-                                WebkitLineClamp: 2,
-                              }}
-                            >
-                              {displayTitle}
-                            </span>
-                          </div>
-                        </div>
-                      ) : null}
-                      <div
-                        className="absolute top-2 bottom-2 z-10 overflow-visible"
-                        style={{ left: interactionLeft, width: interactionWidth }}
-                        onMouseEnter={() => setHoveredTimelineEventKey(eventKey)}
-                        onMouseLeave={() => setHoveredTimelineEventKey(null)}
-                      >
-                        <div
-                          data-event-bar
-                          className={clsx(
-                            "absolute inset-y-0 py-2 overflow-hidden",
-                            "flex items-center",
-                            showCountdownOnly ? "justify-center" : showBarIcon ? "pr-3" : "px-3",
-                            "z-10 text-[13px] leading-5 shadow-sm",
-                            canComplete ? "cursor-pointer" : "cursor-default",
-                            "transition-[box-shadow,filter] duration-150 ease-out",
-                            "hover:shadow-md hover:brightness-105",
-                            "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                            isSelected
-                              ? "ring-2 ring-[color:var(--ring)]"
-                              : "ring-0 hover:ring-2 hover:ring-[color:var(--ring)]"
-                          )}
-                          style={{
-                            left: barOffsetX,
-                            width,
-                            backgroundColor: barColor,
-                            opacity: isEnd ? 0.55 : 0.95,
-                            borderRadius,
-                            ...(showCountdownOnly ? { paddingLeft: countdownPaddingX, paddingRight: countdownPaddingX } : null),
-                          }}
-                          role={canComplete ? "button" : undefined}
-                          tabIndex={canComplete ? 0 : undefined}
-                          aria-label={
-                            canComplete
-                              ? hasRelativeDeadline
-                                ? accessibleTitle
-                                : `${accessibleTitle}（${remainingAriaLabel}）`
-                              : undefined
-                          }
-                          onClick={activateBar}
-                          onKeyDown={(ev) => {
-                            if (!canComplete) return;
-                            if (ev.key !== "Enter" && ev.key !== " ") return;
-                            if (ev.target !== ev.currentTarget) return;
-                            ev.preventDefault();
-                            activateBar();
-                          }}
-                        >
-                          {showBarIcon ? (
-                            <img
-                              src={sourceGameIcon}
-                              alt=""
-                              aria-hidden="true"
-                              className="pointer-events-none absolute left-0 top-0 bottom-0 z-0 h-full object-cover"
-                              style={{ width: barIconWidth }}
-                              referrerPolicy="no-referrer"
-                            />
-                          ) : null}
-                          {!showCountdownOnly ? (
-                            <div
-                              className="relative z-10 min-w-0 flex-1"
-                              style={showBarIcon ? { marginLeft: barIconWidth + 8 } : undefined}
-                            >
-                              <div
-                                ref={(node) => {
-                                  if (node) {
-                                    timelineTitleRefs.current.set(eventKey, node);
-                                  } else {
-                                    timelineTitleRefs.current.delete(eventKey);
-                                  }
-                                }}
-                                className={clsx(
-                                  "text-slate-900 font-medium bg-transparent gc-fade-truncate-1",
-                                  isEnd && "line-through"
-                                )}
-                              >
-                                {displayTitle}
-                              </div>
-                            </div>
-                          ) : null}
-                          {hasRelativeDeadline ? null : (
-                            <div
-                              className={clsx(
-                                "relative z-10",
-                                showCountdownOnly ? "w-full min-w-0" : "shrink-0 ml-2 flex items-center"
-                              )}
-                              style={
-                                showCountdownOnly && showBarIcon
-                                  ? { marginLeft: barIconWidth, width: Math.max(0, width - barIconWidth) }
-                                  : undefined
-                              }
-                            >
-                              {!placeCompleteToggleOutside && showCountdownOnly ? (
-                                <button
-                                  type="button"
-                                  className={clsx(
-                                    // The bar is too short for both countdown and toggle: overlay the
-                                    // toggle centered, sized to the chip only (not the whole bar).
-                                    "absolute inline-flex items-center justify-center",
-                                    "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
-                                    "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                                    showCompleteToggle
-                                      ? "opacity-100 scale-100 pointer-events-auto"
-                                      : "opacity-0 scale-95 pointer-events-none"
-                                  )}
-                                  style={{ width: `${completeChipSize}px`, height: `${completeChipSize}px` }}
-                                  onClick={(ev) => {
-                                    ev.stopPropagation();
-                                    if (!canComplete) return;
-                                    toggleTimelineEventCompleted(e);
-                                  }}
-                                  aria-label={`标记${accessibleTitle}为已完成`}
-                                  title="标记为已完成"
-                                  aria-hidden={!showCompleteToggle}
-                                  tabIndex={showCompleteToggle ? 0 : -1}
-                                  disabled={!showCompleteToggle}
-                                >
-                                  <span
-                                    className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                                    style={{ width: "100%", height: "100%" }}
-                                  >
-                                    <svg
-                                      className="flex-none"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="3"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
-                                      aria-hidden="true"
-                                    >
-                                      <path d="M5 12.5l4.2 4.2L19 7" />
-                                    </svg>
-                                  </span>
-                                </button>
-                              ) : null}
-                              {!placeCompleteToggleOutside && !showCountdownOnly ? (
-                                <button
-                                  type="button"
-                                  className={clsx(
-                                    // Wide bars keep the countdown readable: the toggle slides in
-                                    // beside it instead of covering it.
-                                    "inline-flex shrink-0 items-center justify-center overflow-hidden",
-                                    "transition-all duration-200 ease-out motion-reduce:transition-none",
-                                    showCompleteToggle
-                                      ? "opacity-100 scale-100 mr-1.5 pointer-events-auto"
-                                      : "opacity-0 scale-90 mr-0 pointer-events-none"
-                                  )}
-                                  style={{
-                                    width: showCompleteToggle ? TIMELINE_COMPLETE_TOGGLE_SIZE_PX : 0,
-                                    height: TIMELINE_COMPLETE_TOGGLE_SIZE_PX,
-                                  }}
-                                  onClick={(ev) => {
-                                    ev.stopPropagation();
-                                    if (!canComplete) return;
-                                    toggleTimelineEventCompleted(e);
-                                  }}
-                                  aria-label={`标记${accessibleTitle}为已完成`}
-                                  title="标记为已完成"
-                                  aria-hidden={!showCompleteToggle}
-                                  tabIndex={showCompleteToggle ? 0 : -1}
-                                  disabled={!showCompleteToggle}
-                                >
-                                  <span
-                                    className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                                    style={{
-                                      width: `${TIMELINE_COMPLETE_TOGGLE_SIZE_PX}px`,
-                                      height: `${TIMELINE_COMPLETE_TOGGLE_SIZE_PX}px`,
-                                    }}
-                                  >
-                                    <svg
-                                      className="flex-none"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="3"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
-                                      aria-hidden="true"
-                                    >
-                                      <path d="M5 12.5l4.2 4.2L19 7" />
-                                    </svg>
-                                  </span>
-                                </button>
-                              ) : null}
-                              <div
-                                className={clsx(
-                                  "leading-none font-mono tabular-nums font-medium",
-                                  "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                                  showCountdownOnly
-                                    ? "w-full min-w-0 text-center whitespace-nowrap"
-                                    : "text-[13px]",
-                                  isUrgent ? "text-red-700" : "text-slate-800/80",
-                                  hideCountdownForCompleteToggle
-                                    ? "opacity-0 scale-95 -translate-y-0.5 pointer-events-none"
-                                    : "opacity-100 scale-100 translate-y-0"
-                                )}
-                                style={showCountdownOnly ? { fontSize: `${countdownFontSize}px` } : undefined}
-                                aria-label={remainingAriaLabel}
-                                aria-hidden={hideCountdownForCompleteToggle}
-                              >
-                                {remainingLabel}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        {placeCompleteToggleOutside ? (
-                          <button
-                            data-event-bar
-                            type="button"
-                            className={clsx(
-                              "absolute top-1/2 z-20 inline-flex items-center justify-center -translate-y-1/2",
-                              "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
-                              showCompleteToggle
-                                ? "opacity-100 scale-100 pointer-events-auto"
-                                : "opacity-0 scale-95 pointer-events-none"
-                            )}
-                            style={{
-                              left: outsideCompleteToggleLeft,
-                              width: `${completeChipSize}px`,
-                              height: `${completeChipSize}px`,
-                            }}
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              if (!canComplete) return;
-                              toggleTimelineEventCompleted(e);
-                            }}
-                            aria-label={`标记${accessibleTitle}为已完成`}
-                            title="标记为已完成"
-                            aria-hidden={!showCompleteToggle}
-                            tabIndex={showCompleteToggle ? 0 : -1}
-                            disabled={!showCompleteToggle}
-                          >
-                            <span
-                              className="inline-flex flex-none items-center justify-center rounded-full border border-slate-900/25 bg-white/55 text-slate-900 shadow-sm transition-colors hover:bg-white/75"
-                              style={{ width: "100%", height: "100%" }}
-                            >
-                              <svg
-                                className="flex-none"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="3"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                style={{ width: `${completeIconSize}px`, height: `${completeIconSize}px` }}
-                                aria-hidden="true"
-                              >
-                                <path d="M5 12.5l4.2 4.2L19 7" />
-                              </svg>
-                            </span>
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+                  {option.label}
+                  <span className="hidden sm:inline ml-1 font-mono font-medium opacity-70">{filterCounts[option.id]}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            aria-pressed={hideCompleted}
+            onClick={() => setHideCompleted(!hideCompleted)}
+            title={hideCompleted ? "显示已完成" : "隐藏已完成"}
+            className={clsx(
+              "h-9 px-2.5 md:px-3 rounded-[10px] border border-[color:var(--line)] bg-[color:var(--card)] text-[13px] font-medium",
+              "inline-flex items-center gap-1.5 text-[color:var(--ink2)] hover:border-[color:var(--ink)]",
+              "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+            )}
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {hideCompleted ? (
+                <>
+                  <path d="M3 3l18 18" />
+                  <path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6" />
+                  <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                </>
+              ) : (
+                <>
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+                  <circle cx="12" cy="12" r="3" />
+                </>
+              )}
+            </svg>
+            <span className="hidden sm:inline">{hideCompleted ? "显示已完成" : "隐藏已完成"}</span>
+          </button>
         </div>
       </div>
 
-      {selectedEvent ? (
-        <div ref={detailPanelRef} className="glass shadow-ink rounded-2xl overflow-hidden scroll-mt-3">
-          <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)]">
-            <div className="text-sm font-semibold">活动详情</div>
-            {canCompleteTimelineEvent(selectedEvent) ? (
-              <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none">
-                <span>已完成</span>
-                <input
-                  type="checkbox"
-                  checked={isTimelineEventCompleted(selectedEvent)}
-                  onChange={() => toggleTimelineEventCompleted(selectedEvent)}
-                  className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-indigo-600 focus:ring-indigo-500 cursor-pointer"
+      {emptyTimeline ??
+        (displayedRowItems.length > 0 ? (
+          <div className="relative">
+            {/* Grid, weekend shading, version band and the "now" line sit behind the rows. */}
+            <div className="hidden md:block absolute inset-y-0 left-[300px] lg:left-[320px] right-[112px] pointer-events-none" aria-hidden="true">
+              {versionBand ? (
+                <div className="absolute inset-y-0" style={{ left: `${versionBand.left}%`, width: `${versionBand.width}%`, background: "var(--version-band)" }} />
+              ) : null}
+              {axis.ticks.map((tick) => (
+                <div
+                  key={tick.key}
+                  className="absolute inset-y-0 border-l border-[color:var(--line-soft)]"
+                  style={{
+                    left: `${tick.startPct}%`,
+                    width: `${tick.widthPct}%`,
+                    background: tick.isToday ? "var(--accent-soft)" : tick.isWeekend ? "var(--weekend)" : undefined,
+                  }}
                 />
-              </label>
-            ) : null}
-          </div>
-          <EventDetail
-            event={selectedEvent}
-            checked={isTimelineEventCompleted(selectedEvent)}
-            now={now}
-            variant={EVENT_DETAIL_VARIANT_BY_GAME[selectedEvent.sourceGameId]}
-            showGameMeta={showGameMeta}
-          />
-        </div>
-      ) : null}
-
-      <div className="grid gap-3 md:grid-cols-2 md:items-start">
-        <EventListPanel
-          title="限时活动"
-          events={activeUpstreamEvents}
-          emptyText={isHome ? "未来 7 天内暂无未完成限时活动" : "暂无未完成活动"}
-          checked={false}
-          selectedKey={selectedKey}
-          now={now}
-          showGameMeta={showGameMeta}
-          onSelect={toggleSelectedFromList}
-          onToggleCompleted={(event) => toggleCompleted(event)}
-        />
-
-        <div className="glass shadow-ink rounded-2xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--wash)] flex items-center justify-between gap-3">
-            <div className="flex items-end gap-2 min-w-0">
-              <div className="text-sm font-semibold">循环活动</div>
-              {!isHome && editingRecurringId ? (
-                <div className="text-xs text-[color:var(--accent)] whitespace-nowrap leading-none">正在编辑循环活动</div>
+              ))}
+              {isNowInRange ? (
+                <div className="absolute top-[44px] bottom-0 w-[2px] -ml-px bg-[color:var(--accent)] z-10" style={{ left: `${nowPct}%` }} />
               ) : null}
             </div>
-            {!isHome ? (
-              <button
-                type="button"
-                className={clsx(
-                  "inline-flex items-center justify-center rounded-md transition-colors",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isRecurringSettingsOpen ? "text-[color:var(--accent)]" : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+
+            <div className="hidden md:flex relative h-[52px] border-b border-[color:var(--line)]">
+              <div className="w-[300px] lg:w-[320px] shrink-0 px-5 flex items-center text-xs font-semibold text-[color:var(--muted)]">活动</div>
+              <div className="relative flex-1">
+                {axis.ticks.map((tick) =>
+                  tick.widthPct >= 4 ? (
+                    <div
+                      key={tick.key}
+                      className={clsx("absolute inset-y-0 flex flex-col justify-center gap-0.5", isHome ? "items-center" : "items-start pl-2")}
+                      style={{ left: `${tick.startPct}%`, width: `${tick.widthPct}%` }}
+                    >
+                      {tick.sub ? (
+                        <span className={clsx("text-[11px]", tick.isToday ? "text-[color:var(--accent)] font-semibold" : "text-[color:var(--muted)]")}>
+                          {tick.sub}
+                        </span>
+                      ) : null}
+                      <span
+                        className={clsx(
+                          "h-[22px] min-w-[26px] px-1.5 rounded-full inline-flex items-center justify-center text-[13px] font-semibold font-mono",
+                          tick.isToday ? "bg-[color:var(--accent)] text-[color:var(--on-accent)]" : "text-[color:var(--ink2)]"
+                        )}
+                      >
+                        {tick.label}
+                      </span>
+                    </div>
+                  ) : null
                 )}
-                onClick={() => {
-                  if (isRecurringSettingsOpen) {
-                    setIsRecurringSettingsOpen(false);
-                    resetRecurringForm();
-                    return;
-                  }
-                  setIsRecurringSettingsOpen(true);
-                  setRecurringFormError(null);
-                }}
-                aria-label={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
-                title={isRecurringSettingsOpen ? "关闭循环活动配置" : "打开循环活动配置"}
-                aria-haspopup="dialog"
-                aria-expanded={isRecurringSettingsOpen}
-              >
-                <svg className="w-5 h-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeLinejoin="round">
-                  <circle cx="16" cy="16" r="4" strokeWidth="2" />
-                  <path
-                    strokeWidth="2"
-                    strokeMiterlimit="10"
-                    d="M27.758 10.366l-1-1.732a2 2 0 0 0-2.732-.732l-.526.304c-2 1.154-4.5-.289-4.5-2.598V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v.608c0 2.309-2.5 3.753-4.5 2.598l-.526-.304a2 2 0 0 0-2.732.732l-1 1.732a2 2 0 0 0 .732 2.732l.526.304c2 1.155 2 4.041 0 5.196l-.526.304a2 2 0 0 0-.732 2.732l1 1.732a2 2 0 0 0 2.732.732l.526-.304c2-1.155 4.5.289 4.5 2.598V27a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-.608c0-2.309 2.5-3.753 4.5-2.598l.526.304a2 2 0 0 0 2.732-.732l1-1.732a2 2 0 0 0-.732-2.732l-.526-.304c-2-1.155-2-4.041 0-5.196l.526-.304a2 2 0 0 0 .732-2.732z"
-                  />
-                </svg>
-              </button>
-            ) : null}
+                {versionBand && currentVersion ? (
+                  <span
+                    className="absolute top-1 text-[10px] font-bold font-mono whitespace-nowrap"
+                    style={{ left: `calc(${versionBand.left}% + 4px)`, color: gameInkVar(primaryGameId) }}
+                  >
+                    {splitVersionLabel(currentVersion).num ?? ""} 版本
+                  </span>
+                ) : null}
+                {isNowInRange ? (
+                  <span
+                    className="absolute bottom-0 translate-y-1/2 -translate-x-1/2 z-20 px-1.5 rounded-md bg-[color:var(--accent)] text-[color:var(--on-accent)] text-[10px] font-bold font-mono whitespace-nowrap"
+                    style={{ left: `${nowPct}%` }}
+                  >
+                    {now.format("HH:mm")}
+                  </span>
+                ) : null}
+              </div>
+              <div className="w-[112px] shrink-0 pr-5 flex items-center justify-end text-xs font-semibold text-[color:var(--muted)]">剩余</div>
+            </div>
+
+            <div className="relative py-1 md:py-0">{renderRows()}</div>
           </div>
-          {showRecurringSettingsPanel ? (
+        ) : null)}
+
+      {visibleResetGroups.map(renderResetGroup)}
+    </section>
+  );
+
+  const detailPanel = selectedEvent ? (
+    <div ref={detailPanelRef} className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink overflow-hidden scroll-mt-3">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--surface2)]">
+        <div className="text-sm font-semibold">活动详情</div>
+        <div className="flex items-center gap-1">
+          {canCompleteTimelineEvent(selectedEvent) ? (
+            <label className="flex items-center gap-2 text-xs text-[color:var(--muted)] cursor-pointer select-none px-2">
+              <span>已完成</span>
+              <input
+                type="checkbox"
+                checked={isTimelineEventCompleted(selectedEvent)}
+                onChange={() => toggleTimelineEventCompleted(selectedEvent)}
+                className="w-5 h-5 rounded border-[color:var(--line)] bg-transparent accent-[color:var(--ink)] cursor-pointer"
+              />
+            </label>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setSelectedKey(null)}
+            aria-label="关闭活动详情"
+            className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-[color:var(--muted)] hover:text-[color:var(--ink)] hover:bg-[color:var(--tile)]"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <EventDetail
+        event={selectedEvent}
+        checked={isTimelineEventCompleted(selectedEvent)}
+        now={now}
+        variant={EVENT_DETAIL_VARIANT_BY_GAME[selectedEvent.sourceGameId]}
+        showGameMeta={showGameMeta}
+      />
+    </div>
+  ) : null;
+
+  const recurringSettingsPanel = showRecurringSettingsPanel ? (
+    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink overflow-hidden">
+      <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--surface2)] flex items-center justify-between gap-3">
+        <div className="flex items-end gap-2 min-w-0">
+          <div className="text-sm font-semibold">循环活动配置</div>
+          {editingRecurringId ? (
+            <div className="text-xs text-[color:var(--accent)] whitespace-nowrap leading-none">正在编辑循环活动</div>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={toggleRecurringSettings}
+          aria-label="关闭循环活动配置"
+          className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-[color:var(--muted)] hover:text-[color:var(--ink)] hover:bg-[color:var(--tile)]"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
             <div className="px-4 py-3 bg-[color:var(--wash)]/40">
               <form
                 className="grid gap-3"
@@ -2447,65 +2150,376 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 )}
               </div>
             </div>
-          ) : null}
-          {!showRecurringSettingsPanel ? (
-            <div className="divide-y divide-[color:var(--line)]">
-              {activeRecurringEvents.length > 0 ? (
-                activeRecurringEvents.map((event, idx) => (
-                  <EventListRow
-                    key={event.eventKey}
-                    event={event}
-                    checked={false}
-                    isSelected={selectedKey === event.eventKey}
-                    now={now}
-                    showGameMeta={showGameMeta}
-                    showBottomDivider={idx === activeRecurringEvents.length - 1}
-                    onSelect={() => {
-                      toggleSelectedFromList(event.eventKey);
-                    }}
-                    onToggleCompleted={() => toggleRecurringCompleted(event)}
-                  />
-                ))
-              ) : (
-                <div className="p-4 text-xs text-[color:var(--muted)]">
-                  {isHome ? "未来 7 天内暂无未完成循环活动" : "暂无未完成循环活动"}
+    </section>
+  ) : null;
+
+  const versionScroller =
+    isHome && versionRows.length > 0 ? (
+      <div className="lg:hidden -mx-4 md:-mx-8 px-4 md:px-8 overflow-x-auto no-scrollbar">
+        <div className="flex gap-2.5 w-max">
+          {versionRows.map((row) => {
+            const meta = GAME_REGISTRY_BY_ID[row.gameId];
+            const urgent = row.valid && row.remainingMs <= DAY_MS;
+            return (
+              <Link
+                key={row.gameId}
+                to={meta.route}
+                className="w-[220px] shrink-0 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] px-3.5 py-3 grid gap-2.5"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <img src={meta.icon} alt="" className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold">
+                      {meta.shortName} <span className="font-mono font-medium text-[color:var(--muted)]">{row.num ?? ""}</span>
+                    </div>
+                    <div className="text-[11px] text-[color:var(--muted)] truncate">{row.valid ? row.name ?? "" : "暂无版本数据"}</div>
+                  </div>
                 </div>
-              )}
-            </div>
-          ) : null}
+                {row.valid ? (
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
+                    </div>
+                    <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}>
+                      剩 {formatRemainingShort(row.remainingMs)}
+                    </span>
+                  </div>
+                ) : null}
+              </Link>
+            );
+          })}
         </div>
       </div>
+    ) : null;
 
-      {completedUpstreamEvents.length > 0 || completedRecurringEvents.length > 0 ? (
-        <div className="grid gap-3 md:grid-cols-2 md:items-start">
-          <EventListPanel
-            title="已完成限时活动"
-            titleClassName="text-[color:var(--ink2)]"
-            events={completedUpstreamEvents}
-            emptyText="暂无已完成活动"
-            checked={true}
-            selectedKey={selectedKey}
-            now={now}
-            showGameMeta={showGameMeta}
-            onSelect={toggleSelectedFromList}
-            onToggleCompleted={(event) => toggleCompleted(event)}
-          />
+  const versionCard =
+    isHome && versionRows.length > 0 ? (
+      <div className="hidden lg:block">
+        <SideCard title="版本进度" meta="按剩余时间">
+          {versionRows.map((row) => {
+            const meta = GAME_REGISTRY_BY_ID[row.gameId];
+            const urgent = row.valid && row.remainingMs <= DAY_MS;
+            return (
+              <Link
+                key={row.gameId}
+                to={meta.route}
+                className="grid gap-2 py-2.5 border-t border-[color:var(--line-soft)] rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+              >
+                <div className="flex items-center gap-2.5">
+                  <img src={meta.icon} alt="" className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold">
+                      {meta.shortName} <span className="font-mono font-medium text-[color:var(--muted)]">{row.num ?? ""}</span>
+                    </div>
+                    <div className="text-[11px] text-[color:var(--muted)] truncate">{row.valid ? row.name ?? "" : "暂无版本数据"}</div>
+                  </div>
+                  <span
+                    className="text-xs font-semibold font-mono whitespace-nowrap"
+                    style={{ color: !row.valid ? "var(--muted)" : urgent ? "var(--urgent)" : "var(--ink2)" }}
+                  >
+                    {row.valid ? `剩 ${formatRemainingShort(row.remainingMs)}` : "—"}
+                  </span>
+                </div>
+                {row.valid ? (
+                  <div className="h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
+                    <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
+                  </div>
+                ) : null}
+              </Link>
+            );
+          })}
+        </SideCard>
+      </div>
+    ) : null;
 
-          <EventListPanel
-            title="已完成循环活动"
-            titleClassName="text-[color:var(--ink2)]"
-            events={completedRecurringEvents}
-            emptyText="暂无已完成循环活动"
-            checked={true}
-            selectedKey={selectedKey}
-            now={now}
-            showGameMeta={showGameMeta}
-            onSelect={toggleSelectedFromList}
-            onToggleCompleted={(event) => toggleRecurringCompleted(event)}
-          />
+  const gachaCard =
+    showGacha ? (
+      <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaEvents.length} 个`}>
+        {gachaGroups.length > 0 ? (
+          <div className={clsx(isHome ? "" : "grid gap-2 pt-1 pb-2")}>
+            {gachaGroups.map((group) => {
+              const first = group.events[0]!;
+              const meta = GAME_META[first.sourceGameId];
+              const remaining = describeRemaining(first, false);
+              const isSelected = group.events.some((event) => event.eventKey === selectedKey);
+              const title = group.events.length > 1 ? `${splitEventTitle(first.title).main} 等 ${group.events.length} 个卡池` : first.title;
+              if (!isHome) {
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    aria-expanded={isSelected}
+                    onClick={() => toggleSelected(first.eventKey)}
+                    className={clsx(
+                      "text-left grid gap-1 px-3.5 py-3 rounded-xl transition",
+                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                      isSelected ? "ring-2 ring-[color:var(--accent)]" : ""
+                    )}
+                    style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
+                  >
+                    <span className="text-sm font-semibold leading-snug">{first.title}</span>
+                    <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
+                      {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
+                    </span>
+                  </button>
+                );
+              }
+              return (
+                <button
+                  key={group.key}
+                  type="button"
+                  aria-expanded={isSelected}
+                  onClick={() => toggleSelected(first.eventKey)}
+                  className={clsx(
+                    "w-full text-left flex items-center gap-2.5 py-2.5 border-t border-[color:var(--line-soft)]",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                    isSelected && "bg-[color:var(--accent-soft)]"
+                  )}
+                >
+                  <img src={meta.icon} alt="" className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold truncate">{title}</div>
+                    <div className="text-[11px] text-[color:var(--muted)] truncate">
+                      {meta.shortName} · {remaining.secondary}
+                    </div>
+                  </div>
+                  <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
+                    {remaining.primary}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="py-3 text-xs text-[color:var(--muted)]">暂无进行中的卡池</div>
+        )}
+      </SideCard>
+    ) : null;
+
+  const codesCard =
+    codeEvents.length > 0 ? (
+      <SideCard title="兑换码" meta={`${codeEvents.length} 组可用`}>
+        <div className="grid gap-3 pt-1 pb-3">
+          {codeEvents.map((event) => (
+            <div key={event.eventKey} className="grid gap-1.5">
+              <div className="flex items-center gap-2 text-[13px] font-semibold min-w-0">
+                {showGameMeta ? (
+                  <img src={GAME_META[event.sourceGameId].icon} alt="" className="w-5 h-5 rounded-md object-cover" referrerPolicy="no-referrer" />
+                ) : null}
+                <span className="truncate">{event.title}</span>
+              </div>
+              <RedeemCodeList codes={event.redeem_codes ?? []} />
+              <div className="text-[11px] font-mono text-[color:var(--muted)]">{event._e.format("MM/DD HH:mm")} 失效</div>
+            </div>
+          ))}
         </div>
-      ) : null}
+      </SideCard>
+    ) : (
+      <section className="rounded-2xl border border-dashed border-[color:var(--line)] px-4 py-3.5 flex items-center gap-3">
+        <svg className="w-[18px] h-[18px] shrink-0 text-[color:var(--muted)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 12v8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-8" />
+          <rect x="2" y="7" width="20" height="5" rx="1" />
+          <path d="M12 21V7M12 7H7.5a2.5 2.5 0 1 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 1 0 0-5C13 2 12 7 12 7z" />
+        </svg>
+        <div className="grid gap-0.5">
+          <span className="text-[13px] font-semibold">暂无可用兑换码</span>
+          <span className="text-[11px] text-[color:var(--muted)]">前瞻直播后会出现在这里，点击即可复制</span>
+        </div>
+      </section>
+    );
 
+  const recurringCard = !isHome ? (
+    <SideCard
+      title="循环活动"
+      action={
+        <button
+          type="button"
+          onClick={toggleRecurringSettings}
+          aria-expanded={isRecurringSettingsOpen}
+          className={clsx(
+            "h-8 px-2.5 rounded-lg border text-xs font-semibold transition",
+            isRecurringSettingsOpen
+              ? "border-[color:var(--accent)] text-[color:var(--accent)]"
+              : "border-[color:var(--line)] text-[color:var(--ink2)] hover:border-[color:var(--ink)]"
+          )}
+        >
+          {isRecurringSettingsOpen ? "完成" : "编辑"}
+        </button>
+      }
+    >
+      {recurringDefinitionsSorted.length > 0 ? (
+        <div className="pb-2">
+          {recurringDefinitionsSorted.map((activity) => (
+            <div key={activity.id} className="py-2 border-t border-[color:var(--line-soft)]">
+              <div className="text-[13px] font-semibold">{activity.title}</div>
+              <div className="text-[11px] text-[color:var(--muted)]">
+                {formatRecurringRule(primaryGameId, activity.rule, activity.durationDays)}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="py-3 text-xs text-[color:var(--muted)]">当前游戏尚未配置循环活动</div>
+      )}
+    </SideCard>
+  ) : null;
+
+  const homeSummary =
+    isHome && homeStats ? (
+      <section className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 md:gap-6">
+        <div className="grid gap-1">
+          <h1 className="text-2xl md:text-[30px] font-bold tracking-tight leading-tight">{formatDayLabel(now)}</h1>
+          <div className="text-xs md:text-[13px] text-[color:var(--muted)]">
+            现在 {now.format("HH:mm")} · {formatLocalUtcOffsetLabel(now.toDate())}
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2 md:flex md:gap-2.5">
+          <div className="rounded-xl bg-[color:var(--urgent-soft)] px-3 md:px-4 py-2.5 grid gap-0.5 md:min-w-[120px]">
+            <span className="text-[11px] md:text-xs font-semibold text-[color:var(--urgent)]">24 小时内结束</span>
+            <span className="text-xl md:text-[22px] font-bold font-mono text-[color:var(--urgent)]">{homeStats.urgent}</span>
+          </div>
+          <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] px-3 md:px-4 py-2.5 grid gap-0.5 md:min-w-[120px]">
+            <span className="text-[11px] md:text-xs font-semibold text-[color:var(--muted)]">48 小时内结束</span>
+            <span className="text-xl md:text-[22px] font-bold font-mono">{homeStats.soon}</span>
+          </div>
+          <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] px-3 md:px-4 py-2.5 grid gap-0.5 md:gap-1.5 md:min-w-[180px]">
+            <span className="text-[11px] md:text-xs font-semibold text-[color:var(--muted)]">已完成</span>
+            <div className="flex items-center gap-2.5">
+              <span className="text-xl md:text-[22px] font-bold font-mono">
+                {homeStats.done}
+                <span className="text-[13px] md:text-[22px] text-[color:var(--muted)] md:text-[color:var(--ink)]">/{homeStats.total}</span>
+              </span>
+              <div className="hidden md:block flex-1 h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[color:var(--ink)]"
+                  style={{ width: `${homeStats.total > 0 ? (homeStats.done / homeStats.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    ) : null;
+
+  const versionProgress = (() => {
+    if (!currentVersion) return null;
+    const s = parseDateTime(currentVersion.start_time);
+    const e = parseDateTime(currentVersion.end_time);
+    if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
+    const pct = clamp(((now.valueOf() - s.valueOf()) / (e.valueOf() - s.valueOf())) * 100, 0, 100);
+    const elapsedMs = Math.max(0, now.valueOf() - s.valueOf());
+    const remainingMs = Math.max(0, e.valueOf() - now.valueOf());
+    return { s, e, pct, elapsedMs, remainingMs, label: splitVersionLabel(currentVersion) };
+  })();
+
+  const gameHero = !isHome ? (
+    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink p-4 md:px-6 md:py-5 flex flex-col md:flex-row md:items-center gap-4 md:gap-7">
+      <div className="flex items-start md:items-center gap-3 md:gap-5 flex-1 min-w-0">
+        <img src={gameMeta.icon} alt="" className="w-12 h-12 md:w-16 md:h-16 rounded-xl md:rounded-2xl object-cover shrink-0" referrerPolicy="no-referrer" />
+        <div className="flex-1 min-w-0 grid gap-2.5">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <h1 className="text-xl md:text-[26px] font-bold leading-tight">{gameMeta.name}</h1>
+            {versionProgress?.label.num ? (
+              <span className="text-[15px] font-semibold font-mono" style={{ color: gameInkVar(primaryGameId) }}>
+                {versionProgress.label.num}
+              </span>
+            ) : null}
+            {versionProgress?.label.name ? <span className="text-[15px] text-[color:var(--ink2)]">{versionProgress.label.name}</span> : null}
+          </div>
+          {versionProgress ? (
+            <div className="grid gap-1.5">
+              <div className="relative h-2.5 rounded-full bg-[color:var(--line-soft)]">
+                <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
+                <div
+                  className="absolute -top-1 h-[18px] w-[3px] -ml-px rounded-sm bg-[color:var(--accent)]"
+                  style={{ left: `${versionProgress.pct}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+              <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
+                <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
+                <span className="font-semibold text-[color:var(--ink2)]">
+                  已进行 {formatRemainingShort(versionProgress.elapsedMs)} · 剩 {formatRemainingShort(versionProgress.remainingMs)}（
+                  {Math.round(versionProgress.pct)}%）
+                </span>
+                <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")} 结束</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-[color:var(--muted)]">
+              {props.currentVersionState?.status === "loading" ? "版本信息加载中..." : "暂无版本数据"}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="hidden md:block w-px self-stretch bg-[color:var(--line)]" aria-hidden="true" />
+      <div className="flex md:flex-col items-center md:items-start justify-between gap-2 md:w-[180px]">
+        <span className="text-xs font-semibold text-[color:var(--muted)]">月卡剩余</span>
+        {isMonthlyCardEditing ? (
+          <div className="flex items-center gap-2">
+            <input
+              ref={monthlyCardInputRef}
+              type="text"
+              inputMode="numeric"
+              aria-label="月卡剩余天数"
+              value={monthlyCardDraft}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (/^\d*$/.test(next)) setMonthlyCardDraft(next);
+              }}
+              onBlur={commitMonthlyCardEditing}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitMonthlyCardEditing();
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelMonthlyCardEditing();
+                }
+              }}
+              placeholder="天数"
+              className="w-24 h-10 px-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono text-[color:var(--ink)]"
+            />
+            <span className="text-sm text-[color:var(--muted)]">天</span>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={startMonthlyCardEditing}
+            title="点击直接输入月卡剩余天数"
+            className={clsx(
+              "h-10 px-3.5 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono font-semibold",
+              "hover:border-[color:var(--ink)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+              isMonthlyCardUrgent ? "text-[color:var(--urgent)]" : monthlyCardRemainingDays == null ? "text-[color:var(--muted)]" : "text-[color:var(--ink)]"
+            )}
+          >
+            {monthlyCardRemainingDays == null ? "未设置" : `${monthlyCardRemainingDays} 天`}
+          </button>
+        )}
+      </div>
+    </section>
+  ) : null;
+
+  return (
+    <div className="grid grid-cols-1 gap-4 md:gap-6">
+      {homeSummary}
+      {gameHero}
+      {versionScroller}
+      <div className="grid gap-4 md:gap-6 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+        <div className="grid grid-cols-1 gap-4 min-w-0">
+          {timelineCard}
+          {detailPanel}
+          {recurringSettingsPanel}
+        </div>
+        <aside className="grid grid-cols-1 gap-4 md:gap-5 min-w-0 content-start">
+          {versionCard}
+          {gachaCard}
+          {recurringCard}
+          {codesCard}
+        </aside>
+      </div>
     </div>
   );
 }
