@@ -142,6 +142,7 @@ Upstream-fetch hygiene:
 Automated safeguard tests are available. Before opening a PR, prefer:
 - `pnpm test:upstream-review`
 - `pnpm test:game-parsers`
+- `pnpm test:web`
 - `pnpm typecheck`
 - `pnpm build`
 - Manual smoke checks:

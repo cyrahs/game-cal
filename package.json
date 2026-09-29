@@ -15,6 +15,7 @@
     "test:upstream-review": "node --test scripts/review-upstream.test.mjs scripts/upstream-agentic-state.test.mjs scripts/upstream-agentic-artifact.test.mjs scripts/upstream-autopatch.test.mjs scripts/upstream-agentic-workflow.test.mjs",
     "test:upstream-agentic": "node --test scripts/upstream-agentic-state.test.mjs scripts/upstream-agentic-artifact.test.mjs scripts/upstream-autopatch.test.mjs scripts/upstream-agentic-workflow.test.mjs",
     "test:game-parsers": "pnpm --filter @game-cal/api test:game-parsers",
+    "test:web": "pnpm --filter @game-cal/web test",
     "cf:dev": "pnpm --filter @game-cal/web build && wrangler dev",
     "cf:deploy": "pnpm --filter @game-cal/web build && wrangler deploy",
     "cf:deploy:dry": "pnpm --filter @game-cal/web build && wrangler deploy --dry-run",

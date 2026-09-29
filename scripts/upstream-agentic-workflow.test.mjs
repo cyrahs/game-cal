@@ -154,6 +154,7 @@ test("every pull request into main receives the required validation context", as
     "pnpm install --frozen-lockfile",
     "pnpm test:upstream-review",
     "pnpm test:game-parsers",
+    "pnpm test:web",
     "pnpm typecheck",
     "pnpm build",
   ]) {
