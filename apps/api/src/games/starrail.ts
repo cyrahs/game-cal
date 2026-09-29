@@ -2,7 +2,7 @@ import { fetchJson } from "../lib/fetch.js";
 import { toIsoWithSourceOffset, unixSecondsToIsoWithSourceOffset } from "../lib/time.js";
 import type { RuntimeEnv } from "../lib/runtimeEnv.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
-import { classifyGachaEvent, isGachaEventTitle } from "./gacha.js";
+import { classifyGachaEvent, extractGachaFeatured, isGachaEventTitle } from "./gacha.js";
 
 type MihoyoAnnItem = {
   ann_id: number;
@@ -619,6 +619,102 @@ export function extractStarRailTimeRangeFromContent(
   return longTermFallback(section);
 }
 
+export type StarRailWarpBanner = {
+  // Banner name without brackets, e.g. 沧海萃珠.
+  name: string;
+  // e.g. 角色活动跃迁 / 光锥活动跃迁.
+  label: string;
+  kind: "character" | "weapon";
+  // Plain-text lines describing only this banner (rate-ups and its time table).
+  text: string;
+};
+
+const STARRAIL_WARP_BANNER_START = /^「([^」]+)」\s*((角色|光锥)(?:活动|联动)跃迁)期间/;
+
+function isStarRailWarpBannerEnd(line: string): boolean {
+  return (
+    line.startsWith("※") ||
+    line.startsWith("活动跃迁详细规则") ||
+    // Group headings such as 「韶艾裁英」「溯回忆象•邂逅于下一个花季」活动跃迁.
+    (/跃迁$/.test(line) && !line.includes("期间")) ||
+    isStarRailSectionBoundary(line)
+  );
+}
+
+/**
+ * A single 活动跃迁 notice can announce several banners that close at different
+ * times (a new character running the whole version next to a shorter rerun).
+ * Returns one block per 「X」角色/光锥活动跃迁期间 paragraph so each banner can
+ * be timed on its own.
+ */
+export function splitStarRailWarpBanners(content: string | undefined): StarRailWarpBanner[] {
+  const banners: Array<Omit<StarRailWarpBanner, "text"> & { lines: string[] }> = [];
+  let current: (typeof banners)[number] | null = null;
+  for (const line of stripHtml(content).split("\n")) {
+    const start = STARRAIL_WARP_BANNER_START.exec(line);
+    if (start) {
+      current = {
+        name: start[1]!.trim(),
+        label: start[2]!,
+        kind: start[3] === "光锥" ? "weapon" : "character",
+        lines: [line],
+      };
+      banners.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (isStarRailWarpBannerEnd(line)) {
+      current = null;
+      continue;
+    }
+    current.lines.push(line);
+  }
+  return banners.map(({ lines, ...banner }) => ({ ...banner, text: lines.join("\n") }));
+}
+
+type StarRailEventWindow = Pick<
+  CalendarEvent,
+  "start_time" | "end_time" | "end_time_kind" | "end_time_text"
+>;
+
+function resolveStarRailEventWindow(
+  contentRange: StarRailParsedTimeRange,
+  listStartIso: string,
+  listEndIso: string
+): { window: StarRailEventWindow; fromContent: boolean } {
+  const relativeEndText = contentRange.endText?.trim();
+  if (
+    contentRange.startIso != null &&
+    Number.isFinite(Date.parse(contentRange.startIso)) &&
+    relativeEndText != null
+  ) {
+    return {
+      window: {
+        start_time: contentRange.startIso,
+        end_time: null,
+        end_time_kind: "relative",
+        end_time_text: relativeEndText,
+      },
+      fromContent: true,
+    };
+  }
+
+  const resolvedStartIso = contentRange.startIso ?? listStartIso;
+  const resolvedEndIso = contentRange.endIso ?? listEndIso;
+  const sMs = Date.parse(resolvedStartIso);
+  const eMs = Date.parse(resolvedEndIso);
+  const fromContent = Number.isFinite(sMs) && Number.isFinite(eMs) && eMs > sMs;
+  return {
+    window: {
+      start_time: fromContent ? resolvedStartIso : listStartIso,
+      end_time: fromContent ? resolvedEndIso : listEndIso,
+      end_time_kind: undefined,
+      end_time_text: undefined,
+    },
+    fromContent: fromContent && (contentRange.startIso != null || contentRange.endIso != null),
+  };
+}
+
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1098,38 +1194,64 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     });
     if (contentRange.unresolvedVersionStart) return [];
 
-    const resolvedStartIso = contentRange.startIso ?? listStartIso;
-    const resolvedEndIso = contentRange.endIso ?? listEndIso;
-    const sMs = Date.parse(resolvedStartIso);
-    const eMs = Date.parse(resolvedEndIso);
-    const hasValidContentRange = Number.isFinite(sMs) && Number.isFinite(eMs) && eMs > sMs;
-    const relativeEndText = contentRange.endText?.trim();
-    const hasValidRelativeContentRange =
-      contentRange.startIso != null &&
-      Number.isFinite(Date.parse(contentRange.startIso)) &&
-      relativeEndText != null;
-
-    return [{
-      id: `starrail:${makeAnnItemKey(item)}`,
-      title,
-      start_time: hasValidRelativeContentRange
-        ? contentRange.startIso!
-        : hasValidContentRange
-          ? resolvedStartIso
-          : listStartIso,
-      end_time: hasValidRelativeContentRange
-        ? null
-        : hasValidContentRange
-          ? resolvedEndIso
-          : listEndIso,
-      end_time_kind: hasValidRelativeContentRange ? "relative" : undefined,
-      end_time_text: hasValidRelativeContentRange ? relativeEndText : undefined,
+    const eventId = `starrail:${makeAnnItemKey(item)}`;
+    const shared = {
       is_gacha: isGacha,
-      gacha_kind: isGacha ? gachaKind : undefined,
       banner: item.banner ?? contentItem?.banner ?? contentItem?.img,
       content,
+    };
+    const bannerEvents = isGacha
+      ? splitStarRailBannerEvents(content, eventId, {
+          versionMaintenanceEndByLabel,
+          singleVersionMaintenanceEndIso,
+          listStartIso,
+          listEndIso,
+        })
+      : null;
+    if (bannerEvents) return bannerEvents.map((event) => ({ ...event, ...shared }));
+
+    return [{
+      id: eventId,
+      title,
+      ...resolveStarRailEventWindow(contentRange, listStartIso, listEndIso).window,
+      ...shared,
+      gacha_kind: isGacha ? gachaKind : undefined,
     }];
   });
+}
+
+// Splits a notice that announces several banners into one event per banner, each
+// with its own window. Returns null (keep the single notice event) unless there
+// are at least two banners and every one of them has a window of its own.
+function splitStarRailBannerEvents(
+  content: string | undefined,
+  eventId: string,
+  opts: {
+    versionMaintenanceEndByLabel: Map<string, string>;
+    singleVersionMaintenanceEndIso: string | null;
+    listStartIso: string;
+    listEndIso: string;
+  }
+): Array<StarRailEventWindow & Pick<CalendarEvent, "id" | "title" | "gacha_kind" | "gacha_featured">> | null {
+  const banners = splitStarRailWarpBanners(content);
+  if (banners.length < 2) return null;
+
+  const events = [];
+  for (const banner of banners) {
+    const title = `「${banner.name}」${banner.label}`;
+    const range = extractStarRailTimeRangeFromContent(banner.text, { ...opts, title });
+    if (range.unresolvedVersionStart || (range.endIso == null && !range.endText)) return null;
+    const { window, fromContent } = resolveStarRailEventWindow(range, opts.listStartIso, opts.listEndIso);
+    if (!fromContent) return null;
+    events.push({
+      id: `${eventId}|${banner.name}`,
+      title,
+      ...window,
+      gacha_kind: banner.kind,
+      gacha_featured: extractGachaFeatured("starrail", title, banner.text),
+    });
+  }
+  return events;
 }
 
 export async function fetchStarRailCurrentVersion(env: RuntimeEnv = {}): Promise<GameVersionInfo | null> {

@@ -20,6 +20,7 @@ import {
   extractStarRailTimeRangeFromContent,
   fetchStarRailEvents,
   shouldIncludeStarRailAnnouncement,
+  splitStarRailWarpBanners,
 } from "./starrail.js";
 import {
   fetchZzzCurrentVersion,
@@ -1416,6 +1417,207 @@ test("Star Rail banner labels list each limited 5-star character of a warp notic
       "<p>「万华骄芒」光锥联动跃迁期间，联动限定5星光锥「星火悄然闪耀（智识）」跃迁成功概率提升。</p>"
     ).label,
     "光锥：星火悄然闪耀"
+  );
+});
+
+function starRailWarpBannerHtml(opts: {
+  name: string;
+  label: "角色活动跃迁" | "光锥活动跃迁";
+  featured: string;
+  window: string;
+}): string {
+  const noun = opts.label === "角色活动跃迁" ? "角色" : "光锥";
+  return [
+    `<ul><li><p>「${opts.name}」${opts.label}期间，<strong>限定5星${noun}「${opts.featured}」</strong>，4星${noun}「青雀（智识•量子）」跃迁成功概率限时提升。</p></li></ul>`,
+    "<div class=\"table-wrapper\"><table><tbody>",
+    `<tr><td><p>活动时间</p></td><td><p>概率提升-5星${noun}</p></td><td><p>概率提升-4星${noun}</p></td></tr>`,
+    `<tr><td rowspan="3"><p>${opts.window}</p></td><td rowspan="3"><p>${opts.featured}</p></td><td><p>青雀（智识•量子）</p></td></tr>`,
+    "</tbody></table></div>",
+  ].join("");
+}
+
+// Trimmed from the live 4.6版本活动跃迁（其一） notice (ann_id 1366): one notice, two
+// character banners (and their light cone banners) that close on different days.
+const starRail46WarpContent = [
+  "<p>亲爱的开拓者：</p>",
+  "<p>限定5星角色「真珠（欢愉•冰）」与限定5星光锥「献给明日的色彩（欢愉）」跃迁成功概率限时提升，跃迁时间为 4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;。</p>",
+  "<p>限定5星角色「绯英（欢愉•物理）」与限定5星光锥「邂逅于下一个花季（欢愉）」将会返场，跃迁时间为 4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/10/21 11:59:00&lt;/t&gt;。</p>",
+  "<h1>「沧海萃珠」「流光定影•献给明日的色彩」活动跃迁</h1>",
+  starRailWarpBannerHtml({
+    name: "沧海萃珠",
+    label: "角色活动跃迁",
+    featured: "真珠（欢愉•冰）",
+    window: "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;",
+  }),
+  starRailWarpBannerHtml({
+    name: "流光定影•献给明日的色彩",
+    label: "光锥活动跃迁",
+    featured: "献给明日的色彩（欢愉）",
+    window: "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;",
+  }),
+  "<h1>「韶艾裁英」「溯回忆象•邂逅于下一个花季」活动跃迁</h1>",
+  starRailWarpBannerHtml({
+    name: "韶艾裁英",
+    label: "角色活动跃迁",
+    featured: "绯英（欢愉•物理）",
+    window: "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/10/21 11:59:00&lt;/t&gt;",
+  }),
+  starRailWarpBannerHtml({
+    name: "溯回忆象•邂逅于下一个花季",
+    label: "光锥活动跃迁",
+    featured: "邂逅于下一个花季（欢愉）",
+    window: "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/10/21 11:59:00&lt;/t&gt;",
+  }),
+  "<h1>活动跃迁详细规则</h1>",
+  "<p>※活动跃迁期间，限定5星角色「真珠（欢愉•冰）」仅可在「沧海萃珠」角色活动跃迁中获取，限定5星角色「绯英（欢愉•物理）」仅可在「韶艾裁英」角色活动跃迁中获取。</p>",
+  "<h1>「锋芒崭露」角色试用活动</h1>",
+  "<p>活动内容：4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;，可试用角色「真珠（欢愉•冰）」体验关卡。</p>",
+].join("");
+
+async function withStarRailFixture<T>(
+  warp: { title: string; content: string },
+  run: () => Promise<T>
+): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  const versionNotice = {
+    ann_id: 1426,
+    title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+    start_time: "2026-09-28 07:00:00",
+    end_time: "2026-11-11 07:00:00",
+  };
+  const warpItem = {
+    ann_id: 1366,
+    title: warp.title,
+    start_time: "2026-09-27 14:00:00",
+    end_time: "2026-10-21 11:59:00",
+  };
+  globalThis.fetch = async (input) => {
+    const body = String(input).endsWith("/list")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: { list: [{ type_id: 3, type_label: "资讯", list: [versionNotice, warpItem] }] },
+        }
+      : {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                ann_id: 1426,
+                title: versionNotice.title,
+                content: "<h1>更新时间</h1><p>2026/09/28 06:00:00 开始，预计需要5个小时。</p>",
+              },
+              { ann_id: 1366, title: warp.title, content: warp.content },
+            ],
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+const STARRAIL_FIXTURE_ENV = {
+  STARRAIL_API_URL: "https://fixture.invalid/list",
+  STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+};
+
+test("Star Rail splits a multi-banner warp notice into banners with their own windows", async () => {
+  assert.deepEqual(
+    splitStarRailWarpBanners(starRail46WarpContent).map(({ name, label, kind }) => ({ name, label, kind })),
+    [
+      { name: "沧海萃珠", label: "角色活动跃迁", kind: "character" },
+      { name: "流光定影•献给明日的色彩", label: "光锥活动跃迁", kind: "weapon" },
+      { name: "韶艾裁英", label: "角色活动跃迁", kind: "character" },
+      { name: "溯回忆象•邂逅于下一个花季", label: "光锥活动跃迁", kind: "weapon" },
+    ]
+  );
+
+  const events = await withStarRailFixture(
+    { title: "4.6版本活动跃迁（其一）", content: starRail46WarpContent },
+    () => fetchStarRailEvents(STARRAIL_FIXTURE_ENV)
+  );
+  const gacha = events.filter((event) => event.is_gacha);
+  assert.deepEqual(
+    gacha.map((event) => ({
+      title: event.title,
+      start_time: event.start_time,
+      end_time: event.end_time,
+      gacha_kind: event.gacha_kind,
+      gacha_featured: event.gacha_featured,
+    })),
+    [
+      {
+        title: "「沧海萃珠」角色活动跃迁",
+        start_time: "2026-09-28T11:00:00+08:00",
+        end_time: "2026-11-10T15:00:00+08:00",
+        gacha_kind: "character",
+        gacha_featured: { characters: ["真珠"], weapons: [] },
+      },
+      {
+        title: "「流光定影•献给明日的色彩」光锥活动跃迁",
+        start_time: "2026-09-28T11:00:00+08:00",
+        end_time: "2026-11-10T15:00:00+08:00",
+        gacha_kind: "weapon",
+        gacha_featured: { characters: [], weapons: ["献给明日的色彩"] },
+      },
+      {
+        title: "「韶艾裁英」角色活动跃迁",
+        start_time: "2026-09-28T11:00:00+08:00",
+        end_time: "2026-10-21T11:59:00+08:00",
+        gacha_kind: "character",
+        gacha_featured: { characters: ["绯英"], weapons: [] },
+      },
+      {
+        title: "「溯回忆象•邂逅于下一个花季」光锥活动跃迁",
+        start_time: "2026-09-28T11:00:00+08:00",
+        end_time: "2026-10-21T11:59:00+08:00",
+        gacha_kind: "weapon",
+        gacha_featured: { characters: [], weapons: ["邂逅于下一个花季"] },
+      },
+    ]
+  );
+  // Each banner keeps the whole notice for its detail view, under its own id.
+  assert.equal(new Set(gacha.map((event) => event.id)).size, 4);
+  assert.ok(gacha.every((event) => event.content === starRail46WarpContent));
+});
+
+test("Star Rail keeps one warp event when its banners carry no windows of their own", async () => {
+  const content = [
+    "<p>活动时间</p>",
+    "<p>4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;</p>",
+    "<p>「魔石赤染流光」角色联动跃迁期间，联动限定5星角色「远坂凛（智识•量子）」跃迁成功概率提升。</p>",
+    "<p>「万华骄芒」光锥联动跃迁期间，联动限定5星光锥「星火悄然闪耀（智识）」跃迁成功概率提升。</p>",
+  ].join("");
+  const events = await withStarRailFixture(
+    { title: "4.6版本活动跃迁（其二）", content },
+    () => fetchStarRailEvents(STARRAIL_FIXTURE_ENV)
+  );
+  assert.deepEqual(
+    events
+      .filter((event) => event.is_gacha)
+      .map((event) => ({
+        title: event.title,
+        end_time: event.end_time,
+        gacha_kind: event.gacha_kind,
+        gacha_featured: event.gacha_featured,
+      })),
+    [
+      {
+        title: "4.6版本活动跃迁（其二）",
+        end_time: "2026-11-10T15:00:00+08:00",
+        gacha_kind: "mixed",
+        gacha_featured: undefined,
+      },
+    ]
   );
 });
 

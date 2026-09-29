@@ -8,6 +8,12 @@ export type GameId =
 
 export type GachaKind = "character" | "weapon" | "mixed" | "other";
 
+// Featured (limited top-rarity) items of one banner.
+export interface GachaFeatured {
+  characters: string[];
+  weapons: string[];
+}
+
 export interface CalendarEvent {
   id: string | number;
   title: string;
@@ -21,6 +27,9 @@ export interface CalendarEvent {
   end_time_text?: string;
   is_gacha?: boolean;
   gacha_kind?: GachaKind;
+  // Set when one notice announces several banners and the event covers just one
+  // of them, so its featured items cannot be read from the shared content.
+  gacha_featured?: GachaFeatured;
   banner?: string;
   content?: string;
   linkUrl?: string;
