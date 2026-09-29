@@ -2361,7 +2361,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   )}
                   style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
                 >
-                  <span className="flex items-start justify-between gap-3">
+                  <span className="flex items-center justify-between gap-3">
                     <span className="min-w-0 text-sm font-semibold leading-snug">{title}</span>
                     {gachaRemaining(remaining)}
                   </span>
