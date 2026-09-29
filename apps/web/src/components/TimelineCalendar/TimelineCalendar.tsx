@@ -693,9 +693,10 @@ function gachaGroupTitle(events: ParsedUpstreamEvent[]): string {
 function splitVersionLabel(version: GameVersionInfo): { num: string | null; name: string | null } {
   const raw = version.version.trim();
   const titleNum = version.title?.match(/(\d+\.\d+)/)?.[1] ?? null;
-  const titleName = version.title?.match(/「[^」]+」/)?.[0] ?? null;
+  // Version names are shown bare, without the 「」 the upstream titles wrap them in.
+  const titleName = version.title?.match(/「([^」]+)」/)?.[1] ?? null;
   if (/^\d+(\.\d+)*$/.test(raw)) return { num: raw, name: titleName };
-  return { num: titleNum, name: raw.match(/「[^」]+」/)?.[0] ?? (raw || null) };
+  return { num: titleNum, name: raw.match(/「([^」]+)」/)?.[1] ?? (raw || null) };
 }
 
 function toneColor(tone: RemainingTone): string {
@@ -999,6 +1000,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (isHome && e._hasRelativeEnd) return false;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
+      // Game pages hide ended activities too (redeem-code events included).
+      if (!e._hasRelativeEnd && e._e.valueOf() <= nowMs) return false;
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
@@ -1248,8 +1251,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     // Only consider events that overlap the maximum visible window. Timeline start/end
     // are then derived from those events: anything starting before windowStart shows the
     // full previous month truncated, otherwise start from the earliest visible start
-    // (and the same rule for the end).
-    const visible = allRowItems
+    // (and the same rule for the end). Only rows actually shown count, so hiding
+    // completed items or switching filters tightens the range to what remains.
+    const visible = displayedRowItems
       .map((item) => item.event)
       .filter((e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf());
 
@@ -1301,7 +1305,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     return { rangeStart: start, rangeEnd: end, ticks };
-  }, [allRowItems, homeRangeEnd, homeRangeStart, isHome, now, showWeekSeparators]);
+  }, [displayedRowItems, homeRangeEnd, homeRangeStart, isHome, now, showWeekSeparators]);
 
   const rangeStartMs = axis.rangeStart.valueOf();
   const rangeMs = Math.max(1, axis.rangeEnd.valueOf() - rangeStartMs);
@@ -1474,7 +1478,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const radiusStart = truncatedStart ? "0" : "8px";
     const radiusEnd = truncatedEnd ? "0" : "8px";
     const elapsedPct = clamp(((nowMs - event._s.valueOf()) / Math.max(1, event._e.valueOf() - event._s.valueOf())) * 100, 0, 100);
-    const gameShort = GAME_META[event.sourceGameId].shortName;
 
     return (
       <div
@@ -1517,14 +1520,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           >
             <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")}>{main}</div>
             <div className="mt-0.5 text-[11px] text-[color:var(--muted)] truncate">
-              {showGameMeta ? (
-                <>
-                  <span className="font-semibold" style={{ color: gameInkVar(event.sourceGameId) }}>
-                    {gameShort}
-                  </span>
-                  {" · "}
-                </>
-              ) : null}
               {sub ?? eventKindLabel(event)}
             </div>
             <div className="md:hidden mt-1.5 h-1 rounded-full bg-[color:var(--line-soft)] overflow-hidden" aria-hidden="true">
@@ -1705,12 +1700,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   )}
                 >
                   <img src={meta.icon} alt="" aria-hidden="true" className="w-[22px] h-[22px] rounded-md object-cover" referrerPolicy="no-referrer" />
-                  <span className={clsx(done && "line-through")}>
-                    <span className="font-semibold" style={{ color: gameInkVar(event.sourceGameId) }}>
-                      {meta.shortName}
-                    </span>{" "}
-                    {event.title}
-                  </span>
+                  <span className={clsx(done && "line-through")}>{event.title}</span>
                   {done ? <CheckIcon className="w-3.5 h-3.5 text-[color:var(--ok)]" strokeWidth={3} /> : null}
                 </button>
               );
@@ -2227,12 +2217,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 className="w-[220px] shrink-0 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] px-3.5 py-3 grid gap-2.5"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <img src={meta.icon} alt="" className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
+                  <img src={meta.icon} alt={meta.name} className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold">
-                      {meta.shortName} <span className="font-mono font-medium text-[color:var(--muted)]">{row.num ?? ""}</span>
-                    </div>
-                    <div className="text-[11px] text-[color:var(--muted)] truncate">{row.valid ? row.name ?? "" : "暂无版本数据"}</div>
+                    {row.valid ? (
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {row.name ? <span className="text-[13px] font-semibold truncate">{row.name}</span> : null}
+                        {row.num ? (
+                          <span className="shrink-0 px-1.5 py-px rounded-md border border-[color:var(--line)] bg-[color:var(--surface2)] font-mono text-[11px] leading-4 text-[color:var(--ink2)]">
+                            {row.num}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
+                    )}
                   </div>
                 </div>
                 {row.valid ? (
@@ -2266,12 +2264,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 className="grid gap-2 py-2.5 border-t border-[color:var(--line-soft)] rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
               >
                 <div className="flex items-center gap-2.5">
-                  <img src={meta.icon} alt="" className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                  <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold">
-                      {meta.shortName} <span className="font-mono font-medium text-[color:var(--muted)]">{row.num ?? ""}</span>
-                    </div>
-                    <div className="text-[11px] text-[color:var(--muted)] truncate">{row.valid ? row.name ?? "" : "暂无版本数据"}</div>
+                    {row.valid ? (
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {row.name ? <span className="text-[13px] font-semibold truncate">{row.name}</span> : null}
+                        {row.num ? (
+                          <span className="shrink-0 px-1.5 py-px rounded-md border border-[color:var(--line)] bg-[color:var(--surface2)] font-mono text-[11px] leading-4 text-[color:var(--ink2)]">
+                            {row.num}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
+                    )}
                   </div>
                   <span
                     className="text-xs font-semibold font-mono whitespace-nowrap"
@@ -2336,11 +2342,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     isSelected && "bg-[color:var(--accent-soft)]"
                   )}
                 >
-                  <img src={meta.icon} alt="" className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                  <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-semibold truncate">{title}</div>
                     <div className="text-[11px] text-[color:var(--muted)] truncate">
-                      {meta.shortName} · {remaining.secondary}
+                      {remaining.secondary}
                     </div>
                   </div>
                   <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
