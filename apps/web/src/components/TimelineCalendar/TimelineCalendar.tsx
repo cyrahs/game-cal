@@ -2520,7 +2520,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const gameHero = !isHome ? (
     <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink p-4 md:px-6 md:py-5 flex flex-col md:flex-row md:items-center gap-4 md:gap-7">
-      <div className="flex items-start md:items-center gap-3 md:gap-5 flex-1 min-w-0">
+      <div className="flex items-start gap-3 md:gap-5 flex-1 min-w-0">
         <img src={gameMeta.icon} alt="" className="w-12 h-12 md:w-16 md:h-16 rounded-xl md:rounded-2xl object-cover shrink-0" referrerPolicy="no-referrer" />
         <div className="flex-1 min-w-0 grid gap-2.5">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
@@ -2534,20 +2534,23 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
           {versionProgress ? (
             <div className="grid gap-1.5">
-              {/* The percentage sits above the end of the filled part, kept inside the track. */}
-              <div className="relative h-4 text-[11px] md:text-xs font-mono font-semibold text-[color:var(--ink2)]">
+              {/* The percentage rides on the bar at the end of the filled part (kept inside the track),
+                  so it does not need a row of its own above the bar. */}
+              <div className="relative h-5 flex items-center">
+                <div className="w-full h-2.5 rounded-full bg-[color:var(--line-soft)]">
+                  <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
+                </div>
                 <span
-                  className="absolute bottom-0 whitespace-nowrap"
+                  className="absolute top-1/2 h-5 px-1.5 rounded-full border-2 bg-[color:var(--card)] text-[11px] leading-4 font-mono font-semibold whitespace-nowrap"
                   style={{
                     left: `${versionProgress.pct}%`,
-                    transform: `translateX(-${versionProgress.pct}%)`,
+                    transform: `translate(-${versionProgress.pct}%, -50%)`,
+                    borderColor: gameColorVar(primaryGameId),
+                    color: gameInkVar(primaryGameId),
                   }}
                 >
                   {Math.round(versionProgress.pct)}%
                 </span>
-              </div>
-              <div className="h-2.5 rounded-full bg-[color:var(--line-soft)]">
-                <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
               </div>
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")}</span>
