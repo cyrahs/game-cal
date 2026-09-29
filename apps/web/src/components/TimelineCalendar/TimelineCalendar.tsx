@@ -2525,9 +2525,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const e = parseDateTime(currentVersion.end_time);
     if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
     const pct = clamp(((now.valueOf() - s.valueOf()) / (e.valueOf() - s.valueOf())) * 100, 0, 100);
-    const elapsedMs = Math.max(0, now.valueOf() - s.valueOf());
     const remainingMs = Math.max(0, e.valueOf() - now.valueOf());
-    return { s, e, pct, elapsedMs, remainingMs, label: splitVersionLabel(currentVersion) };
+    return { s, e, pct, remainingMs, label: splitVersionLabel(currentVersion) };
   })();
 
   const gameHero = !isHome ? (
@@ -2546,16 +2545,25 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
           {versionProgress ? (
             <div className="grid gap-1.5">
+              {/* The percentage sits above the end of the filled part, kept inside the track. */}
+              <div className="relative h-4 text-[11px] md:text-xs font-mono font-semibold text-[color:var(--ink2)]">
+                <span
+                  className="absolute bottom-0 whitespace-nowrap"
+                  style={{
+                    left: `${versionProgress.pct}%`,
+                    transform: `translateX(-${versionProgress.pct}%)`,
+                  }}
+                >
+                  {Math.round(versionProgress.pct)}%
+                </span>
+              </div>
               <div className="h-2.5 rounded-full bg-[color:var(--line-soft)]">
                 <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
               </div>
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
-                <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
-                <span className="font-semibold text-[color:var(--ink2)]">
-                  已进行 {formatRemainingShort(versionProgress.elapsedMs)} · 剩 {formatRemainingShort(versionProgress.remainingMs)}（
-                  {Math.round(versionProgress.pct)}%）
-                </span>
-                <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")} 结束</span>
+                <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")}</span>
+                <span className="font-semibold text-[color:var(--ink2)]">剩 {formatRemainingShort(versionProgress.remainingMs)}</span>
+                <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")}</span>
               </div>
             </div>
           ) : (
