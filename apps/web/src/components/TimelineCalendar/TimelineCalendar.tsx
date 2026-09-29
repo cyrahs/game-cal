@@ -654,12 +654,13 @@ function gachaStartKey(event: ParsedUpstreamEvent): string {
 // Endfield weapon banners open with a 特许寻访 but outlive it: "于3次「特许寻访」后结束（从「冬猎」起计算）".
 const ENDFIELD_PAIRED_WEAPON_END = /次「特许寻访」后结束/;
 
-// Character banners of one game that open and close together share a card. Weapon
-// banners paired with a character banner (opened alongside one, or tied to the
-// Endfield 特许寻访 cycle) are implied by it and not listed.
+// Weapon banners paired with a character banner (opened alongside one, or tied to
+// the Endfield 特许寻访 cycle) are implied by it and not listed. On home, character
+// banners of one game that open and close together also share a line.
 function groupGachaEvents(
   events: ParsedUpstreamEvent[],
-  allGachaEvents: ParsedUpstreamEvent[]
+  allGachaEvents: ParsedUpstreamEvent[],
+  mergeCharacters: boolean
 ): Array<{ key: string; events: ParsedUpstreamEvent[] }> {
   // Pair against every banner, including an already-ended character banner whose weapon banner runs on.
   const characterStarts = new Set(allGachaEvents.filter(hasFeaturedCharacters).map(gachaStartKey));
@@ -672,7 +673,7 @@ function groupGachaEvents(
       (characterStarts.has(gachaStartKey(event)) ||
         (event.sourceGameId === "endfield" && ENDFIELD_PAIRED_WEAPON_END.test(event.end_time_text ?? "")));
     if (isPairedWeapon) continue;
-    const key = isCharacter ? `characters:${gachaWindowKey(event)}` : event.eventKey;
+    const key = mergeCharacters && isCharacter ? `characters:${gachaWindowKey(event)}` : event.eventKey;
     const list = groups.get(key);
     if (list) list.push(event);
     else groups.set(key, [event]);
@@ -1369,8 +1370,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   }, [isHome, now, props.currentVersions, sourceGameIds]);
 
   const gachaGroups = useMemo(
-    () => groupGachaEvents(gachaEvents, sortedUpstream.filter((e) => e.is_gacha)),
-    [gachaEvents, sortedUpstream]
+    () => groupGachaEvents(gachaEvents, sortedUpstream.filter((e) => e.is_gacha), isHome),
+    [gachaEvents, isHome, sortedUpstream]
   );
 
   const recurringDefinitionsSorted = useMemo(() => {

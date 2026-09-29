@@ -305,11 +305,11 @@ export function extractGachaFeatured(game: GameId, title: string, content?: stri
 
 /**
  * Short banner label built from the featured items: characters when there are
- * any, otherwise the weapons prefixed with the game's weapon noun, followed by
- * "限时UP". Returns null when nothing was extracted.
+ * any, otherwise the weapons prefixed with the game's weapon noun. Returns null
+ * when nothing was extracted.
  */
 export function formatGachaFeaturedTitle(game: GameId, featured: GachaFeatured): string | null {
-  if (featured.characters.length > 0) return `${featured.characters.join("、")} 限时UP`;
-  if (featured.weapons.length > 0) return `${WEAPON_NOUN[game]}：${featured.weapons.join("、")} 限时UP`;
+  if (featured.characters.length > 0) return featured.characters.join("、");
+  if (featured.weapons.length > 0) return `${WEAPON_NOUN[game]}：${featured.weapons.join("、")}`;
   return null;
 }
