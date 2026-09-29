@@ -1481,7 +1481,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const barFill = (event: RowEvent, urgent: boolean): string => {
     if (event.kind === "monthlyCard") return "var(--urgent)";
     if (isHome) return urgent ? "var(--urgent)" : gameColorVar(event.sourceGameId);
-    if (event.kind === "recurring") return "var(--recurring-bar)";
     return gameColorVar(event.sourceGameId);
   };
 
@@ -1595,8 +1594,34 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     );
   };
 
+  const renderRowGroupHeader = (label: string, sub: string | null, count: number, urgent = false) => (
+    <div className="relative h-9 flex items-end gap-2 px-4 md:px-5 pb-1.5 max-md:border-t max-md:border-[color:var(--line-soft)] first:border-t-0">
+      <span className="text-[13px] font-bold" style={{ color: urgent ? "var(--urgent)" : "var(--ink)" }}>
+        {label}
+      </span>
+      {sub ? <span className="text-xs text-[color:var(--muted)]">{sub}</span> : null}
+      <span className="text-[11px] font-mono text-[color:var(--muted)] px-1.5 rounded-md bg-[color:var(--surface2)] border border-[color:var(--line-soft)]">
+        {count}
+      </span>
+    </div>
+  );
+
   const renderRows = () => {
-    if (!isHome) return displayedRowItems.map(renderRow);
+    if (!isHome) {
+      // Game pages split limited-time activities from recurring ones, like the home page's day groups.
+      const groups = [
+        { key: "limited", label: "限时活动", items: displayedRowItems.filter((item) => item.category !== "recurring") },
+        { key: "recurring", label: "循环活动", items: displayedRowItems.filter((item) => item.category === "recurring") },
+      ];
+      return groups.map((group) =>
+        group.items.length > 0 ? (
+          <div key={group.key}>
+            {renderRowGroupHeader(group.label, null, group.items.length)}
+            {group.items.map(renderRow)}
+          </div>
+        ) : null
+      );
+    }
 
     const tomorrowStart = now.startOf("day").add(1, "day");
     const dayAfterStart = tomorrowStart.add(1, "day");
@@ -1621,15 +1646,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (items.length === 0) return null;
       return (
         <div key={group.key}>
-          <div className="relative h-9 flex items-end gap-2 px-4 md:px-5 pb-1.5 max-md:border-t max-md:border-[color:var(--line-soft)] first:border-t-0">
-            <span className="text-[13px] font-bold" style={{ color: group.urgent ? "var(--urgent)" : "var(--ink)" }}>
-              {group.label}
-            </span>
-            <span className="text-xs text-[color:var(--muted)]">{group.sub}</span>
-            <span className="text-[11px] font-mono text-[color:var(--muted)] px-1.5 rounded-md bg-[color:var(--surface2)] border border-[color:var(--line-soft)]">
-              {items.length}
-            </span>
-          </div>
+          {renderRowGroupHeader(group.label, group.sub, items.length, group.urgent)}
           {items.map(renderRow)}
         </div>
       );
