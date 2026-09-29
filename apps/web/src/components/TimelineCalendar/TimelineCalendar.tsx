@@ -1497,6 +1497,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const truncatedEnd = event._hasRelativeEnd || event._e.valueOf() > axis.rangeEnd.valueOf();
     const radiusStart = truncatedStart ? "0" : "8px";
     const radiusEnd = truncatedEnd ? "0" : "8px";
+    // Bars running past either edge of the visible range fade out there; the dates are
+    // already shown in the remaining column, so no label sits on the bar.
+    const edgeMask =
+      truncatedStart || truncatedEnd
+        ? `linear-gradient(to right, ${truncatedStart ? "transparent, #000 28px" : "#000"}, ${truncatedEnd ? "#000 calc(100% - 28px), transparent" : "#000"})`
+        : null;
     const elapsedPct = clamp(((nowMs - event._s.valueOf()) / Math.max(1, event._e.valueOf() - event._s.valueOf())) * 100, 0, 100);
 
     return (
@@ -1561,14 +1567,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               border: notStarted ? "1.5px dashed var(--muted)" : undefined,
               borderRadius: `${radiusStart} ${radiusEnd} ${radiusEnd} ${radiusStart}`,
               opacity: isEnded ? 0.5 : 1,
-              // Bars running past the visible range fade out at the edge; the end date
-              // is already shown in the remaining column, so no label sits on the bar.
-              ...(truncatedEnd
-                ? {
-                    maskImage: "linear-gradient(to right, #000 calc(100% - 28px), transparent)",
-                    WebkitMaskImage: "linear-gradient(to right, #000 calc(100% - 28px), transparent)",
-                  }
-                : null),
+              ...(edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : null),
             }}
           />
         </div>
