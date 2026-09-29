@@ -634,9 +634,10 @@ function formatDayLabel(d: Dayjs): string {
   return `${d.format("M月D日")} ${WEEKDAY_NAMES[d.day()]}`;
 }
 
-// 「活动名」说明文字 -> title + subtitle, so long announcement titles stay scannable.
+// 「活动名」说明文字 -> 活动名 (without its 「」) + subtitle, so long announcement titles stay
+// scannable. A title that is only a quoted name is left as is.
 function splitEventTitle(title: string): { main: string; sub: string | null } {
-  const matched = /^(「[^」]+」)\s*[：:·\-—]?\s*(.*)$/.exec(title);
+  const matched = /^「([^」]+)」\s*[：:·\-—]?\s*(.*)$/.exec(title);
   if (!matched) return { main: title, sub: null };
   const rest = (matched[2] ?? "").trim().replace(/^(活动|玩法)[：:]\s*/, "");
   if (!rest) return { main: title, sub: null };
