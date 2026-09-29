@@ -77,6 +77,10 @@ type ParsedUpstreamEvent = ParsedEvent & {
   // Featured characters / weapons pulled from the banner text, and the short label built from them.
   gacha_featured: GachaFeatured | null;
   gacha_title: string | null;
+  // Timeline trial rows stand for one or more character banners: a "[试用] …" label
+  // and the ids of every banner they cover, all completed together.
+  display_title?: string;
+  trial_group_ids?: Array<string | number>;
 };
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
@@ -808,8 +812,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const gameMeta = GAME_META[primaryGameId];
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
-  const showGacha = prefs.timeline.showGacha;
-  const showGachaTrialsOnly = prefs.timeline.showGachaTrialsOnly;
   const monthlyCardState = prefs.timeline.monthlyCardByGame[primaryGameId] ?? null;
   const recurringTzOffsetMinutes = getRecurringTzOffsetMinutes(primaryGameId);
   const monthlyCardResetOffsetMinutes = getDailyResetOffsetMinutes(primaryGameId);
@@ -843,11 +845,25 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const currentVersion =
     !isHome && props.currentVersionState?.status === "success" ? props.currentVersionState.data : null;
 
-  const isUpstreamCompleted = (event: ParsedUpstreamEvent) =>
-    completedIdsByGame[event.sourceGameId]?.has(event.id) ?? false;
+  const isUpstreamCompleted = (event: ParsedUpstreamEvent) => {
+    const completedIds = completedIdsByGame[event.sourceGameId];
+    if (!completedIds) return false;
+    return (event.trial_group_ids ?? [event.id]).every((id) => completedIds.has(id));
+  };
   const isRecurringCompleted = (event: ParsedRecurringEvent) =>
     completedRecurringByGame[event.sourceGameId]?.[event.recurringActivityId] === event.cycleKey;
-  const toggleCompleted = (event: ParsedUpstreamEvent) => toggleCompletedPref(event.sourceGameId, event.id);
+  const toggleCompleted = (event: ParsedUpstreamEvent) => {
+    if (!event.trial_group_ids) {
+      toggleCompletedPref(event.sourceGameId, event.id);
+      return;
+    }
+    // Flip only the banners not already in the target state, so the whole group ends up alike.
+    const done = isUpstreamCompleted(event);
+    const completedIds = completedIdsByGame[event.sourceGameId];
+    for (const id of event.trial_group_ids) {
+      if ((completedIds?.has(id) ?? false) === done) toggleCompletedPref(event.sourceGameId, id);
+    }
+  };
   const toggleRecurringCompleted = (event: ParsedRecurringEvent) =>
     toggleRecurringCompletedPref(event.sourceGameId, event.recurringActivityId, event.cycleKey);
   const isTimelineEventCompleted = (event: AnyParsedEvent): boolean => {
@@ -992,12 +1008,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const sortedUpstream = useMemo(() => sortByPhase(parsedUpstream, now, homeGameRankById), [homeGameRankById, parsedUpstream, now]);
 
-  // Gacha banners live in their own sidebar card instead of the activity timeline.
+  // Gacha banners live in their own sidebar card; the timeline only carries the
+  // character trial activity that opens with them, one row per merged banner group.
   const visibleUpstreamSorted = useMemo(() => {
     const nowMs = now.valueOf();
     const homeEndMs = homeRangeEnd.valueOf();
-    return sortedUpstream.filter((e) => {
-      if (e.is_gacha) return false;
+    const inWindow = sortedUpstream.filter((e) => {
+      if (e.is_gacha && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
       if (isHome && e._hasRelativeEnd) return false;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
@@ -1006,19 +1023,28 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
+    const trialBanners = inWindow.filter((e) => e.is_gacha);
+    const trialRows = groupGachaEvents(trialBanners, trialBanners, true).map(({ events }): ParsedUpstreamEvent => {
+      const first = events[0]!;
+      return {
+        ...first,
+        eventKey: `${first.eventKey}:trial`,
+        display_title: `[试用] ${gachaGroupTitle(events)}`,
+        trial_group_ids: events.map((e) => e.id),
+      };
+    });
+    return [...inWindow.filter((e) => !e.is_gacha), ...trialRows];
   }, [homeRangeEnd, isHome, sortedUpstream, showNotStarted, now]);
 
   const gachaEvents = useMemo(() => {
-    if (!showGacha) return [] as ParsedUpstreamEvent[];
     const nowMs = now.valueOf();
     return sortedUpstream.filter((e) => {
       if (!e.is_gacha) return false;
-      if (showGachaTrialsOnly && !isCharacterTrialGachaKind(e.gacha_kind)) return false;
       if (!e._hasRelativeEnd && e._e.valueOf() <= nowMs) return false;
       if (!isHome && !showNotStarted && nowMs < e._s.valueOf()) return false;
       return true;
     });
-  }, [isHome, now, showGacha, showGachaTrialsOnly, showNotStarted, sortedUpstream]);
+  }, [isHome, now, showNotStarted, sortedUpstream]);
 
   const codeEvents = useMemo(() => {
     const nowMs = now.valueOf();
@@ -1461,10 +1487,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const key = event.eventKey;
     const isSelected = selectedKey === key;
     const canComplete = canCompleteTimelineEvent(event);
-    const displayTitle =
-      showGachaTrialsOnly && event.kind === "upstream" && event.is_gacha && isCharacterTrialGachaKind(event.gacha_kind)
-        ? `[试用] ${event.title}`
-        : event.title;
+    const displayTitle = (event.kind === "upstream" && event.display_title) || event.title;
     const { main, sub } = splitEventTitle(displayTitle);
     const accessibleTitle = getEventAccessibleTitle(event, showGameMeta, displayTitle);
     const remaining = describeRemaining(event, completed);
@@ -2299,38 +2322,17 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       </div>
     ) : null;
 
-  const gachaCard =
-    showGacha ? (
-      <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaGroups.length} 个`}>
-        {gachaGroups.length > 0 ? (
-          <div className={clsx(isHome ? "" : "grid gap-2 pt-1 pb-2")}>
-            {gachaGroups.map((group) => {
-              const first = group.events[0]!;
-              const meta = GAME_META[first.sourceGameId];
-              const remaining = describeRemaining(first, false);
-              const isSelected = group.events.some((event) => event.eventKey === selectedKey);
-              const title = gachaGroupTitle(group.events);
-              if (!isHome) {
-                return (
-                  <button
-                    key={group.key}
-                    type="button"
-                    aria-expanded={isSelected}
-                    onClick={() => toggleSelected(first.eventKey)}
-                    className={clsx(
-                      "text-left grid gap-1 px-3.5 py-3 rounded-xl transition",
-                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                      isSelected ? "ring-2 ring-[color:var(--accent)]" : ""
-                    )}
-                    style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
-                  >
-                    <span className="text-sm font-semibold leading-snug">{title}</span>
-                    <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
-                      {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
-                    </span>
-                  </button>
-                );
-              }
+  const gachaCard = (
+    <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaGroups.length} 个`}>
+      {gachaGroups.length > 0 ? (
+        <div className={clsx(isHome ? "" : "grid gap-2 pt-1 pb-2")}>
+          {gachaGroups.map((group) => {
+            const first = group.events[0]!;
+            const meta = GAME_META[first.sourceGameId];
+            const remaining = describeRemaining(first, false);
+            const isSelected = group.events.some((event) => event.eventKey === selectedKey);
+            const title = gachaGroupTitle(group.events);
+            if (!isHome) {
               return (
                 <button
                   key={group.key}
@@ -2338,30 +2340,50 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   aria-expanded={isSelected}
                   onClick={() => toggleSelected(first.eventKey)}
                   className={clsx(
-                    "w-full text-left flex items-center gap-2.5 py-2.5 border-t border-[color:var(--line-soft)]",
+                    "text-left grid gap-1 px-3.5 py-3 rounded-xl transition",
                     "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                    isSelected && "bg-[color:var(--accent-soft)]"
+                    isSelected ? "ring-2 ring-[color:var(--accent)]" : ""
                   )}
+                  style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
                 >
-                  <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold truncate">{title}</div>
-                    <div className="text-[11px] text-[color:var(--muted)] truncate">
-                      {remaining.secondary}
-                    </div>
-                  </div>
-                  <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
-                    {remaining.primary}
+                  <span className="text-sm font-semibold leading-snug">{title}</span>
+                  <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
+                    {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
                   </span>
                 </button>
               );
-            })}
-          </div>
-        ) : (
-          <div className="py-3 text-xs text-[color:var(--muted)]">暂无进行中的卡池</div>
-        )}
-      </SideCard>
-    ) : null;
+            }
+            return (
+              <button
+                key={group.key}
+                type="button"
+                aria-expanded={isSelected}
+                onClick={() => toggleSelected(first.eventKey)}
+                className={clsx(
+                  "w-full text-left flex items-center gap-2.5 py-2.5 border-t border-[color:var(--line-soft)]",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                  isSelected && "bg-[color:var(--accent-soft)]"
+                )}
+              >
+                <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold truncate">{title}</div>
+                  <div className="text-[11px] text-[color:var(--muted)] truncate">
+                    {remaining.secondary}
+                  </div>
+                </div>
+                <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
+                  {remaining.primary}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="py-3 text-xs text-[color:var(--muted)]">暂无进行中的卡池</div>
+      )}
+    </SideCard>
+  );
 
   const codesCard =
     codeEvents.length > 0 ? (

@@ -55,8 +55,6 @@ export default function Shell() {
     setVisibleGameIds,
     setShowNotStarted,
     setShowWeekSeparators,
-    setShowGacha,
-    setShowGachaTrialsOnly,
     sync,
     exportRecurringSettings,
     importRecurringSettings,
@@ -73,8 +71,6 @@ export default function Shell() {
   const gameOrderIds = prefs.gameOrderIds;
   const showNotStarted = prefs.timeline.showNotStarted;
   const showWeekSeparators = prefs.timeline.showWeekSeparators;
-  const showGacha = prefs.timeline.showGacha;
-  const showGachaTrialsOnly = prefs.timeline.showGachaTrialsOnly;
   const buildCommit = (__BUILD_COMMIT__ || "unknown").trim() || "unknown";
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("games");
@@ -226,8 +222,8 @@ export default function Shell() {
           event.is_gacha,
           event.gacha_kind
         );
-        if (!showGacha && isGacha) continue;
-        if (showGachaTrialsOnly && isGacha && !isCharacterTrialGachaEvent(gameId, title, event.content, event.gacha_kind)) continue;
+        // Only character banners reach the timeline, as their trial activity.
+        if (isGacha && !isCharacterTrialGachaEvent(gameId, title, event.content, event.gacha_kind)) continue;
         if (!showNotStarted && nowMs < start.valueOf()) continue;
         if (isUrgentByRemainingMs("upstream", Math.max(0, end.valueOf() - nowMs))) {
           urgent = true;
@@ -259,8 +255,6 @@ export default function Shell() {
     prefs.timeline.completedIdsByGame,
     prefs.timeline.completedRecurringByGame,
     prefs.timeline.recurringActivitiesByGame,
-    showGacha,
-    showGachaTrialsOnly,
     showNotStarted,
     upstreamEventsByGame,
   ]);
@@ -851,7 +845,7 @@ export default function Shell() {
                         <section className="mt-3 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]/65 p-3">
                           <div className="text-sm font-semibold">时间线显示</div>
                           <div className="mt-2 text-xs text-[color:var(--muted)]">
-                            控制时间线是否按周分隔，以及是否展示卡池和未开始活动。
+                            控制时间线是否按周分隔，以及是否展示未开始活动。
                           </div>
                           <div className="mt-3 grid gap-2">
                             <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
@@ -861,30 +855,6 @@ export default function Shell() {
                                 checked={showWeekSeparators}
                                 onChange={(e) => setShowWeekSeparators(e.target.checked)}
                                 className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
-                              />
-                            </label>
-                            <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
-                              <span className="text-xs text-[color:var(--ink)]">显示卡池</span>
-                              <input
-                                type="checkbox"
-                                checked={showGacha}
-                                onChange={(e) => setShowGacha(e.target.checked)}
-                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)]"
-                              />
-                            </label>
-                            <label
-                              className={clsx(
-                                "flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 select-none ml-4",
-                                showGacha ? "cursor-pointer" : "opacity-45 cursor-not-allowed"
-                              )}
-                            >
-                              <span className="text-xs text-[color:var(--ink)]">仅显示试用</span>
-                              <input
-                                type="checkbox"
-                                checked={showGachaTrialsOnly}
-                                disabled={!showGacha}
-                                onChange={(e) => setShowGachaTrialsOnly(e.target.checked)}
-                                className="h-4 w-4 shrink-0 accent-[color:var(--accent)] disabled:cursor-not-allowed"
                               />
                             </label>
                             <label className="flex items-center justify-between gap-3 rounded-xl border border-[color:var(--line)] px-3 py-2 cursor-pointer select-none">
