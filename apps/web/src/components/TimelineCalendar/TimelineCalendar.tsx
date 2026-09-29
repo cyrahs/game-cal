@@ -1603,8 +1603,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     if (!isHome) {
       // Game pages split limited-time activities from recurring ones, like the home page's day groups.
       const groups = [
-        { key: "limited", label: "限时活动", items: displayedRowItems.filter((item) => item.category !== "recurring") },
-        { key: "recurring", label: "循环活动", items: displayedRowItems.filter((item) => item.category === "recurring") },
+        { key: "limited", label: "限时", items: displayedRowItems.filter((item) => item.category !== "recurring") },
+        { key: "recurring", label: "循环", items: displayedRowItems.filter((item) => item.category === "recurring") },
       ];
       return groups.map((group) =>
         group.items.length > 0 ? (
