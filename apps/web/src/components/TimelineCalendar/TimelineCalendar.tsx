@@ -634,9 +634,10 @@ function formatDayLabel(d: Dayjs): string {
   return `${d.format("M月D日")} ${WEEKDAY_NAMES[d.day()]}`;
 }
 
-// 「活动名」说明文字 -> title + subtitle, so long announcement titles stay scannable.
+// 「活动名」说明文字 -> 活动名 (without its 「」) + subtitle, so long announcement titles stay
+// scannable. A title that is only a quoted name is left as is.
 function splitEventTitle(title: string): { main: string; sub: string | null } {
-  const matched = /^(「[^」]+」)\s*[：:·\-—]?\s*(.*)$/.exec(title);
+  const matched = /^「([^」]+)」\s*[：:·\-—]?\s*(.*)$/.exec(title);
   if (!matched) return { main: title, sub: null };
   const rest = (matched[2] ?? "").trim().replace(/^(活动|玩法)[：:]\s*/, "");
   if (!rest) return { main: title, sub: null };
@@ -1481,7 +1482,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const barFill = (event: RowEvent, urgent: boolean): string => {
     if (event.kind === "monthlyCard") return "var(--urgent)";
     if (isHome) return urgent ? "var(--urgent)" : gameColorVar(event.sourceGameId);
-    if (event.kind === "recurring") return "var(--recurring-bar)";
     return gameColorVar(event.sourceGameId);
   };
 
@@ -1595,8 +1595,34 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     );
   };
 
+  const renderRowGroupHeader = (label: string, sub: string | null, count: number, urgent = false) => (
+    <div className="relative h-9 flex items-end gap-2 px-4 md:px-5 pb-1.5 max-md:border-t max-md:border-[color:var(--line-soft)] first:border-t-0">
+      <span className="text-[13px] font-bold" style={{ color: urgent ? "var(--urgent)" : "var(--ink)" }}>
+        {label}
+      </span>
+      {sub ? <span className="text-xs text-[color:var(--muted)]">{sub}</span> : null}
+      <span className="text-[11px] font-mono text-[color:var(--muted)] px-1.5 rounded-md bg-[color:var(--surface2)] border border-[color:var(--line-soft)]">
+        {count}
+      </span>
+    </div>
+  );
+
   const renderRows = () => {
-    if (!isHome) return displayedRowItems.map(renderRow);
+    if (!isHome) {
+      // Game pages split limited-time activities from recurring ones, like the home page's day groups.
+      const groups = [
+        { key: "limited", label: "限时活动", items: displayedRowItems.filter((item) => item.category !== "recurring") },
+        { key: "recurring", label: "循环活动", items: displayedRowItems.filter((item) => item.category === "recurring") },
+      ];
+      return groups.map((group) =>
+        group.items.length > 0 ? (
+          <div key={group.key}>
+            {renderRowGroupHeader(group.label, null, group.items.length)}
+            {group.items.map(renderRow)}
+          </div>
+        ) : null
+      );
+    }
 
     const tomorrowStart = now.startOf("day").add(1, "day");
     const dayAfterStart = tomorrowStart.add(1, "day");
@@ -1621,15 +1647,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (items.length === 0) return null;
       return (
         <div key={group.key}>
-          <div className="relative h-9 flex items-end gap-2 px-4 md:px-5 pb-1.5 max-md:border-t max-md:border-[color:var(--line-soft)] first:border-t-0">
-            <span className="text-[13px] font-bold" style={{ color: group.urgent ? "var(--urgent)" : "var(--ink)" }}>
-              {group.label}
-            </span>
-            <span className="text-xs text-[color:var(--muted)]">{group.sub}</span>
-            <span className="text-[11px] font-mono text-[color:var(--muted)] px-1.5 rounded-md bg-[color:var(--surface2)] border border-[color:var(--line-soft)]">
-              {items.length}
-            </span>
-          </div>
+          {renderRowGroupHeader(group.label, group.sub, items.length, group.urgent)}
           {items.map(renderRow)}
         </div>
       );
@@ -2507,9 +2525,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const e = parseDateTime(currentVersion.end_time);
     if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
     const pct = clamp(((now.valueOf() - s.valueOf()) / (e.valueOf() - s.valueOf())) * 100, 0, 100);
-    const elapsedMs = Math.max(0, now.valueOf() - s.valueOf());
     const remainingMs = Math.max(0, e.valueOf() - now.valueOf());
-    return { s, e, pct, elapsedMs, remainingMs, label: splitVersionLabel(currentVersion) };
+    return { s, e, pct, remainingMs, label: splitVersionLabel(currentVersion) };
   })();
 
   const gameHero = !isHome ? (
@@ -2528,21 +2545,25 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
           {versionProgress ? (
             <div className="grid gap-1.5">
-              <div className="relative h-2.5 rounded-full bg-[color:var(--line-soft)]">
+              {/* The percentage sits above the end of the filled part, kept inside the track. */}
+              <div className="relative h-4 text-[11px] md:text-xs font-mono font-semibold text-[color:var(--ink2)]">
+                <span
+                  className="absolute bottom-0 whitespace-nowrap"
+                  style={{
+                    left: `${versionProgress.pct}%`,
+                    transform: `translateX(-${versionProgress.pct}%)`,
+                  }}
+                >
+                  {Math.round(versionProgress.pct)}%
+                </span>
+              </div>
+              <div className="h-2.5 rounded-full bg-[color:var(--line-soft)]">
                 <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
-                <div
-                  className="absolute -top-1 h-[18px] w-[3px] -ml-px rounded-sm bg-[color:var(--accent)]"
-                  style={{ left: `${versionProgress.pct}%` }}
-                  aria-hidden="true"
-                />
               </div>
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
-                <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
-                <span className="font-semibold text-[color:var(--ink2)]">
-                  已进行 {formatRemainingShort(versionProgress.elapsedMs)} · 剩 {formatRemainingShort(versionProgress.remainingMs)}（
-                  {Math.round(versionProgress.pct)}%）
-                </span>
-                <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")} 结束</span>
+                <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")}</span>
+                <span className="font-semibold text-[color:var(--ink2)]">剩 {formatRemainingShort(versionProgress.remainingMs)}</span>
+                <span className="hidden md:inline">{versionProgress.e.format("MM/DD HH:mm")}</span>
               </div>
             </div>
           ) : (
@@ -2553,7 +2574,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         </div>
       </div>
       <div className="hidden md:block w-px self-stretch bg-[color:var(--line)]" aria-hidden="true" />
-      <div className="flex md:flex-col items-center md:items-start justify-between gap-2 md:w-[180px]">
+      <div className="flex md:flex-col items-center md:items-start justify-between gap-2 md:shrink-0 md:min-w-[84px]">
         <span className="text-xs font-semibold text-[color:var(--muted)]">月卡剩余</span>
         {isMonthlyCardEditing ? (
           <div className="flex items-center gap-2">
@@ -2580,7 +2601,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 }
               }}
               placeholder="天数"
-              className="w-24 h-10 px-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono text-[color:var(--ink)]"
+              className="w-16 h-10 px-2.5 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface2)] text-[15px] font-mono text-[color:var(--ink)]"
             />
             <span className="text-sm text-[color:var(--muted)]">天</span>
           </div>
