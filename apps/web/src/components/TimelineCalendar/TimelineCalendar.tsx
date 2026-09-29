@@ -1858,8 +1858,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       ) : null}
                       <span
                         className={clsx(
-                          "h-[22px] min-w-[26px] px-1.5 rounded-full inline-flex items-center justify-center text-[13px] font-semibold font-mono",
-                          tick.isToday ? "bg-[color:var(--accent)] text-[color:var(--on-accent)]" : "text-[color:var(--ink2)]"
+                          "h-[22px] min-w-[26px] px-1.5 inline-flex items-center justify-center text-[13px] font-semibold font-mono",
+                          // Today is marked by color only: a filled badge would collide with the "now" time label below it.
+                          tick.isToday ? "text-[color:var(--accent)]" : "text-[color:var(--ink2)]"
                         )}
                       >
                         {tick.label}
