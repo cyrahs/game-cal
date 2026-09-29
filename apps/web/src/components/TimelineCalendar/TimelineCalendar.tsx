@@ -1752,29 +1752,32 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <div role="group" aria-label="筛选" className="flex p-[3px] rounded-[10px] bg-[color:var(--surface2)] border border-[color:var(--line)]">
-            {FILTER_OPTIONS.map((option) => {
-              const selected = filter === option.id;
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => setFilter(option.id)}
-                  className={clsx(
-                    "h-8 md:h-[30px] px-2.5 md:px-3 rounded-lg text-[13px] font-semibold transition",
-                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                    selected
-                      ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]"
-                      : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-                  )}
-                >
-                  {option.label}
-                  <span className="hidden sm:inline ml-1 font-mono font-medium opacity-70">{filterCounts[option.id]}</span>
-                </button>
-              );
-            })}
-          </div>
+          {/* Game pages already split 限时 and 循环 into groups, so only home keeps the filter. */}
+          {isHome ? (
+            <div role="group" aria-label="筛选" className="flex p-[3px] rounded-[10px] bg-[color:var(--surface2)] border border-[color:var(--line)]">
+              {FILTER_OPTIONS.map((option) => {
+                const selected = filter === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setFilter(option.id)}
+                    className={clsx(
+                      "h-8 md:h-[30px] px-2.5 md:px-3 rounded-lg text-[13px] font-semibold transition",
+                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
+                      selected
+                        ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]"
+                        : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
+                    )}
+                  >
+                    {option.label}
+                    <span className="hidden sm:inline ml-1 font-mono font-medium opacity-70">{filterCounts[option.id]}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
           <button
             type="button"
             aria-pressed={hideCompleted}
