@@ -1183,8 +1183,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     // Only consider events that overlap the maximum visible window. Timeline start/end
     // are then derived from those events: anything starting before windowStart shows the
     // full previous month truncated, otherwise start from the earliest visible start
-    // (and the same rule for the end).
-    const visible = allRowItems
+    // (and the same rule for the end). Only rows actually shown count, so hiding
+    // completed items or switching filters tightens the range to what remains.
+    const visible = displayedRowItems
       .map((item) => item.event)
       .filter((e) => e._e.valueOf() > windowStart.valueOf() && e._s.valueOf() < windowEnd.valueOf());
 
@@ -1236,7 +1237,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     return { rangeStart: start, rangeEnd: end, ticks };
-  }, [allRowItems, homeRangeEnd, homeRangeStart, isHome, now, showWeekSeparators]);
+  }, [displayedRowItems, homeRangeEnd, homeRangeStart, isHome, now, showWeekSeparators]);
 
   const rangeStartMs = axis.rangeStart.valueOf();
   const rangeMs = Math.max(1, axis.rangeEnd.valueOf() - rangeStartMs);
