@@ -932,6 +932,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (isHome && e._hasRelativeEnd) return false;
       if (isHome && (e._e.valueOf() < nowMs || e._e.valueOf() > homeEndMs)) return false;
       if (isHome) return true;
+      // Game pages hide ended activities too (redeem-code events included).
+      if (!e._hasRelativeEnd && e._e.valueOf() <= nowMs) return false;
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
