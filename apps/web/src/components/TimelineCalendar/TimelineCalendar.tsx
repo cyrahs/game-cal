@@ -728,6 +728,16 @@ function CheckIcon(props: { className?: string; strokeWidth?: number }) {
   );
 }
 
+// Marks anything ending within 24 hours, wherever its remaining time is shown.
+function ClockIcon() {
+  return (
+    <svg className="w-3 h-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
 function RowCheckbox(props: { checked: boolean; label: string; onToggle: () => void }) {
   return (
     <button
@@ -1468,13 +1478,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return { primary: `剩 ${formatRemainingShort(remainingMs)}`, secondary: endLabel, tone: remainingMs <= DAY_MS ? "urgent" : "normal" };
   };
 
-  const eventKindLabel = (event: RowEvent): string => {
-    if (event.kind === "recurring") return "循环";
-    if (event.kind === "monthlyCard") return "月卡";
-    if ((event.redeem_codes?.length ?? 0) > 0) return "兑换码";
-    return "限时";
-  };
-
   const barFill = (event: RowEvent, urgent: boolean): string => {
     if (event.kind === "monthlyCard") return "var(--urgent)";
     if (isHome) return urgent ? "var(--urgent)" : gameColorVar(event.sourceGameId);
@@ -1488,7 +1491,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const isSelected = selectedKey === key;
     const canComplete = canCompleteTimelineEvent(event);
     const displayTitle = (event.kind === "upstream" && event.display_title) || event.title;
-    const { main, sub } = splitEventTitle(displayTitle);
+    // Only the lead title is shown; the full announcement title stays in the tooltip and detail panel.
+    const { main } = splitEventTitle(displayTitle);
     const accessibleTitle = getEventAccessibleTitle(event, showGameMeta, displayTitle);
     const remaining = describeRemaining(event, completed);
     const nowMs = now.valueOf();
@@ -1542,9 +1546,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             aria-label={`${accessibleTitle}，${remaining.primary}`}
             onClick={() => toggleSelected(key)}
           >
-            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")}>{main}</div>
-            <div className="mt-0.5 text-[11px] text-[color:var(--muted)] truncate">
-              {sub ?? eventKindLabel(event)}
+            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")} title={displayTitle}>
+              {main}
             </div>
             <div className="md:hidden mt-1.5 h-1 rounded-full bg-[color:var(--line-soft)] overflow-hidden" aria-hidden="true">
               <div className="h-full rounded-full" style={{ width: `${elapsedPct}%`, background: fill }} />
@@ -1583,12 +1586,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             className="inline-flex items-center justify-end gap-1 font-mono text-xs font-semibold whitespace-nowrap"
             style={{ color: toneColor(remaining.tone) }}
           >
-            {remaining.tone === "urgent" ? (
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 7v5l3 2" />
-              </svg>
-            ) : null}
+            {remaining.tone === "urgent" ? <ClockIcon /> : null}
             {remaining.primary}
           </div>
           <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
@@ -1740,9 +1738,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 md:px-5 py-3 md:py-0 md:h-16 border-b border-[color:var(--line)]">
         <div className="flex items-baseline gap-2.5 min-w-0">
           <h2 className="text-base md:text-[17px] font-bold">{isHome ? "即将结束" : "活动"}</h2>
-          <span className="hidden sm:inline text-[13px] text-[color:var(--muted)] truncate">
-            {isHome ? `未来 ${HOME_TIMELINE_FUTURE_DAYS} 天 · 按结束时间` : `${filterCounts.all} 项 · 按结束时间`}
-          </span>
+          {isHome ? null : (
+            <span className="hidden sm:inline text-[13px] text-[color:var(--muted)] truncate">{`${filterCounts.all} 项`}</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <div role="group" aria-label="筛选" className="flex p-[3px] rounded-[10px] bg-[color:var(--surface2)] border border-[color:var(--line)]">
@@ -2262,7 +2260,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     <div className="flex-1 h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
                       <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
                     </div>
-                    <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}>
+                    <span
+                      className="inline-flex items-center gap-1 text-xs font-semibold font-mono whitespace-nowrap"
+                      style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}
+                    >
+                      {urgent ? <ClockIcon /> : null}
                       剩 {formatRemainingShort(row.remainingMs)}
                     </span>
                   </div>
@@ -2277,7 +2279,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const versionCard =
     isHome && versionRows.length > 0 ? (
       <div className="hidden lg:block">
-        <SideCard title="版本进度" meta="按剩余时间">
+        <SideCard title="版本进度">
           {versionRows.map((row) => {
             const meta = GAME_REGISTRY_BY_ID[row.gameId];
             const urgent = row.valid && row.remainingMs <= DAY_MS;
@@ -2304,9 +2306,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     )}
                   </div>
                   <span
-                    className="text-xs font-semibold font-mono whitespace-nowrap"
+                    className="inline-flex items-center gap-1 text-xs font-semibold font-mono whitespace-nowrap"
                     style={{ color: !row.valid ? "var(--muted)" : urgent ? "var(--urgent)" : "var(--ink2)" }}
                   >
+                    {urgent ? <ClockIcon /> : null}
                     {row.valid ? `剩 ${formatRemainingShort(row.remainingMs)}` : "—"}
                   </span>
                 </div>
@@ -2322,8 +2325,20 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       </div>
     ) : null;
 
+  // Remaining time with the end time underneath, matching the 即将结束 rows.
+  const gachaRemaining = (remaining: ReturnType<typeof describeRemaining>) => (
+    <span className="shrink-0 max-w-[128px] text-right">
+      <span className="flex items-center justify-end gap-1 text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
+        {remaining.tone === "urgent" ? <ClockIcon /> : null}
+        {remaining.primary}
+      </span>
+      <span className="block font-mono text-[10px] text-[color:var(--muted)] truncate" title={remaining.secondary}>
+        {remaining.secondary}
+      </span>
+    </span>
+  );
   const gachaCard = (
-    <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaGroups.length} 个`}>
+    <SideCard title="卡池" meta={isHome ? undefined : `${gachaGroups.length} 个`}>
       {gachaGroups.length > 0 ? (
         <div className={clsx(isHome ? "" : "grid gap-2 pt-1 pb-2")}>
           {gachaGroups.map((group) => {
@@ -2346,9 +2361,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   )}
                   style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
                 >
-                  <span className="text-sm font-semibold leading-snug">{title}</span>
-                  <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
-                    {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
+                  <span className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 text-sm font-semibold leading-snug">{title}</span>
+                    {gachaRemaining(remaining)}
                   </span>
                 </button>
               );
@@ -2366,15 +2381,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 )}
               >
                 <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-semibold truncate">{title}</div>
-                  <div className="text-[11px] text-[color:var(--muted)] truncate">
-                    {remaining.secondary}
-                  </div>
-                </div>
-                <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
-                  {remaining.primary}
-                </span>
+                <div className="min-w-0 flex-1 text-[13px] font-semibold truncate">{title}</div>
+                {gachaRemaining(remaining)}
               </button>
             );
           })}
