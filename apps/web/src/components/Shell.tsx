@@ -5,7 +5,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import type { CalendarEvent, GameId } from "../api/types";
 import { usePrefs } from "../context/prefs";
-import type { ThemePreference } from "../context/theme";
+import { type ThemePreference, useTheme } from "../context/theme";
 import { useEvents } from "../hooks/useEvents";
 import { localizeErrorMessage } from "../lib/errors";
 import { isUrgentByRemainingMs, normalizeEventTitle } from "../lib/events";
@@ -46,16 +46,6 @@ function reorderGameIds(ids: GameId[], fromId: GameId, targetIndex: number): Gam
   return next;
 }
 
-function formatUtcOffsetLabelByDate(date: Date): string {
-  const mins = -date.getTimezoneOffset();
-  const sign = mins >= 0 ? "+" : "-";
-  const abs = Math.abs(mins);
-  const hh = Math.floor(abs / 60);
-  const mm = abs % 60;
-  if (mm === 0) return `UTC${sign}${hh}`;
-  return `UTC${sign}${hh}:${String(mm).padStart(2, "0")}`;
-}
-
 export default function Shell() {
   const location = useLocation();
   const {
@@ -73,6 +63,7 @@ export default function Shell() {
   } = usePrefs();
   // ALL_GAME_IDS is a module constant, so the hook call order is stable across renders.
   const eventStates = ALL_GAME_IDS.map((gameId) => [gameId, useEvents(gameId)] as const);
+  const effectiveTheme = useTheme();
   const themePreference = prefs.theme;
   const themePreferenceIndex = Math.max(
     0,
@@ -100,10 +91,6 @@ export default function Shell() {
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const gameRowRefs = useRef<Partial<Record<GameId, HTMLDivElement | null>>>({});
   const [now, setNow] = useState(() => dayjs());
-  const headerMetaLabel = useMemo(
-    () => `${now.format("YYYY/MM/DD")} · ${formatUtcOffsetLabelByDate(now.toDate())}`,
-    [now]
-  );
   const currentGameId = useMemo<GameId | null>(() => {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
     const matched = GAME_REGISTRY.find((g) => g.route === normalizedPath);
@@ -388,38 +375,37 @@ export default function Shell() {
 
   return (
     <div className="min-h-screen relative">
-      <div className="max-w-[1200px] mx-auto px-4 py-6">
-        <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div className="flex items-end gap-2">
-            <div className="flex items-end gap-2">
-              <img src="/favicon/apple-icon.png" alt="" className="w-7 h-7 object-contain rounded-sm" />
-              <div className="text-2xl font-semibold tracking-tight leading-none">Game Calendar</div>
-            </div>
-            <div className="text-xs text-[color:var(--muted)] leading-none">{headerMetaLabel}</div>
+      <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-4 md:pt-7 pb-6">
+        <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <div className="flex items-center gap-2.5">
+            <img src="/favicon/apple-icon.png" alt="" className="w-8 h-8 md:w-9 md:h-9 object-contain" />
+            <div className="text-lg md:text-xl font-bold tracking-tight leading-none">Game Calendar</div>
           </div>
 
-          <nav className="flex max-w-full flex-nowrap items-center gap-1.5 md:gap-2">
+          <nav
+            aria-label="游戏"
+            className={clsx(
+              "order-3 w-full md:order-none md:w-auto",
+              "flex items-center justify-between md:justify-start gap-1 md:gap-1.5 p-1 md:p-[5px]",
+              "rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)]"
+            )}
+          >
             <NavLink
               to="/"
               aria-label="首页"
               title="首页"
               className={({ isActive }) =>
                 clsx(
-                  "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
+                  "inline-flex shrink-0 w-11 h-11 md:w-[42px] md:h-[42px] items-center justify-center rounded-xl transition",
                   "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
+                  isActive
+                    ? "bg-[color:var(--ink)] text-[color:var(--bg0)]"
+                    : "text-[color:var(--ink2)] hover:bg-[color:var(--tile)]"
                 )
               }
               end
             >
-              <span
-                className={clsx(
-                  "relative inline-flex h-full w-full min-w-0 items-center justify-center rounded-xl bg-[#282c34] text-[#abb2bf]",
-                  "ring-1 ring-transparent transition",
-                  "hover:ring-[color:var(--ring)]",
-                  "active:scale-[0.98]"
-                )}
-              >
+              <span className="relative inline-flex items-center justify-center active:scale-[0.96]">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
                   <path
                     d="M3 10.75 12 3l9 7.75"
@@ -445,28 +431,23 @@ export default function Shell() {
                 title={g.name}
                 className={({ isActive }) =>
                   clsx(
-                    "inline-flex min-w-0 w-9 aspect-square items-center justify-center rounded-xl transition hover:-translate-y-[1px]",
+                    "relative inline-flex shrink-0 w-11 h-11 md:w-[42px] md:h-[42px] items-center justify-center rounded-xl border-2 transition",
                     "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                    isActive && "ring-2 ring-[color:var(--ink)] ring-offset-2 ring-offset-[color:var(--bg0)]"
+                    isActive ? "border-[color:var(--ink)]" : "border-transparent hover:border-[color:var(--line)]"
                   )
                 }
                 end
               >
-                <span className="relative inline-flex h-full w-full min-w-0">
+                <span className="relative inline-flex w-[34px] h-[34px] md:w-8 md:h-8">
                   <img
                     src={g.icon}
                     alt={g.name}
-                    className={clsx(
-                      "h-full w-full object-contain rounded-xl",
-                      "ring-1 ring-transparent transition",
-                      "hover:ring-[color:var(--ring)]",
-                      "active:scale-[0.98]"
-                    )}
+                    className="h-full w-full object-cover rounded-[9px] active:scale-[0.96] transition"
                     referrerPolicy="no-referrer"
                   />
                   {hasUrgentByGame[g.id] ? (
                     <span
-                      className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-[color:var(--bg0)]"
+                      className="absolute -top-1.5 -right-1.5 w-3 h-3 rounded-full bg-[color:var(--dot)] border-2 border-[color:var(--card)]"
                       title={`${g.name} 有即将结束的未完成活动`}
                       aria-label={`${g.name} 有即将结束的未完成活动`}
                     />
@@ -475,13 +456,40 @@ export default function Shell() {
               </NavLink>
             ))}
 
-            <div className="relative min-w-0 w-9" ref={settingsRef}>
+          </nav>
+
+          <div className="order-2 md:order-none flex items-center gap-1.5 md:gap-2">
+            <button
+              type="button"
+              className={clsx(
+                "w-11 h-11 md:w-10 md:h-10 rounded-xl inline-flex items-center justify-center transition",
+                "text-[color:var(--ink2)] md:border md:border-[color:var(--line)] md:bg-[color:var(--card)]",
+                "hover:text-[color:var(--ink)] hover:border-[color:var(--ink)]",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+              )}
+              onClick={() => setTheme(effectiveTheme === "dark" ? "light" : "dark")}
+              aria-label={effectiveTheme === "dark" ? "切换到浅色" : "切换到深色"}
+              title={effectiveTheme === "dark" ? "切换到浅色" : "切换到深色"}
+            >
+              {effectiveTheme === "dark" ? (
+                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+                </svg>
+              ) : (
+                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+                </svg>
+              )}
+            </button>
+            <div className="relative" ref={settingsRef}>
               <button
                 type="button"
                 className={clsx(
-                  "glass w-full aspect-square rounded-xl inline-flex items-center justify-center transition hover:-translate-y-[1px]",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                  "hover:border-[color:var(--ink)]"
+                  "w-11 h-11 md:w-10 md:h-10 rounded-xl inline-flex items-center justify-center transition",
+                  "text-[color:var(--ink2)] md:border md:border-[color:var(--line)] md:bg-[color:var(--card)]",
+                  "hover:text-[color:var(--ink)] hover:border-[color:var(--ink)]",
+                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
                 )}
                 onClick={() => setIsSettingsOpen((v) => !v)}
                 aria-label="设置"
@@ -939,10 +947,10 @@ export default function Shell() {
                 </div>
               ) : null}
             </div>
-          </nav>
+          </div>
         </header>
 
-        <main className="mt-6">
+        <main className="mt-5 md:mt-7">
           <Outlet />
         </main>
 
