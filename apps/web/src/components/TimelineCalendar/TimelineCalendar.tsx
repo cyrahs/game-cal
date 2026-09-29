@@ -1468,13 +1468,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return { primary: `剩 ${formatRemainingShort(remainingMs)}`, secondary: endLabel, tone: remainingMs <= DAY_MS ? "urgent" : "normal" };
   };
 
-  const eventKindLabel = (event: RowEvent): string => {
-    if (event.kind === "recurring") return "循环";
-    if (event.kind === "monthlyCard") return "月卡";
-    if ((event.redeem_codes?.length ?? 0) > 0) return "兑换码";
-    return "限时";
-  };
-
   const barFill = (event: RowEvent, urgent: boolean): string => {
     if (event.kind === "monthlyCard") return "var(--urgent)";
     if (isHome) return urgent ? "var(--urgent)" : gameColorVar(event.sourceGameId);
@@ -1488,7 +1481,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const isSelected = selectedKey === key;
     const canComplete = canCompleteTimelineEvent(event);
     const displayTitle = (event.kind === "upstream" && event.display_title) || event.title;
-    const { main, sub } = splitEventTitle(displayTitle);
+    // Only the lead title is shown; the full announcement title stays in the tooltip and detail panel.
+    const { main } = splitEventTitle(displayTitle);
     const accessibleTitle = getEventAccessibleTitle(event, showGameMeta, displayTitle);
     const remaining = describeRemaining(event, completed);
     const nowMs = now.valueOf();
@@ -1542,9 +1536,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             aria-label={`${accessibleTitle}，${remaining.primary}`}
             onClick={() => toggleSelected(key)}
           >
-            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")}>{main}</div>
-            <div className="mt-0.5 text-[11px] text-[color:var(--muted)] truncate">
-              {sub ?? eventKindLabel(event)}
+            <div className={clsx("text-sm font-semibold truncate", (completed || isEnded) && "line-through")} title={displayTitle}>
+              {main}
             </div>
             <div className="md:hidden mt-1.5 h-1 rounded-full bg-[color:var(--line-soft)] overflow-hidden" aria-hidden="true">
               <div className="h-full rounded-full" style={{ width: `${elapsedPct}%`, background: fill }} />
