@@ -1375,7 +1375,7 @@ test("Genshin banner labels use the featured 5-star character or weapons", () =>
     ].join("")
   );
   assert.deepEqual(character.featured, { characters: ["薇斯纳"], weapons: [] });
-  assert.equal(character.label, "薇斯纳");
+  assert.equal(character.label, "薇斯纳 限时UP");
 
   const weapon = featuredTitle(
     "genshin",
@@ -1386,10 +1386,10 @@ test("Genshin banner labels use the featured 5-star character or weapons", () =>
     ].join("")
   );
   assert.deepEqual(weapon.featured, { characters: [], weapons: ["蝶变", "漩流颂歌"] });
-  assert.equal(weapon.label, "武器：蝶变、漩流颂歌");
+  assert.equal(weapon.label, "武器：蝶变、漩流颂歌 限时UP");
 
   // Without body text the wish title itself still names the featured character.
-  assert.equal(featuredTitle("genshin", "「涌浪叙歌」祈愿：「幽歌萦渊·沃雅妮莎(水)」概率UP！").label, "沃雅妮莎");
+  assert.equal(featuredTitle("genshin", "「涌浪叙歌」祈愿：「幽歌萦渊·沃雅妮莎(水)」概率UP！").label, "沃雅妮莎 限时UP");
 });
 
 test("Star Rail banner labels list each limited 5-star character of a warp notice", () => {
@@ -1407,7 +1407,7 @@ test("Star Rail banner labels list each limited 5-star character of a warp notic
     characters: ["真珠", "绯英"],
     weapons: ["献给明日的色彩", "邂逅于下一个花季"],
   });
-  assert.equal(label, "真珠、绯英");
+  assert.equal(label, "真珠、绯英 限时UP");
 
   assert.equal(
     featuredTitle(
@@ -1415,7 +1415,7 @@ test("Star Rail banner labels list each limited 5-star character of a warp notic
       "Fate[UBW] 联动跃迁说明",
       "<p>「万华骄芒」光锥联动跃迁期间，联动限定5星光锥「星火悄然闪耀（智识）」跃迁成功概率提升。</p>"
     ).label,
-    "光锥：星火悄然闪耀"
+    "光锥：星火悄然闪耀 限时UP"
   );
 });
 
@@ -1431,7 +1431,7 @@ test("ZZZ banner labels use the limited S-rank agents of a phase notice", () => 
     ].join("")
   );
   assert.deepEqual(featured, { characters: ["克拉蕾", "南宫羽"], weapons: ["猩红渴望"] });
-  assert.equal(label, "克拉蕾、南宫羽");
+  assert.equal(label, "克拉蕾、南宫羽 限时UP");
 });
 
 test("Wuthering Waves banner labels ignore the shared 4-star rate-ups", () => {
@@ -1441,14 +1441,14 @@ test("Wuthering Waves banner labels ignore the shared 4-star rate-ups", () => {
     "<p>活动期间，5星角色「景燃」，4星角色「莫特斐」、「秋水」、「渊武」唤取概率限时提升！</p><p>- 所有归属于【角色活动唤取】的活动共享5星保底机制，漂泊者未获得5星角色的保底计数将合并计算。</p>"
   );
   assert.deepEqual(character.featured, { characters: ["景燃"], weapons: [] });
-  assert.equal(character.label, "景燃");
+  assert.equal(character.label, "景燃 限时UP");
 
   const weapon = featuredTitle(
     "ww",
     "「千般渡」武器活动唤取",
     "<p>活动期间，5星武器「千般渡」，4星武器「凋亡频移」、「异响空灵」、「飞逝」唤取概率限时提升！</p>"
   );
-  assert.equal(weapon.label, "武器：千般渡");
+  assert.equal(weapon.label, "武器：千般渡 限时UP");
 });
 
 test("Endfield banner labels use the rate-up 6-star operator or weapon", () => {
@@ -1462,7 +1462,7 @@ test("Endfield banner labels use the rate-up 6-star operator or weapon", () => {
     ].join("")
   );
   assert.deepEqual(operator.featured, { characters: ["提弗洛斯"], weapons: [] });
-  assert.equal(operator.label, "提弗洛斯");
+  assert.equal(operator.label, "提弗洛斯 限时UP");
 
   const mixed = featuredTitle(
     "endfield",
@@ -1473,11 +1473,11 @@ test("Endfield banner labels use the rate-up 6-star operator or weapon", () => {
     ].join("")
   );
   assert.deepEqual(mixed.featured, { characters: ["伊冯"], weapons: ["艺术暴君"] });
-  assert.equal(mixed.label, "伊冯");
+  assert.equal(mixed.label, "伊冯 限时UP");
 
   assert.equal(
     featuredTitle("endfield", "幽寒申领", "<p>「幽寒申领」开放期间，6星武器【寒夜幽影（施术单元）】获取概率提升！</p>").label,
-    "武器：寒夜幽影"
+    "武器：寒夜幽影 限时UP"
   );
 });
 

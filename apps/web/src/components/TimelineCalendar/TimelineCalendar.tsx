@@ -639,17 +639,40 @@ function splitEventTitle(title: string): { main: string; sub: string | null } {
   return { main: matched[1]!, sub: rest };
 }
 
-// Home collapses banners that end together; name the group by every featured
-// character in it, falling back to weapons and then to the notice title.
+function hasFeaturedCharacters(event: ParsedUpstreamEvent): boolean {
+  return (event.gacha_featured?.characters.length ?? 0) > 0;
+}
+
+function gachaWindowKey(event: ParsedUpstreamEvent): string {
+  return `${event.sourceGameId}:${event._s.valueOf()}:${event._hasRelativeEnd ? "rel" : event._e.valueOf()}`;
+}
+
+// Character banners of one game that open and close together share a card; the
+// weapon banners running in the same window are implied by them and not listed.
+function groupGachaEvents(events: ParsedUpstreamEvent[]): Array<{ key: string; events: ParsedUpstreamEvent[] }> {
+  const characterWindows = new Set(events.filter(hasFeaturedCharacters).map(gachaWindowKey));
+  const groups = new Map<string, ParsedUpstreamEvent[]>();
+  for (const event of events) {
+    const windowKey = gachaWindowKey(event);
+    const isCharacter = hasFeaturedCharacters(event);
+    const isWeaponOnly = !isCharacter && (event.gacha_featured?.weapons.length ?? 0) > 0;
+    if (isWeaponOnly && characterWindows.has(windowKey)) continue;
+    const key = isCharacter ? `characters:${windowKey}` : event.eventKey;
+    const list = groups.get(key);
+    if (list) list.push(event);
+    else groups.set(key, [event]);
+  }
+  return [...groups.entries()].map(([key, grouped]) => ({ key, events: grouped }));
+}
+
 function gachaGroupTitle(events: ParsedUpstreamEvent[]): string {
   const first = events[0]!;
   if (events.length === 1) return first.gacha_title ?? first.title;
   const merged: GachaFeatured = { characters: [], weapons: [] };
   for (const event of events) {
     for (const name of event.gacha_featured?.characters ?? []) if (!merged.characters.includes(name)) merged.characters.push(name);
-    for (const name of event.gacha_featured?.weapons ?? []) if (!merged.weapons.includes(name)) merged.weapons.push(name);
   }
-  return formatGachaFeaturedTitle(first.sourceGameId, merged) ?? `${splitEventTitle(first.title).main} 等 ${events.length} 个卡池`;
+  return formatGachaFeaturedTitle(first.sourceGameId, merged) ?? first.title;
 }
 
 function splitVersionLabel(version: GameVersionInfo): { num: string | null; name: string | null } {
@@ -1326,17 +1349,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return rows.sort((a, b) => a.endMs - b.endMs);
   }, [isHome, now, props.currentVersions, sourceGameIds]);
 
-  const gachaGroups = useMemo(() => {
-    const groups = new Map<string, ParsedUpstreamEvent[]>();
-    for (const event of gachaEvents) {
-      // Home collapses a game's banners that end together (e.g. a whole phase) into one line.
-      const key = isHome ? `${event.sourceGameId}:${event._hasRelativeEnd ? "rel" : event._e.valueOf()}` : event.eventKey;
-      const list = groups.get(key);
-      if (list) list.push(event);
-      else groups.set(key, [event]);
-    }
-    return [...groups.entries()].map(([key, events]) => ({ key, events }));
-  }, [gachaEvents, isHome]);
+  const gachaGroups = useMemo(() => groupGachaEvents(gachaEvents), [gachaEvents]);
 
   const recurringDefinitionsSorted = useMemo(() => {
     return [...recurringDefs].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans-CN"));
@@ -2263,7 +2276,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const gachaCard =
     showGacha ? (
-      <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaEvents.length} 个`}>
+      <SideCard title="卡池" meta={isHome ? "按结束时间" : `${gachaGroups.length} 个`}>
         {gachaGroups.length > 0 ? (
           <div className={clsx(isHome ? "" : "grid gap-2 pt-1 pb-2")}>
             {gachaGroups.map((group) => {
@@ -2286,10 +2299,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     )}
                     style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
                   >
-                    <span className="text-sm font-semibold leading-snug">{first.gacha_title ?? first.title}</span>
-                    {first.gacha_title ? (
-                      <span className="min-w-0 truncate text-[11px] text-[color:var(--muted)] leading-snug">{first.title}</span>
-                    ) : null}
+                    <span className="text-sm font-semibold leading-snug">{title}</span>
                     <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
                       {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
                     </span>
@@ -2312,8 +2322,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-semibold truncate">{title}</div>
                     <div className="text-[11px] text-[color:var(--muted)] truncate">
-                      {meta.shortName}
-                      {group.events.length > 1 ? ` · ${group.events.length} 个卡池` : ""} · {remaining.secondary}
+                      {meta.shortName} · {remaining.secondary}
                     </div>
                   </div>
                   <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
