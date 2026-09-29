@@ -12,7 +12,13 @@ import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "
 import { clamp } from "../../lib/color";
 import { validateCronExpression } from "../../lib/cron";
 import { normalizeEventTitle } from "../../lib/events";
-import { isCharacterTrialGachaKind, resolveGachaClassification } from "../../lib/gacha";
+import {
+  extractGachaFeatured,
+  formatGachaFeaturedTitle,
+  type GachaFeatured,
+  isCharacterTrialGachaKind,
+  resolveGachaClassification,
+} from "../../lib/gacha";
 import { ALL_GAME_IDS, GAME_META, GAME_REGISTRY_BY_ID, gameColorVar, gameInkVar } from "../../lib/games";
 import {
   WEEKDAY_NAMES,
@@ -64,7 +70,14 @@ type ParsedEvent = CalendarEvent & {
   sourceGameId: GameId;
   eventKey: string;
 };
-type ParsedUpstreamEvent = ParsedEvent & { kind: "upstream"; is_gacha: boolean; gacha_kind: GachaKind };
+type ParsedUpstreamEvent = ParsedEvent & {
+  kind: "upstream";
+  is_gacha: boolean;
+  gacha_kind: GachaKind;
+  // Featured characters / weapons pulled from the banner text, and the short label built from them.
+  gacha_featured: GachaFeatured | null;
+  gacha_title: string | null;
+};
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
   recurringActivityId: string;
@@ -626,6 +639,19 @@ function splitEventTitle(title: string): { main: string; sub: string | null } {
   return { main: matched[1]!, sub: rest };
 }
 
+// Home collapses banners that end together; name the group by every featured
+// character in it, falling back to weapons and then to the notice title.
+function gachaGroupTitle(events: ParsedUpstreamEvent[]): string {
+  const first = events[0]!;
+  if (events.length === 1) return first.gacha_title ?? first.title;
+  const merged: GachaFeatured = { characters: [], weapons: [] };
+  for (const event of events) {
+    for (const name of event.gacha_featured?.characters ?? []) if (!merged.characters.includes(name)) merged.characters.push(name);
+    for (const name of event.gacha_featured?.weapons ?? []) if (!merged.weapons.includes(name)) merged.weapons.push(name);
+  }
+  return formatGachaFeaturedTitle(first.sourceGameId, merged) ?? `${splitEventTitle(first.title).main} 等 ${events.length} 个卡池`;
+}
+
 function splitVersionLabel(version: GameVersionInfo): { num: string | null; name: string | null } {
   const raw = version.version.trim();
   const titleNum = version.title?.match(/(\d+\.\d+)/)?.[1] ?? null;
@@ -904,12 +930,15 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           e.is_gacha,
           e.gacha_kind
         );
+        const gachaFeatured = isGacha ? extractGachaFeatured(sourceGameId, title, e.content) : null;
         return {
           ...e,
           kind: "upstream" as const,
           title,
           is_gacha: isGacha,
           gacha_kind: gachaKind,
+          gacha_featured: gachaFeatured,
+          gacha_title: gachaFeatured ? formatGachaFeaturedTitle(sourceGameId, gachaFeatured) : null,
           _s: s,
           _e: ed,
           _hasRelativeEnd: relativeEnd,
@@ -2242,7 +2271,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
               const meta = GAME_META[first.sourceGameId];
               const remaining = describeRemaining(first, false);
               const isSelected = group.events.some((event) => event.eventKey === selectedKey);
-              const title = group.events.length > 1 ? `${splitEventTitle(first.title).main} 等 ${group.events.length} 个卡池` : first.title;
+              const title = gachaGroupTitle(group.events);
               if (!isHome) {
                 return (
                   <button
@@ -2257,7 +2286,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     )}
                     style={{ background: `color-mix(in srgb, ${gameColorVar(first.sourceGameId)} 16%, transparent)` }}
                   >
-                    <span className="text-sm font-semibold leading-snug">{first.title}</span>
+                    <span className="text-sm font-semibold leading-snug">{first.gacha_title ?? first.title}</span>
+                    {first.gacha_title ? (
+                      <span className="min-w-0 truncate text-[11px] text-[color:var(--muted)] leading-snug">{first.title}</span>
+                    ) : null}
                     <span className="text-[11px] font-mono font-semibold" style={{ color: toneColor(remaining.tone) }}>
                       {remaining.primary} <span className="font-normal text-[color:var(--muted)]">· {remaining.secondary}</span>
                     </span>
@@ -2280,7 +2312,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-semibold truncate">{title}</div>
                     <div className="text-[11px] text-[color:var(--muted)] truncate">
-                      {meta.shortName} · {remaining.secondary}
+                      {meta.shortName}
+                      {group.events.length > 1 ? ` · ${group.events.length} 个卡池` : ""} · {remaining.secondary}
                     </div>
                   </div>
                   <span className="text-xs font-semibold font-mono whitespace-nowrap" style={{ color: toneColor(remaining.tone) }}>
