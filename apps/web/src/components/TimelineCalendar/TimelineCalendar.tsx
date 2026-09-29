@@ -795,7 +795,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
   const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
-  const showRecurringSettingsPanel = !isHome && isRecurringSettingsOpen;
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
@@ -1923,35 +1922,87 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     </div>
   ) : null;
 
-  const recurringSettingsPanel = showRecurringSettingsPanel ? (
-    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink overflow-hidden">
-      <div className="px-4 py-3 border-b border-[color:var(--line)] bg-[color:var(--surface2)] flex items-center justify-between gap-3">
-        <div className="flex items-end gap-2 min-w-0">
-          <div className="text-sm font-semibold">循环活动配置</div>
-          {editingRecurringId ? (
-            <div className="text-xs text-[color:var(--accent)] whitespace-nowrap leading-none">正在编辑循环活动</div>
-          ) : null}
-        </div>
-        <button
-          type="button"
-          onClick={toggleRecurringSettings}
-          aria-label="关闭循环活动配置"
-          className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-[color:var(--muted)] hover:text-[color:var(--ink)] hover:bg-[color:var(--tile)]"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </div>
-            <div className="px-4 py-3 bg-[color:var(--wash)]/40">
+  // Editing happens inside the 循环活动 side card, so it never stacks under the detail panel.
+  const recurringEditor = (
+    <div className="grid gap-3 pt-1 pb-3">
+              <div className="grid gap-2">
+                {recurringDefinitionsSorted.length > 0 ? (
+                  recurringDefinitionsSorted.map((activity) => (
+                    <div
+                      key={activity.id}
+                      className="rounded-xl border border-[color:var(--line)] px-2 py-2 flex items-start justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium break-words">{activity.title}</div>
+                        <div className="text-xs text-[color:var(--muted)] mt-1">
+                          {formatRecurringRule(primaryGameId, activity.rule, activity.durationDays)}
+                        </div>
+                      </div>
+                      <div className="shrink-0 flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={clsx(
+                            "text-xs px-2 py-1 rounded-lg border transition",
+                            editingRecurringId === activity.id
+                              ? "border-[color:var(--accent)] text-[color:var(--accent)] bg-[color:var(--tile)]/40"
+                              : "border-[color:var(--line)] hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]"
+                          )}
+                          onClick={() => {
+                            setIsRecurringSettingsOpen(true);
+                            if (editingRecurringId === activity.id) {
+                              if (!hasUnsavedEditingChanges) {
+                                resetRecurringForm();
+                                return;
+                              }
+                              // Never discard silently: point at the form's own 保存/取消
+                              // buttons instead of a native confirm dialog.
+                              setRecurringFormError("有未保存的修改：请点击“保存”提交，或点击“取消”放弃修改");
+                              return;
+                            }
+                            setEditingRecurringId(activity.id);
+                            setRecurringForm(makeRecurringFormStateFromActivity(activity));
+                            setRecurringFormError(null);
+                            setPendingDeleteRecurringId(null);
+                          }}
+                        >
+                          修改
+                        </button>
+                        <button
+                          type="button"
+                          data-recurring-delete-id={activity.id}
+                          className={clsx(
+                            "text-xs px-2 py-1 rounded-lg border transition",
+                            pendingDeleteRecurringId === activity.id
+                              ? "border-red-500 text-red-500 bg-red-500/10 hover:bg-red-500/15"
+                              : "border-[color:var(--line)] hover:border-red-400 hover:text-red-500"
+                          )}
+                          onClick={() => {
+                            if (pendingDeleteRecurringId !== activity.id) {
+                              setPendingDeleteRecurringId(activity.id);
+                              return;
+                            }
+                            if (editingRecurringId === activity.id) resetRecurringForm();
+                            removeRecurringActivity(primaryGameId, activity.id);
+                            setPendingDeleteRecurringId(null);
+                          }}
+                        >
+                          {pendingDeleteRecurringId === activity.id ? "确认" : "删除"}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-xs text-[color:var(--muted)]">当前游戏尚未配置循环活动</div>
+                )}
+              </div>
               <form
-                className="grid gap-3"
+                className="grid gap-3 pt-3 border-t border-[color:var(--line-soft)]"
                 onSubmit={(e) => {
                   e.preventDefault();
                   handleSubmitRecurring();
                 }}
               >
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="grid gap-2 grid-cols-2">
                   <label className="grid gap-1">
                     <span className="text-xs text-[color:var(--muted)]">活动名称</span>
                     <input
@@ -1986,8 +2037,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   </label>
                 </div>
 
-                <div className="grid gap-2 md:grid-cols-2">
-                  <label className={clsx("grid gap-1", recurringForm.kind === "cron" && "md:col-span-2")}>
+                <div className="grid gap-2 grid-cols-2">
+                  <label className={clsx("grid gap-1", recurringForm.kind === "cron" && "col-span-2")}>
                     <span className="text-xs text-[color:var(--muted)]">循环方式</span>
                     <select
                       value={recurringForm.kind}
@@ -2058,7 +2109,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   ) : null}
                 </div>
 
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="grid gap-2 grid-cols-2">
                   {recurringForm.kind === "interval" ? (
                     <label className="grid gap-1">
                       <span className="text-xs text-[color:var(--muted)]">循环天数</span>
@@ -2122,8 +2173,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="text-xs text-red-500">{recurringCronValidationError}</div>
                 ) : null}
 
-                <div className="grid gap-2 md:grid-cols-[3fr_1fr] md:items-start">
-                  <div className="min-w-0 text-left text-xs text-[color:var(--muted)] break-words md:pr-2 md:min-h-[36px] md:flex md:items-center">
+                <div className="grid gap-2">
+                  <div className="min-w-0 text-left text-xs text-[color:var(--muted)] break-words">
                     {recurringForm.kind === "interval"
                       ? `自 ${recurringForm.intervalStartDate || "（未设置）"} 起每 ${recurringForm.intervalDays || "N"
                       } 天 ${recurringForm.time || "00:00"} 刷新（${recurringTzLabel}）`
@@ -2131,7 +2182,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                         ? formatCronHumanReadable(recurringCronPreview)
                         : "（空）"}
                   </div>
-                  <div className="flex items-center gap-2 md:justify-end">
+                  <div className="flex items-center gap-2 justify-end">
                     {editingRecurringId ? (
                       <button
                         type="button"
@@ -2160,81 +2211,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   <div className="text-xs text-red-500">{recurringFormError}</div>
                 ) : null}
               </form>
-
-              <div className="mt-3 pt-3 border-t border-[color:var(--line)] grid gap-2">
-                <div className="text-xs text-[color:var(--muted)]">已配置项目</div>
-                {recurringDefinitionsSorted.length > 0 ? (
-                  recurringDefinitionsSorted.map((activity) => (
-                    <div
-                      key={activity.id}
-                      className="rounded-xl border border-[color:var(--line)] px-2 py-2 flex items-start justify-between gap-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium break-words">{activity.title}</div>
-                        <div className="text-xs text-[color:var(--muted)] mt-1">
-                          {formatRecurringRule(primaryGameId, activity.rule, activity.durationDays)}
-                        </div>
-                      </div>
-                      <div className="shrink-0 flex items-center gap-2">
-                        <button
-                          type="button"
-                          className={clsx(
-                            "text-xs px-2 py-1 rounded-lg border transition",
-                            editingRecurringId === activity.id
-                              ? "border-[color:var(--accent)] text-[color:var(--accent)] bg-[color:var(--tile)]/40"
-                              : "border-[color:var(--line)] hover:border-[color:var(--ink)] hover:bg-[color:var(--tile)]"
-                          )}
-                          onClick={() => {
-                            setIsRecurringSettingsOpen(true);
-                            if (editingRecurringId === activity.id) {
-                              if (!hasUnsavedEditingChanges) {
-                                resetRecurringForm();
-                                return;
-                              }
-                              // Never discard silently: point at the form's own 保存/取消
-                              // buttons instead of a native confirm dialog.
-                              setRecurringFormError("有未保存的修改：请点击“保存”提交，或点击“取消”放弃修改");
-                              return;
-                            }
-                            setEditingRecurringId(activity.id);
-                            setRecurringForm(makeRecurringFormStateFromActivity(activity));
-                            setRecurringFormError(null);
-                            setPendingDeleteRecurringId(null);
-                          }}
-                        >
-                          修改
-                        </button>
-                        <button
-                          type="button"
-                          data-recurring-delete-id={activity.id}
-                          className={clsx(
-                            "text-xs px-2 py-1 rounded-lg border transition",
-                            pendingDeleteRecurringId === activity.id
-                              ? "border-red-500 text-red-500 bg-red-500/10 hover:bg-red-500/15"
-                              : "border-[color:var(--line)] hover:border-red-400 hover:text-red-500"
-                          )}
-                          onClick={() => {
-                            if (pendingDeleteRecurringId !== activity.id) {
-                              setPendingDeleteRecurringId(activity.id);
-                              return;
-                            }
-                            if (editingRecurringId === activity.id) resetRecurringForm();
-                            removeRecurringActivity(primaryGameId, activity.id);
-                            setPendingDeleteRecurringId(null);
-                          }}
-                        >
-                          {pendingDeleteRecurringId === activity.id ? "确认" : "删除"}
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-xs text-[color:var(--muted)]">当前游戏尚未配置循环活动</div>
-                )}
-              </div>
-            </div>
-    </section>
-  ) : null;
+    </div>
+  );
 
   const versionScroller =
     isHome && versionRows.length > 0 ? (
@@ -2458,7 +2436,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         </button>
       }
     >
-      {recurringDefinitionsSorted.length > 0 ? (
+      {isRecurringSettingsOpen ? (
+        recurringEditor
+      ) : recurringDefinitionsSorted.length > 0 ? (
         <div className="pb-2">
           {recurringDefinitionsSorted.map((activity) => (
             <div key={activity.id} className="py-2 border-t border-[color:var(--line-soft)]">
@@ -2626,7 +2606,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         <div className="grid grid-cols-1 gap-4 min-w-0">
           {timelineCard}
           {detailPanel}
-          {recurringSettingsPanel}
         </div>
         <aside className="grid grid-cols-1 gap-4 md:gap-5 min-w-0 content-start">
           {versionCard}
