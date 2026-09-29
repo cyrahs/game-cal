@@ -2528,13 +2528,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
           {versionProgress ? (
             <div className="grid gap-1.5">
-              <div className="relative h-2.5 rounded-full bg-[color:var(--line-soft)]">
+              <div className="h-2.5 rounded-full bg-[color:var(--line-soft)]">
                 <div className="h-full rounded-full" style={{ width: `${versionProgress.pct}%`, background: gameColorVar(primaryGameId) }} />
-                <div
-                  className="absolute -top-1 h-[18px] w-[3px] -ml-px rounded-sm bg-[color:var(--accent)]"
-                  style={{ left: `${versionProgress.pct}%` }}
-                  aria-hidden="true"
-                />
               </div>
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")} 开始</span>
