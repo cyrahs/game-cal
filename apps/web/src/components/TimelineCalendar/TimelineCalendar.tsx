@@ -75,7 +75,7 @@ type ParsedUpstreamEvent = ParsedEvent & {
   is_gacha: boolean;
   gacha_kind: GachaKind;
   // Featured characters / weapons pulled from the banner text, and the short label built from them.
-  gacha_featured: GachaFeatured | null;
+  gacha_featured: GachaFeatured | undefined;
   gacha_title: string | null;
   // Timeline trial rows stand for one or more character banners: a "[试用] …" label
   // and the ids of every banner they cover, all completed together.
@@ -986,7 +986,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           e.is_gacha,
           e.gacha_kind
         );
-        const gachaFeatured = isGacha ? extractGachaFeatured(sourceGameId, title, e.content) : null;
+        const gachaFeatured = isGacha ? (e.gacha_featured ?? extractGachaFeatured(sourceGameId, title, e.content)) : undefined;
         return {
           ...e,
           kind: "upstream" as const,

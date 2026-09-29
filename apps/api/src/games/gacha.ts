@@ -1,4 +1,6 @@
-import type { GachaKind, GameId } from "../types.js";
+import type { GachaFeatured, GachaKind, GameId } from "../types.js";
+
+export type { GachaFeatured };
 
 function normalizeForGachaKind(...inputs: Array<string | undefined>): string {
   return inputs
@@ -197,11 +199,6 @@ export function classifyGachaEvent(game: GameId, title: string, content?: string
       return _exhaustive;
     }
   }
-}
-
-export interface GachaFeatured {
-  characters: string[];
-  weapons: string[];
 }
 
 type FeaturedPattern = {
