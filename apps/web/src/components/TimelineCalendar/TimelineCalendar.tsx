@@ -1870,7 +1870,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     className="absolute bottom-0 translate-y-1/2 -translate-x-1/2 z-20 px-1.5 rounded-md bg-[color:var(--accent)] text-[color:var(--on-accent)] text-[10px] font-bold font-mono whitespace-nowrap"
                     style={{ left: `${nowPct}%` }}
                   >
-                    <LiveClock />
+                    {now.format("HH:mm")}
                   </span>
                 ) : null}
               </div>
@@ -2481,7 +2481,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         <div className="grid gap-1">
           <h1 className="text-2xl md:text-[30px] font-bold tracking-tight leading-tight">{formatDayLabel(now)}</h1>
           <div className="text-xs md:text-[13px] text-[color:var(--muted)]">
-            现在 {now.format("HH:mm")} · {formatLocalUtcOffsetLabel(now.toDate())}
+            现在 <span className="tabular-nums"><LiveClock /></span> · {formatLocalUtcOffsetLabel(now.toDate())}
           </div>
         </div>
         <div className="grid grid-cols-3 gap-2 md:flex md:gap-2.5">
