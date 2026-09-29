@@ -41,6 +41,9 @@ jobs:
       - name: Test parser regressions
         run: pnpm test:game-parsers
 
+      - name: Test web defaults
+        run: pnpm test:web
+
       - name: Typecheck
         run: pnpm typecheck
 
