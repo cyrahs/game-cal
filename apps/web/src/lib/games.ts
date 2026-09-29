@@ -1,11 +1,11 @@
 import type { GameId } from "../api/types";
 
-import genshinIcon from "../assets/genshin.png";
-import starrailIcon from "../assets/starrail.png";
-import zzzIcon from "../assets/zzz.png";
-import wwIcon from "../assets/wutheringwave.png";
-import snowbreakIcon from "../assets/snowbreak.png";
-import endfieldIcon from "../assets/endfield.png";
+import genshinIcon from "../assets/genshin.webp";
+import starrailIcon from "../assets/starrail.webp";
+import zzzIcon from "../assets/zzz.webp";
+import wwIcon from "../assets/wutheringwave.webp";
+import snowbreakIcon from "../assets/snowbreak.webp";
+import endfieldIcon from "../assets/endfield.webp";
 
 export type GameRegistryEntry = {
   id: GameId;
