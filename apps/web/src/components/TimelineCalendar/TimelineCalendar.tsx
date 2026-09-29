@@ -2374,7 +2374,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                   )}
                 >
                   <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
-                  <div className="min-w-0 flex-1 text-[13px] font-semibold truncate">{title}</div>
+                  <div className="min-w-0 flex-1 text-[13px] font-semibold leading-snug break-words">{title}</div>
                   {gachaRemaining(remaining)}
                 </button>
               </div>
