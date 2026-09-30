@@ -22,6 +22,7 @@ import {
   resolveGachaClassification,
 } from "../../lib/gacha";
 import { ALL_GAME_IDS, GAME_META, GAME_REGISTRY_BY_ID, gameColorVar, gameInkVar } from "../../lib/games";
+import { type TrialUnit, areTrialUnitsDone, trialToggleIds, trialUnitsForBanner } from "../../lib/trialCompletion";
 import {
   WEEKDAY_NAMES,
   computeRecurringWindow,
@@ -78,10 +79,11 @@ type ParsedUpstreamEvent = ParsedEvent & {
   // Featured characters / weapons pulled from the banner text, and the short label built from them.
   gacha_featured: GachaFeatured | undefined;
   gacha_title: string | null;
-  // Timeline trial rows stand for one or more character banners: a "[试用] …" label
-  // and the ids of every banner they cover, all completed together.
+  // Check-off parts: the event id itself, or one per featured character of a multi-character
+  // banner (see lib/trialCompletion). A merged home trial row carries every part it covers.
+  completion_units: TrialUnit[];
+  // Timeline trial rows show a "[试用] …" label.
   display_title?: string;
-  trial_group_ids?: Array<string | number>;
 };
 type ParsedRecurringEvent = ParsedEvent & {
   kind: "recurring";
@@ -661,6 +663,21 @@ function groupGachaEvents(
   return [...groups.entries()].map(([key, grouped]) => ({ key, events: grouped }));
 }
 
+// Game pages list each featured character of a multi-character banner on its own.
+function splitGachaByCharacter(events: ParsedUpstreamEvent[]): ParsedUpstreamEvent[] {
+  return events.flatMap((event) => {
+    const characters = event.gacha_featured?.characters ?? [];
+    if (characters.length <= 1) return [event];
+    return characters.map((name, index): ParsedUpstreamEvent => ({
+      ...event,
+      eventKey: `${event.eventKey}:${name}`,
+      gacha_featured: { characters: [name], weapons: [] },
+      gacha_title: name,
+      completion_units: trialUnitsForBanner(event.id, characters).slice(index, index + 1),
+    }));
+  });
+}
+
 function gachaGroupTitle(events: ParsedUpstreamEvent[]): string {
   const first = events[0]!;
   if (events.length === 1) return first.gacha_title ?? first.title;
@@ -832,20 +849,14 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const isUpstreamCompleted = (event: ParsedUpstreamEvent) => {
     const completedIds = completedIdsByGame[event.sourceGameId];
     if (!completedIds) return false;
-    return (event.trial_group_ids ?? [event.id]).every((id) => completedIds.has(id));
+    return areTrialUnitsDone(completedIds, event.completion_units);
   };
   const isRecurringCompleted = (event: ParsedRecurringEvent) =>
     completedRecurringByGame[event.sourceGameId]?.[event.recurringActivityId] === event.cycleKey;
   const toggleCompleted = (event: ParsedUpstreamEvent) => {
-    if (!event.trial_group_ids) {
-      toggleCompletedPref(event.sourceGameId, event.id);
-      return;
-    }
-    // Flip only the banners not already in the target state, so the whole group ends up alike.
-    const done = isUpstreamCompleted(event);
-    const completedIds = completedIdsByGame[event.sourceGameId];
-    for (const id of event.trial_group_ids) {
-      if ((completedIds?.has(id) ?? false) === done) toggleCompletedPref(event.sourceGameId, id);
+    // Flip only the parts not already in the target state, so the whole row ends up alike.
+    for (const id of trialToggleIds(completedIdsByGame[event.sourceGameId], event.completion_units)) {
+      toggleCompletedPref(event.sourceGameId, id);
     }
   };
   const toggleRecurringCompleted = (event: ParsedRecurringEvent) =>
@@ -979,6 +990,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           gacha_kind: gachaKind,
           gacha_featured: gachaFeatured,
           gacha_title: gachaFeatured ? formatGachaFeaturedTitle(sourceGameId, gachaFeatured) : null,
+          completion_units: trialUnitsForBanner(e.id, gachaFeatured?.characters ?? []),
           _s: s,
           _e: ed,
           _hasRelativeEnd: relativeEnd,
@@ -1007,14 +1019,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
+    // Home merges one game's same-window banners into a row; game pages get a row per character.
     const trialBanners = inWindow.filter((e) => e.is_gacha);
-    const trialRows = groupGachaEvents(trialBanners, trialBanners, true).map(({ events }): ParsedUpstreamEvent => {
+    const trialItems = isHome ? trialBanners : splitGachaByCharacter(trialBanners);
+    const trialRows = groupGachaEvents(trialItems, trialItems, isHome).map(({ events }): ParsedUpstreamEvent => {
       const first = events[0]!;
       return {
         ...first,
         eventKey: `${first.eventKey}:trial`,
         display_title: `[试用] ${gachaGroupTitle(events)}`,
-        trial_group_ids: events.map((e) => e.id),
+        completion_units: events.flatMap((e) => e.completion_units),
       };
     });
     return [...inWindow.filter((e) => !e.is_gacha), ...trialRows];
@@ -1022,12 +1036,13 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
   const gachaEvents = useMemo(() => {
     const nowMs = now.valueOf();
-    return sortedUpstream.filter((e) => {
+    const banners = sortedUpstream.filter((e) => {
       if (!e.is_gacha) return false;
       if (!e._hasRelativeEnd && e._e.valueOf() <= nowMs) return false;
       if (!isHome && !showNotStarted && nowMs < e._s.valueOf()) return false;
       return true;
     });
+    return isHome ? banners : splitGachaByCharacter(banners);
   }, [isHome, now, showNotStarted, sortedUpstream]);
 
   const codeEvents = useMemo(() => {
