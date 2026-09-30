@@ -10,8 +10,9 @@ import { useEvents } from "../hooks/useEvents";
 import { localizeErrorMessage } from "../lib/errors";
 import { isUrgentByRemainingMs, normalizeEventTitle } from "../lib/events";
 import { ALL_GAME_IDS, GAME_REGISTRY, GAME_REGISTRY_BY_ID } from "../lib/games";
-import { isCharacterTrialGachaEvent, resolveGachaClassification } from "../lib/gacha";
+import { extractGachaFeatured, isCharacterTrialGachaEvent, resolveGachaClassification } from "../lib/gacha";
 import { computeRecurringWindow } from "../lib/recurring";
+import { areTrialUnitsDone, trialUnitsForBanner } from "../lib/trialCompletion";
 import { parseDateTime } from "../lib/time";
 
 type SettingsTabId = "games" | "sync" | "config";
@@ -224,6 +225,11 @@ export default function Shell() {
         );
         // Only character banners reach the timeline, as their trial activity.
         if (isGacha && !isCharacterTrialGachaEvent(gameId, title, event.content, event.gacha_kind)) continue;
+        // Trials of a multi-character banner are checked off per character.
+        if (isGacha) {
+          const featured = event.gacha_featured ?? extractGachaFeatured(gameId, title, event.content);
+          if (areTrialUnitsDone(completedIds, trialUnitsForBanner(event.id, featured.characters))) continue;
+        }
         if (!showNotStarted && nowMs < start.valueOf()) continue;
         if (isUrgentByRemainingMs("upstream", Math.max(0, end.valueOf() - nowMs))) {
           urgent = true;
