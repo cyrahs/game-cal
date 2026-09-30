@@ -11,7 +11,8 @@ import {
   type RecurringActivity,
 } from "../src/context/prefs";
 import defaultTemplate from "../src/data/default-recurring-events.json";
-import { computeRecurringWindow } from "../src/lib/recurring";
+import type { GameVersionInfo } from "../src/api/types";
+import { computeRecurringWindow, formatRecurringRule } from "../src/lib/recurring";
 import { toIsoWithOffset } from "../src/lib/time";
 
 type RawActivity = { id: string; title: string };
@@ -61,7 +62,14 @@ test("every default activity yields a valid window at any point in a year", () =
     for (const activity of list ?? []) {
       for (let h = 0; h < 366 * 24; h += 7) {
         const now = from.add(h, "hour");
-        const w = computeRecurringWindow(now, gameId as GameId, activity);
+        // Version-following rules get a version that is current at `now`.
+        const version: GameVersionInfo = {
+          game: gameId as GameId,
+          version: "x",
+          start_time: toIsoWithOffset(now.subtract(3, "day")),
+          end_time: toIsoWithOffset(now.add(39, "day")),
+        };
+        const w = computeRecurringWindow(now, gameId as GameId, activity, version);
         const label = `${gameId}/${activity.title} @ ${now.toISOString()}`;
         assert.ok(w.start.isValid() && w.end.isValid(), `${label}: invalid window`);
         assert.ok(w.end.isAfter(w.start), `${label}: empty window`);
@@ -112,4 +120,40 @@ test("stored recurring settings are kept as-is, including an emptied list", () =
 
   const emptied = coercePrefs({ v: 1, timeline: { recurringActivitiesByGame: {} } }).timeline.recurringActivitiesByGame;
   assert.deepEqual(emptied, {});
+});
+
+// Wuthering Waves 3.7 as reported by the live API.
+const WW_VERSION: GameVersionInfo = {
+  game: "ww",
+  version: "「镜锁妄世，心照红尘」",
+  start_time: "2026-09-30T09:20:00+08:00",
+  end_time: "2026-11-12T03:59:59+08:00",
+};
+
+test("the Wuthering Waves shop default follows the current version", () => {
+  const shop = findDefault("ww", "商店兑换");
+  assert.deepEqual(shop.rule, { kind: "version" });
+  const now = dayjs("2026-10-05T12:00:00+08:00");
+  const w = computeRecurringWindow(now, "ww", shop, WW_VERSION);
+  assert.deepEqual(
+    [toIsoWithOffset(w.start), toIsoWithOffset(w.end), w.cycleKey],
+    ["2026-09-30T09:20:00+08:00", "2026-11-12T03:59:59+08:00", "2026-09-30T09:20:00+08:00"]
+  );
+  assert.equal(formatRecurringRule("ww", shop.rule), "每次版本更新时刷新");
+});
+
+test("version rules have no window without the game's version", () => {
+  const activity: RecurringActivity = { id: "ra_v", title: "商店兑换", rule: { kind: "version" } };
+  const now = dayjs("2026-10-05T12:00:00+08:00");
+  assert.equal(computeRecurringWindow(now, "ww", activity).start.isValid(), false);
+  assert.equal(computeRecurringWindow(now, "ww", activity, null).start.isValid(), false);
+  assert.equal(computeRecurringWindow(now, "zzz", activity, WW_VERSION).start.isValid(), false);
+});
+
+test("version rules honour durationDays and survive import", () => {
+  const activity: RecurringActivity = { id: "ra_v", title: "限时商店", rule: { kind: "version" }, durationDays: 14 };
+  const w = computeRecurringWindow(dayjs("2026-10-05T12:00:00+08:00"), "ww", activity, WW_VERSION);
+  assert.equal(toIsoWithOffset(w.end), "2026-10-14T09:20:00+08:00");
+  const parsed = parseRecurringSettingsImport({ recurringActivitiesByGame: { ww: [activity] } });
+  assert.deepEqual(parsed?.ww, [activity]);
 });

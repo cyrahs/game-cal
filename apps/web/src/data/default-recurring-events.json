@@ -205,6 +205,13 @@
           "hour": 4,
           "minute": 0
         }
+      },
+      {
+        "id": "ra_mgvk2b40_ww5hopvr",
+        "title": "商店兑换",
+        "rule": {
+          "kind": "version"
+        }
       }
     ],
     "snowbreak": [
