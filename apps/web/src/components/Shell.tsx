@@ -3,9 +3,10 @@ import dayjs from "dayjs";
 import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-import type { CalendarEvent, GameId } from "../api/types";
+import type { CalendarEvent, GameId, GameVersionInfo } from "../api/types";
 import { usePrefs } from "../context/prefs";
 import { type ThemePreference, useTheme } from "../context/theme";
+import { useCurrentVersion } from "../hooks/useCurrentVersion";
 import { useEvents } from "../hooks/useEvents";
 import { localizeErrorMessage } from "../lib/errors";
 import { isUrgentByRemainingMs, normalizeEventTitle } from "../lib/events";
@@ -62,6 +63,7 @@ export default function Shell() {
   } = usePrefs();
   // ALL_GAME_IDS is a module constant, so the hook call order is stable across renders.
   const eventStates = ALL_GAME_IDS.map((gameId) => [gameId, useEvents(gameId)] as const);
+  const versionStates = ALL_GAME_IDS.map((gameId) => [gameId, useCurrentVersion(gameId)] as const);
   const effectiveTheme = useTheme();
   const themePreference = prefs.theme;
   const themePreferenceIndex = Math.max(
@@ -201,6 +203,14 @@ export default function Shell() {
     // eventStates is a fresh array each render; depend on the stable per-game state objects instead.
     eventStates.map(([, state]) => state)
   );
+  const versionByGame = useMemo<Partial<Record<GameId, GameVersionInfo>>>(
+    () =>
+      Object.fromEntries(
+        versionStates.flatMap(([gameId, state]) => (state.status === "success" && state.data ? [[gameId, state.data]] : []))
+      ),
+    // versionStates is a fresh array each render; depend on the stable per-game state objects instead.
+    versionStates.map(([, state]) => state)
+  );
   const hasUrgentByGame = useMemo<Record<GameId, boolean>>(() => {
     const nowMs = now.valueOf();
     const next = Object.fromEntries(ALL_GAME_IDS.map((gameId) => [gameId, false])) as Record<GameId, boolean>;
@@ -241,7 +251,7 @@ export default function Shell() {
         const recurringDefs = prefs.timeline.recurringActivitiesByGame[gameId] ?? [];
         const completedRecurring = prefs.timeline.completedRecurringByGame[gameId] ?? {};
         for (const activity of recurringDefs) {
-          const window = computeRecurringWindow(now, gameId, activity);
+          const window = computeRecurringWindow(now, gameId, activity, versionByGame[gameId]);
           if (!window.start.isValid() || !window.end.isValid() || !window.end.isAfter(window.start)) continue;
           if (nowMs < window.start.valueOf() || nowMs >= window.end.valueOf()) continue;
           if (completedRecurring[activity.id] === window.cycleKey) continue;
@@ -263,6 +273,7 @@ export default function Shell() {
     prefs.timeline.recurringActivitiesByGame,
     showNotStarted,
     upstreamEventsByGame,
+    versionByGame,
   ]);
 
   useEffect(() => {

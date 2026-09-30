@@ -31,7 +31,9 @@ export type RecurringRule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
   | { kind: "monthly"; day: number; hour: number; minute: number }
   | { kind: "interval"; startDate: string; everyDays: number; hour: number; minute: number }
-  | { kind: "cron"; expression: string };
+  | { kind: "cron"; expression: string }
+  // Resets with every version update: the cycle is the game's current version window.
+  | { kind: "version" };
 
 export type RecurringActivity = {
   id: string;
@@ -170,6 +172,8 @@ function coerceRecurringRule(input: unknown): RecurringRule | null {
     if (expression.split(/\s+/).length !== 5) return null;
     return { kind: "cron", expression };
   }
+
+  if (kind === "version") return { kind: "version" };
 
   return null;
 }

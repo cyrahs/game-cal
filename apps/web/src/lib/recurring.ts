@@ -1,6 +1,6 @@
 import dayjs, { type Dayjs } from "dayjs";
 
-import type { GameId } from "../api/types";
+import type { GameId, GameVersionInfo } from "../api/types";
 import type { MonthlyCardState, RecurringActivity, RecurringRule } from "../context/prefs";
 import {
   detectUniformStep,
@@ -9,7 +9,7 @@ import {
   parseCronExpression,
   validateCronExpression,
 } from "./cron";
-import { DAY_MS, MINUTE_MS, formatFixedUtcOffset, pad2, toIsoWithOffset } from "./time";
+import { DAY_MS, MINUTE_MS, formatFixedUtcOffset, pad2, parseDateTime, toIsoWithOffset } from "./time";
 
 export const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
 
@@ -102,6 +102,8 @@ export function formatRecurringRule(gameId: GameId, rule: RecurringRule, duratio
     const hh = String(rule.hour).padStart(2, "0");
     const mm = String(rule.minute).padStart(2, "0");
     base = `自 ${rule.startDate} 起每 ${rule.everyDays} 天 ${hh}:${mm} 刷新（${tzLabel}）`;
+  } else if (rule.kind === "version") {
+    base = "每次版本更新时刷新";
   } else {
     base = `未知循环规则（${tzLabel}）`;
   }
@@ -123,23 +125,38 @@ function resolveRecurringEnd(start: Dayjs, fallbackEnd: Dayjs, durationDays?: nu
   return start.add(safeDurationDays, "day");
 }
 
+const INVALID_WINDOW = () => ({ start: dayjs("invalid"), end: dayjs("invalid"), cycleKey: "" });
+
+// `version` is the game's current version; only "version" rules read it, and without it they have no window.
 export function computeRecurringWindow(
   now: Dayjs,
   gameId: GameId,
-  activity: RecurringActivity
+  activity: RecurringActivity,
+  version?: GameVersionInfo | null
 ): { start: Dayjs; end: Dayjs; cycleKey: string } {
   const offsetMin = getRecurringTzOffsetMinutes(gameId);
   const n = now.utcOffset(offsetMin);
 
+  if (activity.rule.kind === "version") {
+    if (!version || version.game !== gameId) return INVALID_WINDOW();
+    const start = parseDateTime(version.start_time);
+    const end = parseDateTime(version.end_time);
+    if (!start.isValid() || !end.isValid() || !end.isAfter(start)) return INVALID_WINDOW();
+    const localStart = start.utcOffset(offsetMin);
+    return {
+      start: localStart,
+      end: resolveRecurringEnd(localStart, end.utcOffset(offsetMin), activity.durationDays),
+      cycleKey: toIsoWithOffset(localStart),
+    };
+  }
+
   if (activity.rule.kind === "cron") {
     const { parsed } = parseCronExpression(activity.rule.expression);
-    if (!parsed) return { start: dayjs("invalid"), end: dayjs("invalid"), cycleKey: "" };
+    if (!parsed) return INVALID_WINDOW();
 
     const prev = findPrevCronOccurrence(parsed, n);
     const next = findNextCronOccurrence(parsed, n);
-    if (!prev || !next || !next.isAfter(prev)) {
-      return { start: dayjs("invalid"), end: dayjs("invalid"), cycleKey: "" };
-    }
+    if (!prev || !next || !next.isAfter(prev)) return INVALID_WINDOW();
 
     return { start: prev, end: resolveRecurringEnd(prev, next, activity.durationDays), cycleKey: toIsoWithOffset(prev) };
   }

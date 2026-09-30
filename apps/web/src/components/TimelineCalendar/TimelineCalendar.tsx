@@ -443,6 +443,10 @@ function makeRecurringFormStateFromActivity(activity: RecurringActivity): Recurr
     };
   }
 
+  if (activity.rule.kind === "version") {
+    return { ...base, title: activity.title, durationDays, kind: "version" };
+  }
+
   return {
     ...base,
     title: activity.title,
@@ -526,6 +530,10 @@ function parseRecurringForm(form: RecurringFormState): { value: Omit<RecurringAc
       },
       error: null,
     };
+  }
+
+  if (form.kind === "version") {
+    return { value: { title, durationDays, rule: { kind: "version" } }, error: null };
   }
 
   const parsedTime = parseTimeInput(form.time);
@@ -846,6 +854,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const recurringTzLabel = useMemo(() => formatFixedUtcOffset(recurringTzOffsetMinutes), [recurringTzOffsetMinutes]);
   const currentVersion =
     !isHome && props.currentVersionState?.status === "success" ? props.currentVersionState.data : null;
+  // Current version per game, for recurring activities that reset with each version update.
+  const versionByGame = useMemo(() => {
+    const map = new Map<GameId, GameVersionInfo>();
+    for (const v of isHome ? props.currentVersions ?? [] : currentVersion ? [currentVersion] : []) map.set(v.game, v);
+    return map;
+  }, [currentVersion, isHome, props.currentVersions]);
 
   const isUpstreamCompleted = (event: ParsedUpstreamEvent) => {
     const completedIds = completedIdsByGame[event.sourceGameId];
@@ -1059,7 +1073,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     for (const gameId of sourceGameIds) {
       const defs = prefs.timeline.recurringActivitiesByGame[gameId] ?? [];
       for (const a of defs) {
-        const w = computeRecurringWindow(now, gameId, a);
+        const w = computeRecurringWindow(now, gameId, a, versionByGame.get(gameId));
         if (!w.start.isValid() || !w.end.isValid() || !w.end.isAfter(w.start)) continue;
         // Ensure we only ever show the *current* cycle (no future occurrences).
         if (now.valueOf() < w.start.valueOf() || now.valueOf() >= w.end.valueOf()) continue;
@@ -1087,7 +1101,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
 
     return sortByPhase(items, now, homeGameRankById);
-  }, [homeGameRankById, now, prefs.timeline.recurringActivitiesByGame, sourceGameIds]);
+  }, [homeGameRankById, now, prefs.timeline.recurringActivitiesByGame, sourceGameIds, versionByGame]);
 
   const visibleRecurring = useMemo(() => {
     if (!isHome) return parsedRecurring;
@@ -2002,21 +2016,23 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     <input
                       type="time"
                       value={recurringForm.time}
-                      disabled={recurringForm.kind === "cron"}
+                      disabled={recurringForm.kind === "cron" || recurringForm.kind === "version"}
                       onChange={(e) => {
                         setRecurringForm((prev) => ({ ...prev, time: e.target.value }));
                         if (recurringFormError) setRecurringFormError(null);
                       }}
                       className={clsx(
                         "w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm",
-                        recurringForm.kind === "cron" && "opacity-70 cursor-not-allowed"
+                        (recurringForm.kind === "cron" || recurringForm.kind === "version") && "opacity-70 cursor-not-allowed"
                       )}
                     />
                   </label>
                 </div>
 
                 <div className="grid gap-2 grid-cols-2">
-                  <label className={clsx("grid gap-1", recurringForm.kind === "cron" && "col-span-2")}>
+                  <label
+                    className={clsx("grid gap-1", (recurringForm.kind === "cron" || recurringForm.kind === "version") && "col-span-2")}
+                  >
                     <span className="text-xs text-[color:var(--muted)]">循环方式</span>
                     <select
                       value={recurringForm.kind}
@@ -2034,6 +2050,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       <option value="monthly">每月</option>
                       <option value="weekly">每周</option>
                       <option value="interval">固定天数</option>
+                      <option value="version">跟随版本</option>
                       <option value="cron">自定义 Cron</option>
                     </select>
                   </label>
@@ -2103,7 +2120,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                         className="w-full px-2 py-2 rounded-xl border border-[color:var(--line)] bg-transparent text-sm"
                       />
                     </label>
-                  ) : (
+                  ) : recurringForm.kind === "version" ? null : (
                     <label className="grid gap-1">
                       <span className="text-xs text-[color:var(--muted)]">Cron表达式</span>
                       <input
@@ -2156,9 +2173,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     {recurringForm.kind === "interval"
                       ? `自 ${recurringForm.intervalStartDate || "（未设置）"} 起每 ${recurringForm.intervalDays || "N"
                       } 天 ${recurringForm.time || "00:00"} 刷新（${recurringTzLabel}）`
-                      : recurringCronPreview
-                        ? formatCronHumanReadable(recurringCronPreview)
-                        : "（空）"}
+                      : recurringForm.kind === "version"
+                        ? "每次版本更新时刷新，周期为当前版本的开始到结束"
+                        : recurringCronPreview
+                          ? formatCronHumanReadable(recurringCronPreview)
+                          : "（空）"}
                   </div>
                   <div className="flex items-center gap-2 justify-end">
                     {editingRecurringId ? (
