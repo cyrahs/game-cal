@@ -590,6 +590,7 @@ const HIDE_COMPLETED_STORAGE_KEY = "gc.timeline.hideCompleted";
 // Recurring activities sharing one refresh moment (e.g. every game's weekly reset)
 // collapse into a single block once at least this many line up.
 const RESET_GROUP_MIN_SIZE = 3;
+const LONG_TERM_END_TEXT = /长期|永久|持续开放/;
 
 function readHideCompleted(): boolean {
   try {
@@ -1451,11 +1452,16 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     completed: boolean
   ): { primary: string; secondary: string; tone: RemainingTone; untilMs?: number } => {
     const nowMs = now.valueOf();
-    const endLabel = event._hasRelativeEnd ? getRelativeEndText(event) : event._e.format("MM/DD HH:mm");
+    const relativeEndText = event._hasRelativeEnd ? getRelativeEndText(event) : null;
+    // Banners open for good (e.g. 长期开放 collabs) just read 长期, with no end line.
+    const longTermGacha =
+      event.kind === "upstream" && event.is_gacha && relativeEndText != null && LONG_TERM_END_TEXT.test(relativeEndText);
+    const endLabel = longTermGacha ? "" : relativeEndText ?? event._e.format("MM/DD HH:mm");
     if (completed) return { primary: "已完成", secondary: endLabel, tone: "ok" };
     if (nowMs < event._s.valueOf()) {
       return { primary: "未开始", secondary: `${event._s.format("MM/DD HH:mm")} 开始`, tone: "muted" };
     }
+    if (longTermGacha) return { primary: "长期", secondary: endLabel, tone: "muted" };
     if (event._hasRelativeEnd) return { primary: "见公告", secondary: endLabel, tone: "muted" };
     const remainingMs = event._e.valueOf() - nowMs;
     if (remainingMs <= 0) return { primary: "已结束", secondary: endLabel, tone: "muted" };
@@ -1587,7 +1593,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             {remaining.tone === "urgent" ? <ClockIcon /> : null}
             {renderRemainingPrimary(remaining)}
           </div>
-          <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
+          {remaining.secondary ? (
+            <div className="font-mono text-[10px] text-[color:var(--muted)] whitespace-nowrap truncate">{remaining.secondary}</div>
+          ) : null}
         </div>
       </div>
     );
@@ -2291,9 +2299,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         {remaining.tone === "urgent" ? <ClockIcon /> : null}
         {renderRemainingPrimary(remaining)}
       </span>
-      <span className="block font-mono text-[10px] text-[color:var(--muted)] truncate" title={remaining.secondary}>
-        {remaining.secondary}
-      </span>
+      {remaining.secondary ? (
+        <span className="block font-mono text-[10px] text-[color:var(--muted)] truncate" title={remaining.secondary}>
+          {remaining.secondary}
+        </span>
+      ) : null}
     </span>
   );
   const gachaCard = (
