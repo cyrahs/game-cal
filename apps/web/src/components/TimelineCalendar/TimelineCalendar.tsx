@@ -765,14 +765,51 @@ function RowCheckbox(props: { checked: boolean; label: string; onToggle: () => v
   );
 }
 
-function SideCard(props: { title: string; meta?: string; action?: ReactNode; children: ReactNode }) {
+function ChevronDownIcon(props: { className?: string }) {
   return (
-    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink px-4 pt-4 pb-2">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <h2 className="text-[15px] font-bold">{props.title}</h2>
-        {props.action ?? (props.meta ? <span className="text-xs text-[color:var(--muted)]">{props.meta}</span> : null)}
+    <svg className={props.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+// With `collapsible`, the title becomes a toggle and the body only renders while expanded.
+function SideCard(props: {
+  title: string;
+  meta?: string;
+  action?: ReactNode;
+  collapsible?: { expanded: boolean; onToggle: () => void };
+  children: ReactNode;
+}) {
+  const { collapsible } = props;
+  const expanded = collapsible ? collapsible.expanded : true;
+  return (
+    <section
+      className={clsx(
+        "rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] shadow-ink px-4 pt-4",
+        expanded ? "pb-2" : "pb-4"
+      )}
+    >
+      <div className={clsx("flex items-center justify-between gap-2", expanded && "mb-1.5")}>
+        {collapsible ? (
+          <button
+            type="button"
+            onClick={collapsible.onToggle}
+            aria-expanded={expanded}
+            className="flex-1 min-w-0 min-h-8 flex items-center gap-1.5 text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+          >
+            <h2 className="text-[15px] font-bold">{props.title}</h2>
+            {props.meta ? <span className="text-xs text-[color:var(--muted)]">{props.meta}</span> : null}
+            <ChevronDownIcon
+              className={clsx("w-4 h-4 shrink-0 text-[color:var(--muted)] transition-transform", expanded && "rotate-180")}
+            />
+          </button>
+        ) : (
+          <h2 className="text-[15px] font-bold">{props.title}</h2>
+        )}
+        {props.action ?? (!collapsible && props.meta ? <span className="text-xs text-[color:var(--muted)]">{props.meta}</span> : null)}
       </div>
-      {props.children}
+      {expanded ? props.children : null}
     </section>
   );
 }
@@ -815,6 +852,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const [isMonthlyCardEditing, setIsMonthlyCardEditing] = useState(false);
   const [monthlyCardDraft, setMonthlyCardDraft] = useState("");
   const [isRecurringSettingsOpen, setIsRecurringSettingsOpen] = useState(false);
+  // The game page's 循环活动 card starts collapsed on every visit.
+  const [isRecurringCardExpanded, setIsRecurringCardExpanded] = useState(false);
   const [recurringForm, setRecurringForm] = useState<RecurringFormState>(() => makeRecurringFormState(dayjs()));
   const [recurringFormError, setRecurringFormError] = useState<string | null>(null);
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
@@ -948,6 +987,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     setIsMonthlyCardEditing(false);
     setMonthlyCardDraft("");
     setIsRecurringSettingsOpen(false);
+    setIsRecurringCardExpanded(false);
     setRecurringForm(makeRecurringFormState(dayjs()));
     setRecurringFormError(null);
     setEditingRecurringId(null);
@@ -1457,6 +1497,15 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     }
     setIsRecurringSettingsOpen(true);
     setRecurringFormError(null);
+  };
+
+  const toggleRecurringCard = () => {
+    // Collapsing also leaves edit mode, dropping any unsaved form input.
+    if (isRecurringCardExpanded && isRecurringSettingsOpen) {
+      setIsRecurringSettingsOpen(false);
+      resetRecurringForm();
+    }
+    setIsRecurringCardExpanded((v) => !v);
   };
 
   // `primary` is the plain text (used for aria labels); `untilMs` marks a countdown that
@@ -2419,20 +2468,24 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const recurringCard = !isHome ? (
     <SideCard
       title="循环活动"
+      meta={recurringDefinitionsSorted.length > 0 ? `${recurringDefinitionsSorted.length} 条` : undefined}
+      collapsible={{ expanded: isRecurringCardExpanded, onToggle: toggleRecurringCard }}
       action={
-        <button
-          type="button"
-          onClick={toggleRecurringSettings}
-          aria-expanded={isRecurringSettingsOpen}
-          className={clsx(
-            "h-8 px-2.5 rounded-lg border text-xs font-semibold transition",
-            isRecurringSettingsOpen
-              ? "border-[color:var(--accent)] text-[color:var(--accent)]"
-              : "border-[color:var(--line)] text-[color:var(--ink2)] hover:border-[color:var(--ink)]"
-          )}
-        >
-          {isRecurringSettingsOpen ? "完成" : "编辑"}
-        </button>
+        isRecurringCardExpanded ? (
+          <button
+            type="button"
+            onClick={toggleRecurringSettings}
+            aria-expanded={isRecurringSettingsOpen}
+            className={clsx(
+              "h-8 px-2.5 rounded-lg border text-xs font-semibold transition",
+              isRecurringSettingsOpen
+                ? "border-[color:var(--accent)] text-[color:var(--accent)]"
+                : "border-[color:var(--line)] text-[color:var(--ink2)] hover:border-[color:var(--ink)]"
+            )}
+          >
+            {isRecurringSettingsOpen ? "完成" : "编辑"}
+          </button>
+        ) : null
       }
     >
       {isRecurringSettingsOpen ? (
