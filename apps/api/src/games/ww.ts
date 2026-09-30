@@ -165,21 +165,33 @@ function shouldIgnorePermanentOnlyWwItem(item: WwOfficialNoticeItem): boolean {
   return parsed.endIso == null;
 }
 
+function isLimitedWwWebActivity(item: WwOfficialNoticeItem, title: string): boolean {
+  if (!title.includes("网页活动")) return false;
+
+  const text = stripHtml(item.content);
+  if (!/(?:奖励|可得|可获|兑换)/.test(text)) return false;
+
+  const startMs = parseMs(item.startTimeMs);
+  const fallbackYear = startMs == null ? new Date().getFullYear() : sourceYearFromMs(startMs);
+  return parseTimeRangeFromContent(item.content, { fallbackYear, title }).endIso != null;
+}
+
 function shouldIgnoreWwItem(
   item: WwOfficialNoticeItem,
   opts: { title: string }
 ): boolean {
   const category = parseIntLike(item.category);
   const tag = parseIntLike(item.tag);
+  const normalizedTitle = normalizeTitle(opts.title);
   const isIncludedCategory =
     category != null &&
-    (WW_INCLUDED_CATEGORIES.has(category) || (category === 4 && tag === 10));
+    (WW_INCLUDED_CATEGORIES.has(category) ||
+      (category === 4 && tag === 10) ||
+      (category === 1 && isLimitedWwWebActivity(item, normalizedTitle)));
   if (!isIncludedCategory) return true;
 
   const permanent = parseIntLike(item.permanent);
   if (permanent === 1) return true;
-
-  const normalizedTitle = normalizeTitle(opts.title);
   if (isGachaEventTitle("ww", normalizedTitle)) return false;
   if (shouldIgnorePermanentOnlyWwItem(item)) return true;
   if (WW_IGNORE_TITLE_WORDS.some((w) => normalizedTitle.includes(w))) return true;

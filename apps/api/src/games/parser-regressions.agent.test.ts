@@ -21,6 +21,54 @@ import {
   fetchZzzEvents,
   isZzzSupplementalActivityNotice,
 } from "./zzz.js";
+import { fetchWwEvents } from "./ww.js";
+
+test("WW includes bounded category-one web activities without admitting other notices", async () => {
+  const originalFetch = globalThis.fetch;
+  const title = "「索拉里斯回归邀约」网页活动开启，参与最高可得530星声等奖励！";
+  const content = [
+    "召集昔日同伴回归索拉里斯，共同完成任务可领取星声、贝币等奖励。",
+    "✦开放时间✦ 3.7版本更新后～2026年11月11日 23:59（UTC+8）",
+    "✦开放条件✦ 联觉等级达到8级。",
+    "✦活动说明✦ 活动期间，通过分享邀请码邀约回归漂泊者参与回归活动。",
+  ].join(" ");
+  const notice = {
+    id: "50833",
+    tabTitle: title,
+    category: "1",
+    tag: "1",
+    permanent: "0",
+    startTimeMs: Date.parse("2026-09-30T04:00:00+08:00"),
+    endTimeMs: Date.parse("2026-11-11T23:59:59+08:00"),
+    content,
+  };
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), "https://fixture.invalid/ww");
+    return new Response(JSON.stringify({
+      game: [
+        notice,
+        { ...notice, id: "no-window", content: "活动说明：完成任务可得奖励。" },
+        { ...notice, id: "promotion", tabTitle: "限时特惠网页活动礼包" },
+        { ...notice, id: "permanent", permanent: "1" },
+        { ...notice, id: "other-category", category: "5" },
+      ],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const events = await fetchWwEvents({ WW_NOTICE_API_URL: "https://fixture.invalid/ww" });
+    assert.deepEqual(events.map(({ id, title, start_time, end_time }) => ({
+      id, title, start_time, end_time,
+    })), [{
+      id: "50833",
+      title,
+      start_time: "2026-09-30T04:00:00+08:00",
+      end_time: "2026-11-11T23:59:00+08:00",
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("Genshin excludes first-purchase bonus reset notices from events", async () => {
   const originalFetch = globalThis.fetch;
