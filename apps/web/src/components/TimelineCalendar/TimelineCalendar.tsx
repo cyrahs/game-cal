@@ -578,7 +578,6 @@ function parseRecurringForm(form: RecurringFormState): { value: Omit<RecurringAc
   };
 }
 
-type TimelineFilter = "all" | "limited" | "recurring";
 type RowCategory = "limited" | "recurring" | "other";
 type RowEvent = ParsedUpstreamEvent | ParsedRecurringEvent | ParsedMonthlyCardEvent;
 type TimelineRowItem = { event: RowEvent; category: RowCategory; completed: boolean };
@@ -589,11 +588,6 @@ const HIDE_COMPLETED_STORAGE_KEY = "gc.timeline.hideCompleted";
 // Recurring activities sharing one refresh moment (e.g. every game's weekly reset)
 // collapse into a single block once at least this many line up.
 const RESET_GROUP_MIN_SIZE = 3;
-const FILTER_OPTIONS: Array<{ id: TimelineFilter; label: string }> = [
-  { id: "all", label: "全部" },
-  { id: "limited", label: "限时" },
-  { id: "recurring", label: "循环" },
-];
 
 function readHideCompleted(): boolean {
   try {
@@ -788,7 +782,6 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const showGameMeta = isHome;
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [now, setNow] = useState(() => dayjs());
-  const [filter, setFilter] = useState<TimelineFilter>("all");
   const [hideCompleted, setHideCompletedState] = useState<boolean>(() => readHideCompleted());
   // Once everything in view is done the timeline collapses into an empty state;
   // this opts back into seeing the finished rows for the rest of the session.
@@ -1198,25 +1191,15 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     visibleUpstreamSorted,
   ]);
 
-  const filteredRowItems = useMemo(
-    () => allRowItems.filter((item) => filter === "all" || item.category === filter),
-    [allRowItems, filter]
-  );
-  const filteredAllDone = filteredRowItems.length > 0 && filteredRowItems.every((item) => item.completed);
+  const rowItemsAllDone = allRowItems.length > 0 && allRowItems.every((item) => item.completed);
   const displayedRowItems = useMemo(
     () =>
-      hideCompleted || (filteredAllDone && !revealAllDone)
-        ? filteredRowItems.filter((item) => !item.completed)
-        : filteredRowItems,
-    [filteredAllDone, filteredRowItems, hideCompleted, revealAllDone]
+      hideCompleted || (rowItemsAllDone && !revealAllDone)
+        ? allRowItems.filter((item) => !item.completed)
+        : allRowItems,
+    [rowItemsAllDone, allRowItems, hideCompleted, revealAllDone]
   );
-  const visibleResetGroups = filter === "limited" ? [] : resetGroups;
-  const filterCounts = useMemo(() => {
-    const resetCount = resetGroups.reduce((sum, group) => sum + group.events.length, 0);
-    const limited = allRowItems.filter((item) => item.category === "limited").length;
-    const recurring = allRowItems.filter((item) => item.category === "recurring").length + resetCount;
-    return { all: allRowItems.length + resetCount, limited, recurring } satisfies Record<TimelineFilter, number>;
-  }, [allRowItems, resetGroups]);
+  const totalItemCount = allRowItems.length + resetGroups.reduce((sum, group) => sum + group.events.length, 0);
 
   const selectedEvent = useMemo(() => {
     if (selectedKey == null) return null;
@@ -1229,7 +1212,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     );
   }, [allRowItems, codeEvents, gachaEvents, selectedKey, visibleRecurring]);
 
-  // If the selected event disappears (data refresh / filter changes), hide the detail panel.
+  // If the selected event disappears (data refresh / hide completed), hide the detail panel.
   useEffect(() => {
     if (selectedKey == null) return;
     if (selectedEvent) return;
@@ -1654,9 +1637,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     });
   };
 
-  const hasResetBlock = visibleResetGroups.length > 0;
   const emptyTimeline =
-    displayedRowItems.length > 0 ? null : filteredAllDone ? (
+    displayedRowItems.length > 0 ? null : rowItemsAllDone ? (
       <EmptyState
         done
         title="所有活动已完成，长草中 (´-ω-`)"
@@ -1674,21 +1656,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </button>
         }
       />
-    ) : hasResetBlock && filter === "recurring" ? null : (
-      <EmptyState
-        title={
-          filter === "limited"
-            ? isHome
-              ? "未来 7 天内暂无将结束的限时活动"
-              : "暂无限时活动"
-            : filter === "recurring"
-              ? "暂无循环活动"
-              : isHome
-                ? "未来 7 天内暂无将结束的活动"
-                : "暂无活动"
-        }
-        sub={filter !== "all" ? "可以切换到「全部」查看其他类型的活动。" : undefined}
-      />
+    ) : (
+      <EmptyState title={isHome ? "未来 7 天内暂无将结束的活动" : "暂无活动"} />
     );
 
   const renderResetGroup = (group: ResetGroup) => {
@@ -1757,36 +1726,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         <div className="flex items-baseline gap-2.5 min-w-0">
           <h2 className="text-base md:text-[17px] font-bold">{isHome ? "即将结束" : "活动"}</h2>
           {isHome ? null : (
-            <span className="hidden sm:inline text-[13px] text-[color:var(--muted)] truncate">{`${filterCounts.all} 项`}</span>
+            <span className="hidden sm:inline text-[13px] text-[color:var(--muted)] truncate">{`${totalItemCount} 项`}</span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Game pages already split 限时 and 循环 into groups, so only home keeps the filter. */}
-          {isHome ? (
-            <div role="group" aria-label="筛选" className="flex p-[3px] rounded-[10px] bg-[color:var(--surface2)] border border-[color:var(--line)]">
-              {FILTER_OPTIONS.map((option) => {
-                const selected = filter === option.id;
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => setFilter(option.id)}
-                    className={clsx(
-                      "h-8 md:h-[30px] px-2.5 md:px-3 rounded-lg text-[13px] font-semibold transition",
-                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
-                      selected
-                        ? "bg-[color:var(--card)] text-[color:var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]"
-                        : "text-[color:var(--muted)] hover:text-[color:var(--ink)]"
-                    )}
-                  >
-                    {option.label}
-                    <span className="hidden sm:inline ml-1 font-mono font-medium opacity-70">{filterCounts[option.id]}</span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
           <button
             type="button"
             aria-pressed={hideCompleted}
@@ -1892,7 +1835,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
           </div>
         ) : null)}
 
-      {visibleResetGroups.map(renderResetGroup)}
+      {resetGroups.map(renderResetGroup)}
     </section>
   );
 
