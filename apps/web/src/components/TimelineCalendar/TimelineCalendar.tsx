@@ -2,7 +2,7 @@ import clsx from "clsx";
 import DOMPurify from "dompurify";
 import dayjs, { type Dayjs } from "dayjs";
 import isoWeek from "dayjs/plugin/isoWeek";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
@@ -94,6 +94,13 @@ type ParsedVersionEvent = ParsedEvent & { kind: "version" };
 type ParsedMonthlyCardEvent = ParsedEvent & { kind: "monthlyCard" };
 type TimelineOnlyParsedEvent = ParsedVersionEvent | ParsedMonthlyCardEvent;
 type AnyParsedEvent = ParsedUpstreamEvent | ParsedRecurringEvent | TimelineOnlyParsedEvent;
+// Rough width of a header tick label (13px mono digits ≈ 0.6em, CJK ≈ 1em) plus its px-1.5 padding.
+function estimateTickLabelPx(label: string): number {
+  let textPx = 0;
+  for (const ch of label) textPx += ch.charCodeAt(0) > 0xff ? 13 : 7.8;
+  return Math.max(26, textPx + 12);
+}
+
 function resolveEventGameId(event: TimelineCalendarEvent, fallbackGameId?: GameId): GameId | null {
   return event.gameId ?? fallbackGameId ?? null;
 }
@@ -846,6 +853,18 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [now, setNow] = useState(() => dayjs());
   const [hideCompleted, setHideCompletedState] = useState<boolean>(() => readHideCompleted());
+  // Pixel width of the header tick track, so labels of month/week segments too narrow to fit are hidden
+  // instead of wrapping or running into the next label.
+  const [axisTrackWidth, setAxisTrackWidth] = useState(0);
+  const axisTrackObserver = useRef<ResizeObserver | null>(null);
+  const axisTrackRef = useCallback((el: HTMLDivElement | null) => {
+    axisTrackObserver.current?.disconnect();
+    axisTrackObserver.current = null;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => setAxisTrackWidth(entries[0]?.contentRect.width ?? 0));
+    observer.observe(el);
+    axisTrackObserver.current = observer;
+  }, []);
   // Once everything in view is done the timeline collapses into an empty state;
   // this opts back into seeing the finished rows for the rest of the session.
   const [revealAllDone, setRevealAllDone] = useState(false);
@@ -1872,9 +1891,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
 
             <div className="hidden md:flex relative h-[52px] border-b border-[color:var(--line)]">
               <div className="w-[300px] lg:w-[320px] shrink-0 px-5 flex items-center text-xs font-semibold text-[color:var(--muted)]">活动</div>
-              <div className="relative flex-1">
+              <div ref={axisTrackRef} className="relative flex-1">
                 {axis.ticks.map((tick) =>
-                  tick.widthPct >= 4 ? (
+                  tick.widthPct >= 4 &&
+                  (isHome || axisTrackWidth <= 0 || (tick.widthPct / 100) * axisTrackWidth >= estimateTickLabelPx(tick.label) + 8) ? (
                     <div
                       key={tick.key}
                       className={clsx("absolute inset-y-0 flex flex-col justify-center gap-0.5", isHome ? "items-center" : "items-start pl-2")}
@@ -1887,7 +1907,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       ) : null}
                       <span
                         className={clsx(
-                          "h-[22px] min-w-[26px] px-1.5 inline-flex items-center justify-center text-[13px] font-semibold font-mono",
+                          "h-[22px] min-w-[26px] px-1.5 inline-flex items-center justify-center text-[13px] font-semibold font-mono whitespace-nowrap",
                           // Today is marked by color only: a filled badge would collide with the "now" time label below it.
                           tick.isToday ? "text-[color:var(--accent)]" : "text-[color:var(--ink2)]"
                         )}
