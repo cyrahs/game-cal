@@ -369,6 +369,15 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   return startIso ? addHoursToSourceIso(startIso, durationHours) : null;
 }
 
+function extractVersionEndFromContent(content: string | undefined): { label: string; endIso: string } | null {
+  const pattern = new RegExp(
+    `(\\d+(?:\\.\\d+)+)\\s*版本的持续时间为\\s*\\1\\s*版本更新后\\s*${RANGE_SEPARATOR_PATTERN}\\s*(${STARRAIL_DATE_TIME_PATTERN})`
+  );
+  const match = pattern.exec(stripHtml(content));
+  const endIso = toStarRailSourceIso(match?.[2]);
+  return match?.[1] && endIso ? { label: match[1], endIso } : null;
+}
+
 function normalizeSectionBoundary(line: string): string {
   return line
     .replace(/^[■▌●◆◇#\s]+/, "")
@@ -507,6 +516,7 @@ export function extractStarRailTimeRangeFromContent(
   opts: {
     title: string;
     versionMaintenanceEndByLabel: Map<string, string>;
+    versionEndByLabel?: Map<string, string>;
     singleVersionMaintenanceEndIso: string | null;
     listStartIso?: string;
     listEndIso: string;
@@ -587,9 +597,13 @@ export function extractStarRailTimeRangeFromContent(
   if (/版本(?:更新后|开启后|期间)/.test(section) && dates.length === 0) {
     if (relativeStartIso) {
       const longTermEnd = /版本(?:更新后|开启后|期间)\s*(?:[，,]\s*)?(长期开放|永久开放|持续开放)/.exec(section)?.[1];
+      const period = /((?:[vV])?\d+(?:\.\d+)+|[「“"][^」”"]+[」”"])\s*版本期间/.exec(section);
+      const versionEndIso = period
+        ? opts.versionEndByLabel?.get(extractRelativeVersionLabel(period[0]) ?? "")
+        : null;
       return {
         startIso: relativeStartIso,
-        endIso: longTermEnd ? null : opts.listEndIso,
+        endIso: longTermEnd ? null : versionEndIso ?? opts.listEndIso,
         ...(longTermEnd ? { endText: longTermEnd } : {}),
       };
     }
@@ -1108,6 +1122,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
   });
 
   const versionMaintenanceEndByLabel = new Map<string, string>();
+  const versionEndByLabel = new Map<string, string>();
   const allNoticeItems = new Map<string, MihoyoAnnItem>();
   for (const category of categories) {
     for (const noticeItem of category.list ?? []) {
@@ -1130,10 +1145,15 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     );
     const noticeContent = noticeContentItem?.content ?? noticeItem.content;
     const maintenanceEndIso = extractMaintenanceEndIsoFromVersionContent(noticeContent);
+    const versionEnd = extractVersionEndFromContent(noticeContent);
+    const versionLabels = extractVersionLabels(noticeItem);
     if (maintenanceEndIso) {
-      for (const versionLabel of extractVersionLabels(noticeItem)) {
+      for (const versionLabel of versionLabels) {
         versionMaintenanceEndByLabel.set(versionLabel, maintenanceEndIso);
       }
+    }
+    if (versionEnd && versionLabels.includes(versionEnd.label)) {
+      versionEndByLabel.set(versionEnd.label, versionEnd.endIso);
     }
   }
   const versionMaintenanceEnds = [...new Set(versionMaintenanceEndByLabel.values())];
@@ -1157,6 +1177,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       const parsed = extractStarRailTimeRangeFromContent(contentItem.content, {
         title,
         versionMaintenanceEndByLabel,
+        versionEndByLabel,
         singleVersionMaintenanceEndIso,
         listEndIso: "9999-12-31T23:59:59+08:00",
       });
@@ -1188,6 +1209,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const contentRange = extractStarRailTimeRangeFromContent(content, {
       title,
       versionMaintenanceEndByLabel,
+      versionEndByLabel,
       singleVersionMaintenanceEndIso,
       listStartIso,
       listEndIso,
@@ -1203,6 +1225,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     const bannerEvents = isGacha
       ? splitStarRailBannerEvents(content, eventId, {
           versionMaintenanceEndByLabel,
+          versionEndByLabel,
           singleVersionMaintenanceEndIso,
           listStartIso,
           listEndIso,
@@ -1228,6 +1251,7 @@ function splitStarRailBannerEvents(
   eventId: string,
   opts: {
     versionMaintenanceEndByLabel: Map<string, string>;
+    versionEndByLabel?: Map<string, string>;
     singleVersionMaintenanceEndIso: string | null;
     listStartIso: string;
     listEndIso: string;
