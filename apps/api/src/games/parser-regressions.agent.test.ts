@@ -122,6 +122,87 @@ test("Star Rail preserves permanent version-relative activity windows", () => {
   });
 });
 
+test("Star Rail uses the version notice's stated end for a version-long web activity", async () => {
+  const originalFetch = globalThis.fetch;
+  const title = "「乐子神智取米哈游」网页活动上线";
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [
+          {
+            type_id: 4,
+            type_label: "公告",
+            list: [{
+              ann_id: 1426,
+              title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+              start_time: "2026-09-28 07:00:00",
+              end_time: "2026-11-11 07:00:00",
+            }],
+          },
+          {
+            type_id: 3,
+            type_label: "资讯",
+            list: [{
+              ann_id: 1397,
+              title,
+              start_time: "2026-09-28 10:00:00",
+              end_time: "2026-10-05 10:00:00",
+            }],
+          },
+        ]
+      : [
+          {
+            ann_id: 1426,
+            title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+            content: [
+              "<p>4.6版本的持续时间为 4.6版本更新后 - <t class=\"t_gl\">2026/11/11 06:00:00</t>。</p>",
+              "<p>■更新时间 <t class=\"t_gl\">2026/09/28 06:00:00</t>开始，预计5个小时完成。</p>",
+              "<p>■补偿说明 <t class=\"t_gl\">2026/10/28 23:59:00</t>前领取。</p>",
+            ].join(""),
+          },
+          { ann_id: 1397, title, content: "<p>活动时间</p><p>4.6版本期间</p><p>活动介绍</p>" },
+        ];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    const event = events.find((item) => item.title === title);
+    assert.ok(event);
+    assert.equal(event.start_time, "2026-09-28T11:00:00+08:00");
+    assert.equal(event.end_time, "2026-11-11T06:00:00+08:00");
+    assert.equal(event.end_time_kind, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail limits version end overrides to matching version-long sections", () => {
+  const opts = {
+    title: "网页活动",
+    versionMaintenanceEndByLabel: new Map([["4.6", "2026-09-28T11:00:00+08:00"]]),
+    versionEndByLabel: new Map([["4.6", "2026-11-11T06:00:00+08:00"]]),
+    singleVersionMaintenanceEndIso: "2026-09-28T11:00:00+08:00",
+    listEndIso: "2026-10-05T10:00:00+08:00",
+  };
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>4.6版本更新后</p><p>活动介绍</p>", opts
+  ), { startIso: "2026-09-28T11:00:00+08:00", endIso: opts.listEndIso });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>4.5版本更新后 - 4.6版本期间</p><p>活动介绍</p>", opts
+  ), { startIso: "2026-08-17T11:00:00+08:00", endIso: "2026-11-11T06:00:00+08:00" });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(
+    "<p>活动时间</p><p>4.5版本期间</p><p>活动介绍</p>", opts
+  ), { startIso: "2026-08-17T11:00:00+08:00", endIso: opts.listEndIso });
+});
+
 test("Star Rail prefers the body sharing deadline while retaining the list start", async () => {
   const title = "4.6版本「月升之前，与兽共舞」专题展示页现已上线";
   const content = '<p>浏览版本专题展示页，分享页面即可领取信用点*20000奖励。</p><p>※<t class="t_gl">2026/10/09 04:00:00</t>前，首次进行网页分享可获得信用点*20000。</p>';
