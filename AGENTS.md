@@ -95,7 +95,7 @@ Backend (`apps/api`):
   - `apps/api/src/games/starrail.ts`
   - `apps/api/src/games/ww.ts`
   - `apps/api/src/games/zzz.ts`
-  - Livestream (前瞻) redemption codes for Genshin / Star Rail / ZZZ (米游社) + Wuthering Waves (库街区), merged in `fetchEventsForGame()`: `apps/api/src/games/livestreamCodes.ts`
+  - Livestream (前瞻) redemption codes and announced stream times (`is_livestream` events) for Genshin / Star Rail / ZZZ (米游社) + Wuthering Waves (库街区), merged in `fetchEventsForGame()`: `apps/api/src/games/livestreamCodes.ts`
 - Shared utilities:
   - Fetch with timeout + UA: `apps/api/src/lib/fetch.ts`
   - In-memory TTL cache + in-flight dedupe: `apps/api/src/lib/cache.ts`

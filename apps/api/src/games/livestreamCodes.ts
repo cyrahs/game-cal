@@ -15,6 +15,13 @@ import type { CalendarEvent, GameId } from "../types.js";
 //   the first-floor publisher comment on the "x.x版本前瞻通讯 | 回顾影像" post.
 //   The forum feeds are recommendation-ordered, so the post is discovered through
 //   the public search endpoint, which returns matches newest-first.
+//
+// The same sources announce the next stream ahead of time, which becomes an
+// `is_livestream` event the web shows on the version progress bar:
+// - miHoYo: the official "…前瞻特别节目预告" post, e.g.
+//   "前瞻特别节目将于9月12日（本周六）20:00正式开启".
+// - Wuthering Waves: "x.x版本前瞻通讯将于2026年9月19日19:00正式播出" (title of
+//   newer posts) or the body of an older "x.x版本前瞻通讯预告" post.
 
 const SOURCE_TZ_OFFSET = "+08:00";
 const SOURCE_TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -25,7 +32,13 @@ const FETCH_TIMEOUT_MS = 12_000;
 // runs from a request's waitUntil() only has ~30s in total.
 const LIVESTREAM_FETCH_BUDGET_MS = 15_000;
 
+// Schedule events share the code marker: they come from the same sources, are
+// kept from the last snapshot when those sources fail, and stay out of the
+// upstream notice review like the code events.
 const LIVESTREAM_CODE_ID_MARKER = ":livestream-code:";
+const LIVESTREAM_SCHEDULE_ID_PREFIX = "schedule:";
+// Nominal length; the web only uses the start.
+const LIVESTREAM_SCHEDULE_DURATION_MS = 2 * 60 * 60 * 1000;
 
 const LIVESTREAM_KEYWORD = "前瞻";
 const CODE_KEYWORD = "兑换码";
@@ -214,6 +227,84 @@ export function extractRedeemCodeExpiry(
   }
 
   return { iso: null, text: null };
+}
+
+const SCHEDULE_CONTEXT_RE = /将于|将在|播出|开播|开启|直播/;
+const SCHEDULE_DATE_TIME_RE =
+  /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(?:[（(][^）)]{0,12}[）)])?\s*(早上|上午|中午|下午|晚上|晚)?\s*(\d{1,2})\s*[:：]\s*(\d{2})/g;
+
+/**
+ * Find the announced stream start in a preview post, e.g.
+ * "前瞻特别节目将于9月12日（本周六）20:00正式开启",
+ * "前瞻特别节目将在2026年9月20日19:30正式播出" or "3月18日（本周五）晚20:00".
+ *
+ * Only a date-time next to scheduling wording counts. "下午/晚" move a 12-hour
+ * clock into the afternoon; a missing year falls back to the post year and
+ * rolls forward when the result would precede the post.
+ */
+export function extractLivestreamStart(
+  text: string,
+  opts: { fallbackYear: number; notBeforeMs?: number }
+): number | null {
+  for (const match of text.matchAll(SCHEDULE_DATE_TIME_RE)) {
+    const idx = match.index ?? 0;
+    const context = text.slice(Math.max(0, idx - 24), idx + match[0].length + 12);
+    if (!SCHEDULE_CONTEXT_RE.test(context)) continue;
+
+    const explicitYear = match[1] ? Number(match[1]) : null;
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const period = match[4];
+    let hour = Number(match[5]);
+    const minute = Number(match[6]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+    if (hour > 23 || minute > 59) continue;
+    if ((period === "下午" || period === "晚上" || period === "晚") && hour < 12) hour += 12;
+
+    const toMs = (year: number): number => Date.UTC(year, month - 1, day, hour, minute) - SOURCE_TZ_OFFSET_MS;
+    let ms = toMs(explicitYear ?? opts.fallbackYear);
+    if (explicitYear == null && opts.notBeforeMs != null && ms < opts.notBeforeMs - DAY_MS) {
+      ms = toMs(opts.fallbackYear + 1);
+    }
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
+function buildLivestreamScheduleEvent(opts: {
+  game: GameId;
+  sourceId: string;
+  versionLabel: string | null;
+  startMs: number;
+  text: string;
+  linkUrl: string;
+  banner?: string;
+}): CalendarEvent {
+  return {
+    id: `${opts.game}${LIVESTREAM_CODE_ID_MARKER}${LIVESTREAM_SCHEDULE_ID_PREFIX}${opts.sourceId}`,
+    title: `${opts.versionLabel ? `${opts.versionLabel}版本` : ""}前瞻特别节目`,
+    start_time: msToSourceIso(opts.startMs),
+    end_time: msToSourceIso(opts.startMs + LIVESTREAM_SCHEDULE_DURATION_MS),
+    end_time_kind: "explicit",
+    is_gacha: false,
+    is_livestream: true,
+    banner: opts.banner,
+    content: opts.text,
+    linkUrl: opts.linkUrl,
+  };
+}
+
+// Several posts can announce one stream (a reschedule repeats it); the newest wins.
+function newestPerVersion<T extends { versionLabel: string | null; postedMs: number; sourceId: string }>(
+  items: T[]
+): T[] {
+  const byKey = new Map<string, T>();
+  for (const item of items) {
+    const key = item.versionLabel ?? `post:${item.sourceId}`;
+    const existing = byKey.get(key);
+    if (!existing || item.postedMs > existing.postedMs) byKey.set(key, item);
+  }
+  return [...byKey.values()];
 }
 
 function buildLivestreamCodeEvent(opts: {
@@ -596,8 +687,45 @@ async function fetchMiyousheLivestreamCodeEvents(
     );
   }
 
+  events.push(...collectMiyousheScheduleEvents(config, posts, articleUrl));
+
   if (livestreamApiFailed) throw new DegradedLivestreamCodesError(events);
   return events;
+}
+
+function collectMiyousheScheduleEvents(
+  config: MiyousheGameConfig,
+  posts: MiyoushePost[],
+  articleUrl: (postId: string) => string
+): CalendarEvent[] {
+  const announced = posts.flatMap((post) => {
+    if (!post.subject.includes(LIVESTREAM_KEYWORD) || !post.subject.includes(PREVIEW_ANNOUNCEMENT_KEYWORD)) return [];
+    const startMs = extractLivestreamStart(`${post.subject}\n${post.text}`, {
+      fallbackYear: sourceYearFromMs(post.createdMs),
+      notBeforeMs: post.createdMs,
+    });
+    if (startMs == null) return [];
+    return [
+      {
+        post,
+        startMs,
+        sourceId: post.postId,
+        postedMs: post.createdMs,
+        versionLabel: extractVersionLabel(post.subject),
+      },
+    ];
+  });
+  return newestPerVersion(announced).map(({ post, startMs, versionLabel }) =>
+    buildLivestreamScheduleEvent({
+      game: config.game,
+      sourceId: post.postId,
+      versionLabel,
+      startMs,
+      text: post.text,
+      linkUrl: articleUrl(post.postId),
+      banner: post.cover,
+    })
+  );
 }
 
 export async function fetchMiyousheLivestreamCodeEventsForGame(
@@ -768,7 +896,51 @@ export async function fetchWwLivestreamCodeEvents(
     }
   });
 
-  return dedupeByCodes(out);
+  return [...dedupeByCodes(out), ...collectWwScheduleEvents([...candidates.values()], ordered, details)];
+}
+
+// Newer preview posts carry the stream time in the title; older ones only in
+// the body, which is available when the post was among the detail requests.
+function collectWwScheduleEvents(
+  candidates: WwCodePostCandidate[],
+  detailed: WwCodePostCandidate[],
+  details: unknown[]
+): CalendarEvent[] {
+  const announced = candidates.flatMap((candidate) => {
+    const isPreview =
+      candidate.title.includes(WW_KUROBBS_SEARCH_KEYWORD) &&
+      (candidate.title.includes(PREVIEW_ANNOUNCEMENT_KEYWORD) || candidate.title.includes("将于"));
+    if (!isPreview) return [];
+    const detailIndex = detailed.indexOf(candidate);
+    const detail = detailIndex >= 0 ? details[detailIndex] : null;
+    const postDetail =
+      isRecord(detail) && isRecord(detail.data) && isRecord(detail.data.postDetail) ? detail.data.postDetail : null;
+    const body = joinKurobbsContent(postDetail?.postContent);
+    const postedMs = kurobbsPostTimeToMs(postDetail?.postTime) ?? candidate.createMs;
+    const opts = { fallbackYear: sourceYearFromMs(postedMs), notBeforeMs: postedMs };
+    const startMs = extractLivestreamStart(candidate.title, opts) ?? (body ? extractLivestreamStart(body, opts) : null);
+    if (startMs == null) return [];
+    return [
+      {
+        candidate,
+        startMs,
+        body,
+        sourceId: candidate.postId,
+        postedMs,
+        versionLabel: extractVersionLabel(candidate.title),
+      },
+    ];
+  });
+  return newestPerVersion(announced).map(({ candidate, startMs, body, versionLabel }) =>
+    buildLivestreamScheduleEvent({
+      game: "ww",
+      sourceId: candidate.postId,
+      versionLabel,
+      startMs,
+      text: body || candidate.title,
+      linkUrl: `${WW_KUROBBS_POST_URL}${candidate.postId}`,
+    })
+  );
 }
 
 // ---------------------------------------------------------------------------

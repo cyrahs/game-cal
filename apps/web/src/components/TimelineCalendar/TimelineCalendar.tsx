@@ -14,7 +14,7 @@ import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "
 import { clamp } from "../../lib/color";
 import { validateCronExpression } from "../../lib/cron";
 import { normalizeEventTitle } from "../../lib/events";
-import { predictLivestream } from "../../lib/livestream";
+import { resolveLivestream } from "../../lib/livestream";
 import {
   extractGachaFeatured,
   formatGachaFeaturedTitle,
@@ -57,6 +57,8 @@ type TimelineCalendarProps =
       events: TimelineCalendarEvent[];
       gameId: GameId;
       currentVersionState: UseCurrentVersionState;
+      // Announced version livestreams (`is_livestream` events) for the progress bar.
+      livestreamEvents?: CalendarEvent[];
       currentVersions?: never;
     }
   | {
@@ -65,6 +67,7 @@ type TimelineCalendarProps =
       currentVersions?: GameVersionInfo[];
       gameId?: never;
       currentVersionState?: never;
+      livestreamEvents?: never;
     };
 type ParsedEvent = CalendarEvent & {
   _s: Dayjs;
@@ -2589,7 +2592,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       s,
       e,
       label: splitVersionLabel(currentVersion),
-      livestream: predictLivestream(primaryGameId, s.valueOf(), e.valueOf()),
+      livestream: resolveLivestream(primaryGameId, props.livestreamEvents ?? [], s.valueOf(), e.valueOf()),
     };
   })();
 
