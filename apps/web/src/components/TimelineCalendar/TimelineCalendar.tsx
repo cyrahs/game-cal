@@ -14,6 +14,7 @@ import { looksLikeHtml, normalizeAnnouncementHtml, preprocessAnnContent } from "
 import { clamp } from "../../lib/color";
 import { validateCronExpression } from "../../lib/cron";
 import { normalizeEventTitle } from "../../lib/events";
+import { predictLivestream } from "../../lib/livestream";
 import {
   extractGachaFeatured,
   formatGachaFeaturedTitle,
@@ -2584,7 +2585,12 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     const s = parseDateTime(currentVersion.start_time);
     const e = parseDateTime(currentVersion.end_time);
     if (!s.isValid() || !e.isValid() || !e.isAfter(s)) return null;
-    return { s, e, label: splitVersionLabel(currentVersion) };
+    return {
+      s,
+      e,
+      label: splitVersionLabel(currentVersion),
+      livestream: predictLivestream(primaryGameId, s.valueOf(), e.valueOf()),
+    };
   })();
 
   const gameHero = !isHome ? (
@@ -2609,6 +2615,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                 endMs={versionProgress.e.valueOf()}
                 color={gameColorVar(primaryGameId)}
                 ink={gameInkVar(primaryGameId)}
+                livestream={versionProgress.livestream}
               />
               <div className="flex justify-between gap-2 text-[11px] md:text-xs font-mono text-[color:var(--muted)]">
                 <span className="hidden md:inline">{versionProgress.s.format("MM/DD HH:mm")}</span>
