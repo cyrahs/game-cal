@@ -1,9 +1,10 @@
-import type { GameId } from "../api/types";
+import type { CalendarEvent, GameId } from "../api/types";
 import { DAY_MS, pad2 } from "./time";
 
 // Version livestreams ("前瞻特别节目") air on a fixed weekday and time, a fixed
 // number of weeks before the week the current version ends. Until the official
-// announcement is out, the next stream is predicted from that pattern.
+// announcement is out (an `is_livestream` event from the API), the next stream
+// is predicted from that pattern.
 
 export type LivestreamRule = {
   // Weeks (Monday-based, UTC+8) between the stream's week and the version end's week.
@@ -19,6 +20,9 @@ export type LivestreamInfo = {
   startMs: number;
   // Predictions only: the pattern the date came from, as shown to the user.
   ruleText?: string;
+  // Confirmed only: the announced stream's title and the official post.
+  title?: string;
+  linkUrl?: string;
 };
 
 const SOURCE_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -62,4 +66,38 @@ export function predictLivestream(gameId: GameId, versionStartMs: number, versio
   const startMs = livestreamTimeFromRule(rule, versionEndMs);
   if (startMs <= versionStartMs || startMs >= versionEndMs) return null;
   return { kind: "predicted", startMs, ruleText: describeLivestreamRule(rule) };
+}
+
+/**
+ * The officially announced stream for the next version: the latest
+ * `is_livestream` event that starts inside the current version. Streams before
+ * the version start belong to the current version and are ignored.
+ */
+export function pickAnnouncedLivestream(
+  events: readonly CalendarEvent[],
+  versionStartMs: number,
+  versionEndMs: number,
+): LivestreamInfo | null {
+  let best: { startMs: number; event: CalendarEvent } | null = null;
+  for (const event of events) {
+    if (!event.is_livestream) continue;
+    const startMs = Date.parse(event.start_time);
+    if (!Number.isFinite(startMs) || startMs <= versionStartMs || startMs >= versionEndMs) continue;
+    if (!best || startMs > best.startMs) best = { startMs, event };
+  }
+  if (!best) return null;
+  return { kind: "confirmed", startMs: best.startMs, title: best.event.title, linkUrl: best.event.linkUrl };
+}
+
+/** The announced stream when there is one, else the prediction. */
+export function resolveLivestream(
+  gameId: GameId,
+  events: readonly CalendarEvent[],
+  versionStartMs: number,
+  versionEndMs: number,
+): LivestreamInfo | null {
+  return (
+    pickAnnouncedLivestream(events, versionStartMs, versionEndMs) ??
+    predictLivestream(gameId, versionStartMs, versionEndMs)
+  );
 }

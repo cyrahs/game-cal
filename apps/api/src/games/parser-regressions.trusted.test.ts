@@ -28,6 +28,7 @@ import {
 } from "./zzz.js";
 import { fetchEventsForGame } from "./index.js";
 import {
+  extractLivestreamStart,
   extractRedeemCodeExpiry,
   extractRedeemCodes,
   fetchLivestreamCodeEvents,
@@ -989,6 +990,21 @@ test("livestream codes: unrelated timestamps are not treated as an expiry", () =
   assert.equal(expiry.iso, null);
 });
 
+test("livestream schedule: preview wording variants", () => {
+  const at = (text: string, notBeforeMs?: number) => {
+    const ms = extractLivestreamStart(text, { fallbackYear: 2026, notBeforeMs });
+    return ms == null ? null : new Date(ms).toISOString();
+  };
+  assert.equal(at("前瞻特别节目将于9月12日（本周六）20:00正式开启。"), "2026-09-12T12:00:00.000Z");
+  assert.equal(at("前瞻特别节目将在2026年9月20日19:30正式播出。"), "2026-09-20T11:30:00.000Z");
+  assert.equal(at("《原神》2.6版本前瞻特别节目将于3月18日（本周五）晚8:00开启"), "2026-03-18T12:00:00.000Z");
+  assert.equal(at("《鸣潮》3.7版本前瞻通讯将于2026年9月19日19:00正式播出"), "2026-09-19T11:00:00.000Z");
+  // Late-December post announcing an early-January stream.
+  assert.equal(at("前瞻特别节目将于1月2日（本周五）13:00开启", Date.UTC(2026, 11, 31)), "2027-01-02T05:00:00.000Z");
+  // Activity windows next to the announcement are not the stream time.
+  assert.equal(at("活动时间：2026年9月12日-2026年9月14日23:59"), null);
+});
+
 test("livestream codes: Star Rail combines the livestream API codes with the post expiry", async () => {
   const mock = installMiyousheMock({
     userPost: miyousheUserPostFixture(starRailPosts()),
@@ -1006,7 +1022,8 @@ test("livestream codes: Star Rail combines the livestream API codes with the pos
   });
 
   try {
-    const events = await fetchMiyousheLivestreamCodeEventsForGame("starrail", {}, NOW_MS);
+    const allEvents = await fetchMiyousheLivestreamCodeEventsForGame("starrail", {}, NOW_MS);
+    const events = allEvents.filter((event) => !event.is_livestream);
     assert.ok(mock.requests.some((r) => r.url.includes("/post/wapi/userPost?uid=288909600&size=50")));
     assert.ok(mock.requests.some((r) => r.url.includes("/apihub/api/home/new?gids=6") && r.clientType === "2"));
     // Only the livestream entry is queried; the sign-in and doujin act_ids are skipped.
@@ -1031,6 +1048,12 @@ test("livestream codes: Star Rail combines the livestream API codes with the pos
     assert.match(event.content ?? "", /^KXHN8W7FGB6U：星琼×100，信用点×50000\n/);
     assert.match(event.content ?? "", /兑换码将于2026年9月21日23:59:59失效/);
     assert.equal(event.is_gacha, false);
+
+    const schedule = allEvents.filter((e) => e.is_livestream);
+    assert.deepEqual(
+      schedule.map((e) => [e.id, e.title, e.start_time, e.is_gacha]),
+      [["starrail:livestream-code:schedule:78164947", "4.6版本前瞻特别节目", "2026-09-20T19:30:00+08:00", false]]
+    );
   } finally {
     mock.restore();
   }
@@ -1044,7 +1067,9 @@ test("livestream codes: Star Rail falls back to the plain-text post when the liv
   });
 
   try {
-    const events = await fetchMiyousheLivestreamCodeEventsForGame("starrail", {}, NOW_MS);
+    const events = (await fetchMiyousheLivestreamCodeEventsForGame("starrail", {}, NOW_MS)).filter(
+      (event) => !event.is_livestream
+    );
     assert.equal(events.length, 1);
     const event = events[0]!;
     assert.equal(event.id, "starrail:livestream-code:78287359");
@@ -1111,7 +1136,8 @@ test("livestream codes: Genshin discovers the act_id from the 预告 post link a
   });
 
   try {
-    const events = await fetchMiyousheLivestreamCodeEventsForGame("genshin", {}, NOW_MS);
+    const allEvents = await fetchMiyousheLivestreamCodeEventsForGame("genshin", {}, NOW_MS);
+    const events = allEvents.filter((event) => !event.is_livestream);
     assert.equal(events.length, 1);
     const event = events[0]!;
     assert.equal(event.id, `genshin:livestream-code:${actId}`);
@@ -1120,6 +1146,16 @@ test("livestream codes: Genshin discovers the act_id from the 预告 post link a
     assert.equal(event.end_time, "2026-09-15T12:00:00+08:00");
     assert.deepEqual(event.redeem_codes, ["往冥府的安魂歌", "风仙薇斯纳为你效劳", "首席女高音沃雅妮莎"]);
     assert.equal(event.linkUrl, "https://www.miyoushe.com/ys/article/78118185");
+
+    // The 预告 post also announces the stream itself.
+    const schedule = allEvents.filter((e) => e.is_livestream);
+    assert.equal(schedule.length, 1);
+    assert.equal(schedule[0]!.id, "genshin:livestream-code:schedule:78027438");
+    assert.equal(schedule[0]!.title, "7.1版本前瞻特别节目");
+    assert.equal(schedule[0]!.start_time, "2026-09-12T20:00:00+08:00");
+    assert.equal(schedule[0]!.end_time, "2026-09-12T22:00:00+08:00");
+    assert.equal(schedule[0]!.linkUrl, "https://www.miyoushe.com/ys/article/78027438");
+    assert.equal(schedule[0]!.redeem_codes, undefined);
   } finally {
     mock.restore();
   }
@@ -1151,7 +1187,9 @@ test("livestream codes: ZZZ keeps an expiry-only reminder when codes are image-o
   });
 
   try {
-    const events = await fetchMiyousheLivestreamCodeEventsForGame("zzz", {}, Date.UTC(2026, 7, 29, 12));
+    const events = (await fetchMiyousheLivestreamCodeEventsForGame("zzz", {}, Date.UTC(2026, 7, 29, 12))).filter(
+      (event) => !event.is_livestream
+    );
     assert.equal(events.length, 1);
     const event = events[0]!;
     assert.equal(event.id, "zzz:livestream-code:77827033");
@@ -1193,7 +1231,8 @@ test("livestream codes: Wuthering Waves reads the official publisher comment", a
   };
 
   try {
-    const events = await fetchWwLivestreamCodeEvents({}, NOW_MS);
+    const allEvents = await fetchWwLivestreamCodeEvents({}, NOW_MS);
+    const events = allEvents.filter((event) => !event.is_livestream);
     const listRequests = requests.filter((r) => r.url.endsWith("/forum/search/v2/post"));
     const detailRequests = requests.filter((r) => r.url.endsWith("/forum/getPostDetail"));
     assert.equal(listRequests.length, 2);
@@ -1215,6 +1254,14 @@ test("livestream codes: Wuthering Waves reads the official publisher comment", a
     assert.deepEqual(event.redeem_codes, ["FALLINGSANCTUM", "FINDSENTINEL", "WAKINGMOON"]);
     assert.equal(event.linkUrl, "https://www.kurobbs.com/mc/post/1550916937441083392");
     assert.equal(event.banner, "https://prod-alicdn-community.kurobbs.com/forum/cover.png");
+
+    // The preview post's title carries the stream time.
+    const schedule = allEvents.filter((e) => e.is_livestream);
+    assert.equal(schedule.length, 1);
+    assert.equal(schedule[0]!.id, "ww:livestream-code:schedule:1548053613414187008");
+    assert.equal(schedule[0]!.title, "3.7版本前瞻特别节目");
+    assert.equal(schedule[0]!.start_time, "2026-09-19T19:00:00+08:00");
+    assert.equal(schedule[0]!.linkUrl, "https://www.kurobbs.com/mc/post/1548053613414187008");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1249,8 +1296,10 @@ test("livestream codes: fetchEventsForGame appends code events to the notice fee
 
   try {
     const events = await fetchEventsForGame("starrail");
-    assert.equal(events.length, 1);
-    assert.equal(events[0]!.title, "4.6版本前瞻兑换码");
+    assert.deepEqual(
+      events.map((event) => event.title),
+      ["4.6版本前瞻兑换码", "4.6版本前瞻特别节目"]
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1320,20 +1369,25 @@ test("livestream codes: a livestream API outage keeps the previous codes over th
 
   try {
     // Same version already cached: keep it instead of the post-derived event.
-    assert.deepEqual(await fetchLivestreamCodeEvents("starrail", {}, [previous]), [previous]);
+    // The stream announcement only needs the posts, so it is still added.
+    const kept = await fetchLivestreamCodeEvents("starrail", {}, [previous]);
+    assert.deepEqual(
+      kept.map((event) => event.id),
+      [previous.id, "starrail:livestream-code:schedule:78164947"]
+    );
 
     // Only an older version cached: keep it and add the new post-derived event.
     const merged = await fetchLivestreamCodeEvents("starrail", {}, [older]);
     assert.deepEqual(
       merged.map((event) => event.id),
-      [older.id, "starrail:livestream-code:78287359"]
+      [older.id, "starrail:livestream-code:78287359", "starrail:livestream-code:schedule:78164947"]
     );
     assert.deepEqual(merged[1]!.redeem_codes, ["KXHN8W7FGB6U", "XEZNQE6FZSNY", "ZXH68F7WYTN4"]);
 
     // Nothing cached: the post-derived event still reaches the calendar.
     assert.deepEqual(
       (await fetchLivestreamCodeEvents("starrail")).map((event) => event.id),
-      ["starrail:livestream-code:78287359"]
+      ["starrail:livestream-code:78287359", "starrail:livestream-code:schedule:78164947"]
     );
   } finally {
     globalThis.fetch = originalFetch;

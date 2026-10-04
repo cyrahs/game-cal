@@ -3,12 +3,13 @@ import LoadingCard from "../components/LoadingCard";
 import TimelineCalendar from "../components/TimelineCalendar/TimelineCalendar";
 import { refreshGameData } from "../hooks/refreshGameData";
 import { useCurrentVersion } from "../hooks/useCurrentVersion";
-import { useEvents } from "../hooks/useEvents";
+import { useEvents, useLivestreamEvents } from "../hooks/useEvents";
 import { localizeErrorMessage } from "../lib/errors";
 
 export default function GamePage(props: { game: GameId }) {
   const eventsState = useEvents(props.game);
   const currentVersionState = useCurrentVersion(props.game);
+  const livestreamState = useLivestreamEvents(props.game);
 
   if (eventsState.status === "loading") {
     return <LoadingCard />;
@@ -30,5 +31,12 @@ export default function GamePage(props: { game: GameId }) {
     );
   }
 
-  return <TimelineCalendar events={eventsState.data} gameId={props.game} currentVersionState={currentVersionState} />;
+  return (
+    <TimelineCalendar
+      events={eventsState.data}
+      gameId={props.game}
+      currentVersionState={currentVersionState}
+      livestreamEvents={livestreamState.status === "success" ? livestreamState.data : undefined}
+    />
+  );
 }

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { LIVESTREAM_RULES, describeLivestreamRule, livestreamTimeFromRule, predictLivestream } from "../src/lib/livestream";
+import type { CalendarEvent } from "../src/api/types";
+import {
+  LIVESTREAM_RULES,
+  describeLivestreamRule,
+  livestreamTimeFromRule,
+  predictLivestream,
+  resolveLivestream,
+} from "../src/lib/livestream";
 
 const ms = (iso: string) => Date.parse(iso);
 
@@ -45,4 +52,38 @@ test("predictLivestream returns a prediction inside the current version only", (
 
 test("describeLivestreamRule reads like the official wording", () => {
   assert.equal(describeLivestreamRule(LIVESTREAM_RULES.ww!), "版本结束前两周的周五 19:00（UTC+8）");
+});
+
+function stream(id: string, title: string, start: string): CalendarEvent {
+  return {
+    id: `starrail:livestream-code:schedule:${id}`,
+    title,
+    start_time: start,
+    end_time: start,
+    is_livestream: true,
+    linkUrl: `https://www.miyoushe.com/sr/article/${id}`,
+  };
+}
+
+test("resolveLivestream prefers the announced stream of the next version", () => {
+  const versionStart = ms("2026-09-28T07:00:00+08:00");
+  const versionEnd = ms("2026-11-11T07:00:00+08:00");
+  const events = [
+    // The current version's own stream aired before it started.
+    stream("1", "4.6版本前瞻特别节目", "2026-09-20T19:30:00+08:00"),
+    stream("2", "4.7版本前瞻特别节目", "2026-11-01T19:30:00+08:00"),
+    { ...stream("3", "not a stream", "2026-10-30T19:30:00+08:00"), is_livestream: false },
+  ];
+  assert.deepEqual(resolveLivestream("starrail", events, versionStart, versionEnd), {
+    kind: "confirmed",
+    startMs: ms("2026-11-01T19:30:00+08:00"),
+    title: "4.7版本前瞻特别节目",
+    linkUrl: "https://www.miyoushe.com/sr/article/2",
+  });
+  // Nothing announced yet: fall back to the prediction.
+  assert.equal(resolveLivestream("starrail", events.slice(0, 1), versionStart, versionEnd)?.kind, "predicted");
+  assert.equal(
+    resolveLivestream("starrail", [], versionStart, versionEnd)?.startMs,
+    ms("2026-10-30T19:30:00+08:00")
+  );
 });

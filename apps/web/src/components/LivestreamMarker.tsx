@@ -72,7 +72,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
     >
       <button
         type="button"
-        aria-label={`下个版本前瞻（${kindLabel}）：${when.format("MM/DD HH:mm")}`}
+        aria-label={`${(confirmed && info.title) || "下个版本前瞻"}（${kindLabel}）：${when.format("MM/DD HH:mm")}`}
         aria-expanded={open}
         onPointerDown={(e) => {
           lastPointerRef.current = e.pointerType;
@@ -88,7 +88,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
         }}
         className={clsx(
           "relative block w-3.5 h-3.5 rounded-full border-2 transition-transform hover:scale-110",
-          "after:absolute after:-inset-2 after:content-[''] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
+          "after:absolute after:-inset-2 after:content-[''] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
         )}
         style={
           confirmed
@@ -97,40 +97,67 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
         }
       />
       {open ? (
+        // The top padding bridges the gap to the dot, so the pointer can reach the link.
         <div
-          ref={tipRef}
-          role="tooltip"
-          className="absolute top-full left-1/2 mt-2.5 w-max max-w-[min(300px,calc(100vw-16px))] rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] px-3 py-2.5 shadow-ink grid gap-1 text-xs"
+          className="absolute top-full left-1/2 pt-2.5"
           style={{ transform: `translateX(calc(-50% + ${shiftPx}px))` }}
         >
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-[color:var(--ink)]">下个版本前瞻</span>
-            <span
-              className="rounded-md border px-1.5 text-[11px] leading-[18px] font-semibold"
-              style={confirmed ? { color: ink, borderColor: ink } : { color: "var(--muted)", borderColor: "var(--line)" }}
-            >
-              {kindLabel}
-            </span>
-          </div>
-          <div className="font-mono text-[13px] font-semibold text-[color:var(--ink)]">
-            {when.format("MM/DD")} 周{WEEKDAY_NAMES[when.day()]} {when.format("HH:mm")}
-          </div>
-          <div className="text-[color:var(--ink2)]">
-            {aired ? (
-              confirmed ? "已开播" : "推算时间已过"
-            ) : (
-              <>
-                还有 <span className="font-mono font-semibold"><LiveDuration untilMs={info.startMs} /></span>
-              </>
-            )}
-          </div>
-          {!confirmed && info.ruleText ? (
-            <div className="text-[color:var(--muted)]">
-              按往期规律推算：
-              <br />
-              {info.ruleText}
+          <div
+            ref={tipRef}
+            role="tooltip"
+            className="w-max max-w-[min(300px,calc(100vw-16px))] rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] px-3 py-2.5 shadow-ink grid gap-1 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[color:var(--ink)]">
+                {(confirmed && info.title) || "下个版本前瞻"}
+              </span>
+              <span
+                className="rounded-md border px-1.5 text-[11px] leading-[18px] font-semibold"
+                style={
+                  confirmed ? { color: ink, borderColor: ink } : { color: "var(--muted)", borderColor: "var(--line)" }
+                }
+              >
+                {kindLabel}
+              </span>
             </div>
-          ) : null}
+            <div className="font-mono text-[13px] font-semibold text-[color:var(--ink)]">
+              {when.format("MM/DD")} 周{WEEKDAY_NAMES[when.day()]} {when.format("HH:mm")}
+            </div>
+            <div className="text-[color:var(--ink2)]">
+              {aired ? (
+                confirmed ? (
+                  "已开播"
+                ) : (
+                  "推算时间已过"
+                )
+              ) : (
+                <>
+                  还有{" "}
+                  <span className="font-mono font-semibold">
+                    <LiveDuration untilMs={info.startMs} />
+                  </span>
+                </>
+              )}
+            </div>
+            {!confirmed && info.ruleText ? (
+              <div className="text-[color:var(--muted)]">
+                按往期规律推算：
+                <br />
+                {info.ruleText}
+              </div>
+            ) : null}
+            {confirmed && info.linkUrl ? (
+              <a
+                href={info.linkUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="w-fit font-semibold underline-offset-2 hover:underline"
+                style={{ color: ink }}
+              >
+                查看官方预告 ↗
+              </a>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>

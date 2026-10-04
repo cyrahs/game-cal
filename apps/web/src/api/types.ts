@@ -34,6 +34,9 @@ export interface CalendarEvent {
   linkUrl?: string;
   // Livestream ("前瞻") redemption codes; end_time is the official expiry.
   redeem_codes?: string[];
+  // Officially announced version livestream ("前瞻特别节目"); start_time is the
+  // stream start. Not an activity: the web shows it on the version progress bar.
+  is_livestream?: boolean;
 }
 
 export interface GameVersionInfo {
