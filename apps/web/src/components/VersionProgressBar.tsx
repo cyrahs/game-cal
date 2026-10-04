@@ -1,13 +1,22 @@
 import { useSyncExternalStore } from "react";
 import { clamp } from "../lib/color";
 import { getClockNowMs, subscribeClock } from "../lib/clock";
+import type { LivestreamInfo } from "../lib/livestream";
+import LivestreamMarker from "./LivestreamMarker";
 
 /**
  * Version progress track with a live "xx.xx%" label above the end of the fill.
  * The snapshot is the formatted percentage, so it only re-renders when the
- * visible value changes, on the shared per-second clock.
+ * visible value changes, on the shared per-second clock. An optional dot marks
+ * the next version livestream.
  */
-export default function VersionProgressBar(props: { startMs: number; endMs: number; color: string; ink: string }) {
+export default function VersionProgressBar(props: {
+  startMs: number;
+  endMs: number;
+  color: string;
+  ink: string;
+  livestream?: LivestreamInfo | null;
+}) {
   const { startMs, endMs } = props;
   const label = useSyncExternalStore(subscribeClock, () => {
     const pct = clamp(((getClockNowMs() - startMs) / Math.max(1, endMs - startMs)) * 100, 0, 100);
@@ -29,8 +38,11 @@ export default function VersionProgressBar(props: { startMs: number; endMs: numb
           </span>
         </span>
       </div>
-      <div className="h-2.5 rounded-full bg-[color:var(--line-soft)]">
+      <div className="relative h-2.5 rounded-full bg-[color:var(--line-soft)]">
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: props.color }} />
+        {props.livestream ? (
+          <LivestreamMarker info={props.livestream} startMs={startMs} endMs={endMs} ink={props.ink} />
+        ) : null}
       </div>
     </div>
   );

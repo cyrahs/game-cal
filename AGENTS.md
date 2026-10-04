@@ -111,6 +111,7 @@ Frontend (`apps/web`):
 - UI entrypoints:
   - Router/app shell: `apps/web/src/App.tsx`
   - Game page: `apps/web/src/pages/GamePage.tsx`
+- Next version livestream (前瞻) prediction rules + dot on the game-page version bar: `apps/web/src/lib/livestream.ts`, `apps/web/src/components/LivestreamMarker.tsx`
 
 ## Making Changes Safely
 
