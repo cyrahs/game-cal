@@ -6,8 +6,6 @@ import { getClockNowMs, subscribeClock } from "../lib/clock";
 import type { LivestreamInfo } from "../lib/livestream";
 import { LiveDuration } from "./LiveDuration";
 
-const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
-
 /**
  * A dot on the version track at the next version livestream. Hovering (or
  * focusing) shows the details; on touch screens a tap toggles them.
@@ -56,7 +54,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
   const pct = clamp(((info.startMs - startMs) / Math.max(1, endMs - startMs)) * 100, 0, 100);
   const confirmed = info.kind === "confirmed";
   const when = dayjs(info.startMs);
-  const kindLabel = confirmed ? "官方已公布" : "预测";
+  const kindLabel = confirmed ? "官方" : "预测";
 
   return (
     <div
@@ -120,24 +118,12 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
                 {kindLabel}
               </span>
             </div>
-            <div className="font-mono text-[13px] font-semibold text-[color:var(--ink)]">
-              {when.format("MM/DD")} 周{WEEKDAY_NAMES[when.day()]} {when.format("HH:mm")}
-            </div>
-            <div className="text-[color:var(--ink2)]">
-              {aired ? (
-                confirmed ? (
-                  "已开播"
-                ) : (
-                  "推算时间已过"
-                )
-              ) : (
-                <>
-                  还有{" "}
-                  <span className="font-mono font-semibold">
-                    <LiveDuration untilMs={info.startMs} />
-                  </span>
-                </>
-              )}
+            {/* Remaining time over the start time, like the gacha cards. */}
+            <div className="grid gap-0.5">
+              <span className="font-mono text-[13px] font-semibold text-[color:var(--ink)]">
+                {aired ? confirmed ? "已开播" : "推算时间已过" : <LiveDuration untilMs={info.startMs} />}
+              </span>
+              <span className="font-mono text-[11px] text-[color:var(--muted)]">{when.format("MM/DD HH:mm")}</span>
             </div>
             {!confirmed && info.ruleText ? (
               <div className="text-[color:var(--muted)]">

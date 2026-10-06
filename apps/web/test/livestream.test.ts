@@ -42,7 +42,7 @@ test("predictLivestream returns a prediction inside the current version only", (
   assert.deepEqual(p, {
     kind: "predicted",
     startMs: ms("2026-10-23T20:00:00+08:00"),
-    ruleText: "版本结束前两周的周五 20:00（UTC+8）",
+    ruleText: "版本结束前两周的周五 20:00",
   });
   // A version too short to contain the stream.
   assert.equal(predictLivestream("genshin", ms("2026-10-26T07:00:00+08:00"), ms("2026-11-04T06:00:00+08:00")), null);
@@ -51,7 +51,7 @@ test("predictLivestream returns a prediction inside the current version only", (
 });
 
 test("describeLivestreamRule reads like the official wording", () => {
-  assert.equal(describeLivestreamRule(LIVESTREAM_RULES.ww!), "版本结束前两周的周五 19:00（UTC+8）");
+  assert.equal(describeLivestreamRule(LIVESTREAM_RULES.ww!), "版本结束前两周的周五 19:00");
 });
 
 function stream(id: string, title: string, start: string): CalendarEvent {
