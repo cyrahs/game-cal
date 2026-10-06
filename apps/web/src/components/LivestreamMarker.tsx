@@ -126,11 +126,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
               <span className="font-mono text-[11px] text-[color:var(--muted)]">{when.format("MM/DD HH:mm")}</span>
             </div>
             {!confirmed && info.ruleText ? (
-              <div className="text-[color:var(--muted)]">
-                按往期规律推算：
-                <br />
-                {info.ruleText}
-              </div>
+              <div className="text-[color:var(--muted)]">{info.ruleText}</div>
             ) : null}
             {confirmed && info.linkUrl ? (
               <a
