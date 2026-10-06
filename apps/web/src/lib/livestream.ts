@@ -42,7 +42,7 @@ export const LIVESTREAM_RULES: Partial<Record<GameId, LivestreamRule>> = {
 
 export function describeLivestreamRule(rule: LivestreamRule): string {
   const weeks = WEEK_COUNT_NAMES[rule.weeksBefore] ?? String(rule.weeksBefore);
-  return `版本结束前${weeks}周的周${WEEKDAY_NAMES[rule.weekday - 1]} ${pad2(rule.hour)}:${pad2(rule.minute)}（UTC+8）`;
+  return `版本结束前${weeks}周的周${WEEKDAY_NAMES[rule.weekday - 1]} ${pad2(rule.hour)}:${pad2(rule.minute)}`;
 }
 
 /** Applies a rule to a version end time. Week boundaries and the clock time are in UTC+8. */
