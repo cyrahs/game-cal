@@ -42,7 +42,10 @@ function normalizeTitleKey(input: string | undefined): string {
 }
 
 function normalizeAnnouncementEventTitle(input: string | undefined): string {
-  let title = stripHtml(input).replace(/\s*(?:活动)?说明\s*$/, "").trim();
+  let title = stripHtml(input)
+    .replace(/\s*(?:活动)?说明\s*$/, "")
+    .replace(/网页活动开启$/, "网页活动")
+    .trim();
   const outerQuoted =
     /^「(.+)」$/.exec(title) ??
     /^『(.+)』$/.exec(title) ??
@@ -89,12 +92,15 @@ export function isZzzSupplementalActivityNotice(
   contentInput: string | undefined
 ): boolean {
   const title = stripHtml(titleInput);
+  const content = stripHtml(contentInput);
+  if (title.endsWith("网页活动开启")) {
+    return /【活动时间】/.test(content) && /(?:菲林|奖励)/.test(content);
+  }
   if (!title.endsWith("说明")) return false;
   if (isVersionNoticeText(title)) return false;
   if (isGachaEventTitle("zzz", title)) return false;
   if (title.endsWith("活动说明")) return true;
 
-  const content = stripHtml(contentInput);
   return /活动(?:时间|期间)/.test(content);
 }
 
@@ -299,6 +305,44 @@ export function extractZzzTimeRangeFromContent(
   };
 }
 
+function extractZzzWebActivityRangeFromNotice(
+  item: MihoyoNapAnnItem,
+  content: string | undefined
+): ParsedTimeRange {
+  const listStartIso = item.start_time && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(item.start_time)
+    ? toIsoWithSourceOffset(item.start_time, ZZZ_SOURCE_TZ_OFFSET)
+    : null;
+  const timeSection = /【活动时间】\s*(\d{1,2})月(\d{1,2})日\s*[-~～至到—–]\s*(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(
+    stripHtml(content)
+  );
+  if (!listStartIso || !Number.isFinite(Date.parse(listStartIso)) || !timeSection) {
+    return { startIso: null, endIso: null };
+  }
+
+  const year = listStartIso.slice(0, 4);
+  const startMonth = String(Number(timeSection[1])).padStart(2, "0");
+  const startDay = String(Number(timeSection[2])).padStart(2, "0");
+  const startDate = `${year}-${startMonth}-${startDay}`;
+  if (listStartIso.slice(0, 10) !== startDate) {
+    return { startIso: null, endIso: null };
+  }
+
+  const endIso = toSourceIsoFromDateTimeCandidate(
+    `${year}-${timeSection[3]}-${timeSection[4]} ${timeSection[5]}:${timeSection[6]}:${timeSection[7] ?? "00"}`
+  );
+  if (!endIso || !Number.isFinite(Date.parse(endIso))) {
+    return { startIso: null, endIso: null };
+  }
+
+  const listEndIso = item.end_time
+    ? toIsoWithSourceOffset(item.end_time, ZZZ_SOURCE_TZ_OFFSET)
+    : null;
+  const resolvedEndIso = !timeSection[7] && listEndIso?.slice(0, 16) === endIso.slice(0, 16)
+    ? listEndIso
+    : endIso;
+  return { startIso: listStartIso, endIso: resolvedEndIso };
+}
+
 function extractRelativeVersionLabel(input: string | undefined): string | null {
   const text = stripHtml(input);
   if (!text || !/版本更新后/.test(text)) return null;
@@ -467,10 +511,13 @@ function parseSupplementalActivityEventsFromAnnContent(
     const titleKey = normalizeTitleKey(title);
     if (!title || !titleKey || opts.existingTitleKeys.has(titleKey)) continue;
 
-    const { startIso, endIso } = extractZzzTimeRangeFromContent(contentItem?.content ?? "", {
-      fallbackEndIso: opts.fallbackEndIso,
-      versionEndByLabel: opts.versionEndByLabel,
-    });
+    const isWebActivity = stripHtml(item.title || item.subtitle).endsWith("网页活动开启");
+    const { startIso, endIso } = isWebActivity
+      ? extractZzzWebActivityRangeFromNotice(item, contentItem?.content)
+      : extractZzzTimeRangeFromContent(contentItem?.content ?? "", {
+          fallbackEndIso: opts.fallbackEndIso,
+          versionEndByLabel: opts.versionEndByLabel,
+        });
     const resolvedStart =
       startIso ??
       resolveVersionRelativeStartIso(contentItem?.content, {
