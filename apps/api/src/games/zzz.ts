@@ -15,6 +15,7 @@ import {
 } from "../lib/zzzSnapshot.js";
 import type { CalendarEvent, GameVersionInfo } from "../types.js";
 import { classifyGachaEvent, combineGachaKinds, isGachaEventTitle } from "./gacha.js";
+import { extractLivestreamStart } from "./livestreamCodes.js";
 
 const ZZZ_SOURCE_TZ_OFFSET = "+08:00";
 const ZZZ_DATE_TIME_PATTERN = String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
@@ -695,6 +696,56 @@ function buildVersionEndByLabel(
   return out;
 }
 
+function parseLivestreamEventsFromAnnContent(
+  contentItems: MihoyoNapAnnContentItem[],
+  categories: MihoyoNapAnnCategory[]
+): CalendarEvent[] {
+  const listedById = new Map(
+    categories.flatMap((category) => category.list ?? [])
+      .filter((item): item is MihoyoNapAnnItem & { ann_id: number } => typeof item.ann_id === "number")
+      .map((item) => [item.ann_id, item] as const)
+  );
+  const events = new Map<number, CalendarEvent>();
+
+  for (const item of contentItems) {
+    if (typeof item.ann_id !== "number") continue;
+    const listed = listedById.get(item.ann_id);
+    const heading = stripHtml([item.title, item.subtitle, listed?.title, listed?.subtitle].join(" "));
+    if (!heading.includes("前瞻特别节目") || !heading.includes("预告")) continue;
+    const version = /(\d+(?:\.\d+)+)\s*版本/.exec(heading)?.[1];
+    const content = stripHtml(item.content);
+    if (!version || !content) continue;
+
+    const postedMs = listed?.start_time
+      ? Date.parse(toIsoWithSourceOffset(listed.start_time, ZZZ_SOURCE_TZ_OFFSET))
+      : Number.NaN;
+    const anchorMs = Number.isFinite(postedMs) ? postedMs : Date.now();
+    const startMs = extractLivestreamStart(content, {
+      fallbackYear: new Date(anchorMs + 8 * 60 * 60 * 1000).getUTCFullYear(),
+      notBeforeMs: Number.isFinite(postedMs) ? postedMs : undefined,
+    });
+    if (startMs == null) continue;
+    if (!Number.isFinite(postedMs) && Math.abs(startMs - anchorMs) > 60 * 24 * 60 * 60 * 1000) {
+      continue;
+    }
+
+    const id = `zzz-ann:livestream:${item.ann_id}`;
+    events.set(item.ann_id, {
+      id,
+      title: `${version}版本前瞻特别节目`,
+      start_time: unixSecondsToIsoWithSourceOffset(startMs / 1000, ZZZ_SOURCE_TZ_OFFSET),
+      end_time: unixSecondsToIsoWithSourceOffset((startMs + 2 * 60 * 60 * 1000) / 1000, ZZZ_SOURCE_TZ_OFFSET),
+      end_time_kind: "explicit",
+      is_gacha: false,
+      is_livestream: true,
+      banner: item.banner?.trim() || item.img?.trim() || undefined,
+      content: item.content,
+    });
+  }
+
+  return [...events.values()];
+}
+
 async function fetchZzzAnnouncementCategories(env: RuntimeEnv): Promise<MihoyoNapAnnCategory[]> {
   if (env.ZZZ_SNAPSHOT_API_URL?.trim()) {
     const snapshot = await getZzzSnapshotBundle(env);
@@ -837,9 +888,10 @@ export async function fetchZzzEvents(env: RuntimeEnv = {}): Promise<CalendarEven
       existingEvents: normalEvents,
     }
   );
+  const livestreamEvents = parseLivestreamEventsFromAnnContent(contentItems, categories);
 
   const merged = new Map<string, CalendarEvent>();
-  for (const event of [...normalEvents, ...supplementalEvents, ...gachaEvents]) {
+  for (const event of [...normalEvents, ...supplementalEvents, ...gachaEvents, ...livestreamEvents]) {
     merged.set(String(event.id), event);
   }
 

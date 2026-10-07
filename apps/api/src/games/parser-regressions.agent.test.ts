@@ -1282,6 +1282,56 @@ test("ZZZ uses the listing start for a date-only web activity announcement", asy
   }
 });
 
+test("ZZZ extracts a preview livestream from picture announcement detail", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok([
+      "https://fixture.invalid/activity",
+      "https://fixture.invalid/content",
+      "https://fixture.invalid/list",
+    ].includes(url));
+    const data = url.endsWith("/activity")
+      ? { activity_list: [] }
+      : url.endsWith("/content")
+        ? { pic_list: [{
+            ann_id: 252,
+            title: "3.3版本「重返天空的旅程」前瞻特别节目",
+            subtitle: "3.3版本前瞻特别节目预告",
+            content: "《绝区零》3.3版本「重返天空的旅程」前瞻特别节目，将于 10月09日 19:30 正式开播！节目直播期间还将发放限定兑换码福利。",
+          }] }
+        : { list: [{ type_id: 3, type_label: "游戏公告", list: [{
+            ann_id: 252,
+            title: "3.3版本「重返天空的旅程」前瞻特别节目",
+            subtitle: "3.3版本前瞻特别节目预告",
+            start_time: "2026-10-07 12:00:00",
+          }] }] };
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+    assert.deepEqual(events.map(({ id, title, start_time, end_time, is_livestream }) => ({
+      id, title, start_time, end_time, is_livestream,
+    })), [{
+      id: "zzz-ann:livestream:252",
+      title: "3.3版本前瞻特别节目",
+      start_time: "2026-10-09T19:30:00+08:00",
+      end_time: "2026-10-09T21:30:00+08:00",
+      is_livestream: true,
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("ZZZ deduplicates prefixed activity notices against matching activity-list events", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
