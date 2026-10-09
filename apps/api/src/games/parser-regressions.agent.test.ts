@@ -70,6 +70,45 @@ test("WW includes bounded category-one web activities without admitting other no
   }
 });
 
+test("WW keeps challenge-cycle version ends relative when the notice window closes earlier", async () => {
+  const originalFetch = globalThis.fetch;
+  const notice = {
+    id: "50751",
+    tabTitle: "【终焉矩阵】 全新挑战周期开启",
+    category: "2",
+    tag: "5",
+    permanent: "0",
+    startTimeMs: Date.parse("2026-07-10T04:00:00+08:00"),
+    endTimeMs: Date.parse("2026-11-12T03:59:59+08:00"),
+    content: [
+      "✦开放时间✦ 终焉矩阵将以挑战周期的形式进行更新，每个挑战周期包含若干个挑战阶段，挑战阶段会在版本更新时随之更新。",
+      "挑战周期与挑战阶段都拥有独立的奖励。 【终焉矩阵】开放时间：2026年7月17日04:00（服务器时间）",
+      "※【终焉矩阵】第二周期「险境强袭」的持续时间为：3.5版本 ~ 3.8版本。",
+    ].join(" "),
+  };
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), "https://fixture.invalid/ww-cycle");
+    return new Response(JSON.stringify({ game: [notice] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const events = await fetchWwEvents({ WW_NOTICE_API_URL: "https://fixture.invalid/ww-cycle" });
+    assert.deepEqual(events.map(({ id, start_time, end_time, end_time_kind, end_time_text }) => ({
+      id, start_time, end_time, end_time_kind, end_time_text,
+    })), [
+      {
+        id: "50751",
+        start_time: "2026-07-17T04:00:00+08:00",
+        end_time: null,
+        end_time_kind: "relative",
+        end_time_text: "3.5版本 ~ 3.8版本",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Genshin excludes first-purchase bonus reset notices from events", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
