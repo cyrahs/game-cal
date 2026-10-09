@@ -260,6 +260,9 @@ const WW_FUZZY_START_TIME_RANGE_RE = new RegExp(
 const WW_SINGLE_START_TIME_RE = new RegExp(
   `(?:活动时间|唤取时间|开放时间|领取时间|开启时间)\\s*[：:]?\\s*(${WW_DATE_TIME_PATTERN})`
 );
+const WW_CHALLENGE_CYCLE_VERSION_RANGE_RE = new RegExp(
+  String.raw`周期[^。；;]{0,60}?持续时间为[：:\s]*((?:\d+(?:\.\d+)+)\s*版本\s*${WW_RANGE_SEPARATOR_PATTERN}\s*(?:\d+(?:\.\d+)+)\s*版本)`
+);
 
 function extractWwTitleTokens(title: string | undefined): string[] {
   const normalized = normalizeTitle(title ?? "");
@@ -483,18 +486,26 @@ function resolveWwEventTimeRange(
     endMs: number;
     versionStartIsoByNumericLabel: Map<string, string>;
   }
-): { startIso: string; endIso: string } {
+): { startIso: string; endIso: string | null; endTimeText?: string } {
   const fallbackStartIso = msToIsoWithSourceOffset(opts.startMs);
   const fallbackEndIso = msToIsoWithSourceOffset(opts.endMs);
   const parsed = parseTimeRangeFromContent(item.content, {
     fallbackYear: sourceYearFromMs(opts.startMs),
     title: item.tabTitle,
   });
+  const cycleEndText =
+    parsed.endIso == null && item.tabTitle?.includes("挑战周期")
+      ? WW_CHALLENGE_CYCLE_VERSION_RANGE_RE.exec(stripHtml(item.content))?.[1]
+      : null;
   const versionRelativeStartIso = resolveWwVersionRelativeStartIso(
     item.content,
     opts.versionStartIsoByNumericLabel
   );
   const startIso = parsed.startIso ?? versionRelativeStartIso ?? fallbackStartIso;
+  if (cycleEndText && Number.isFinite(Date.parse(startIso))) {
+    return { startIso, endIso: null, endTimeText: cycleEndText.trim() };
+  }
+
   const endIso = parsed.endIso ?? fallbackEndIso;
 
   const startMs = Date.parse(startIso);
@@ -562,7 +573,7 @@ export async function fetchWwEvents(
     const idText = String(item.id ?? "").trim();
     const fallbackId = stableEventIdFromTitleAndStartTime(title, String(startMs));
     const id = idText || fallbackId;
-    const { startIso, endIso } = resolveWwEventTimeRange(item, {
+    const { startIso, endIso, endTimeText } = resolveWwEventTimeRange(item, {
       startMs,
       endMs,
       versionStartIsoByNumericLabel,
@@ -575,6 +586,8 @@ export async function fetchWwEvents(
       title,
       start_time: startIso,
       end_time: endIso,
+      end_time_kind: endTimeText ? "relative" : undefined,
+      end_time_text: endTimeText,
       is_gacha: isGacha,
       gacha_kind: isGacha ? gachaKind : undefined,
       banner: pickBanner(item),
