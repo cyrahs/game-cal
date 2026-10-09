@@ -346,6 +346,24 @@ export function isLivestreamCodeEvent(event: CalendarEvent): boolean {
   return String(event.id).includes(LIVESTREAM_CODE_ID_MARKER);
 }
 
+// Codes are handed out during the stream and the expiry posts follow within
+// hours, so a snapshot taken around the stream goes stale long before the
+// regular cache TTL. From an announced stream's start, refresh far more often.
+export const LIVESTREAM_REFRESH_WINDOW_MS = 12 * 60 * 60 * 1000;
+export const LIVESTREAM_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
+export function isInLivestreamRefreshWindow(events: CalendarEvent[], nowMs: number): boolean {
+  return events.some((event) => {
+    if (!event.is_livestream) return false;
+    const startMs = Date.parse(event.start_time);
+    return Number.isFinite(startMs) && nowMs >= startMs && nowMs - startMs < LIVESTREAM_REFRESH_WINDOW_MS;
+  });
+}
+
+export function eventCacheTtlMs(events: CalendarEvent[], ttlMs: number, nowMs: number): number {
+  return isInLivestreamRefreshWindow(events, nowMs) ? Math.min(ttlMs, LIVESTREAM_REFRESH_INTERVAL_MS) : ttlMs;
+}
+
 // The livestream API failed transiently. `events` holds what the official
 // posts alone still support: the expiry, plus Star Rail's plain-text codes.
 class DegradedLivestreamCodesError extends Error {

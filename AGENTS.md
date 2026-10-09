@@ -131,6 +131,7 @@ When adding a new game:
 Caching behavior:
 - Node API caches per-game snapshots in-memory for `CACHE_TTL_SECONDS` and sends a `Cache-Control` header.
 - Worker API uses D1-backed `gc_events_cache` and `gc_versions_cache` when `DB` binding exists; otherwise it falls back to in-memory cache.
+- Worker event cache refreshes every 10 minutes for a game during the 12 hours after an announced livestream starts (`eventCacheTtlMs()` in `livestreamCodes.ts`), so codes handed out during the stream show up promptly.
 - Web hook (`useEvents`) also caches results for ~60s in-memory.
 
 Upstream-fetch hygiene:

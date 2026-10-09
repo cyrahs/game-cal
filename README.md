@@ -325,6 +325,7 @@ Suppression 配置文件默认是 `.github/upstream-review-suppressions.json`，
 - Worker + D1 时，事件与版本底层缓存分别持久化在 `gc_events_cache` 与 `gc_versions_cache`；版本 `null` 也是有效缓存值。
 - Worker 在新部署 revision 首次生效时，会基于 `version_metadata` 自动清空 D1 中的事件/版本持久化缓存，避免旧部署写入的缓存跨版本残留。
 - Worker 默认每分钟定时检查一次事件与版本底层缓存；只会后台刷新缺失、时间戳无效，或进入 `CACHE_TTL_SECONDS - CACHE_REFRESH_MARGIN_SECONDS` 预刷新窗口的那些游戏。
+- 前瞻直播开始后 12 小时内（缓存里有已开始的 `is_livestream` 事件），该游戏的事件缓存改为每 10 分钟刷新一次，以便及时拿到直播中发放的兑换码和随后的失效时间。
 - Worker + D1 下，每个游戏的事件缓存与版本缓存各自维护独立的 `updated_at`；单个游戏刷新失败不会触发其他游戏一起重刷。
 - `CACHE_REFRESH_MARGIN_SECONDS` 默认 `1800` 秒；若配置值大于等于 TTL，会自动钳制为小于 TTL 的安全值。
 - Node API 模式使用进程内存缓存。

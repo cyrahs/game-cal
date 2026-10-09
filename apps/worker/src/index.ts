@@ -6,6 +6,7 @@ import {
   ZZZ_SNAPSHOT_CACHE_TTL_MS,
 } from "../../api/src/lib/zzzSnapshot.js";
 import { GAMES, fetchCurrentVersionForGame, fetchEventsForGame } from "../../api/src/games/index.js";
+import { eventCacheTtlMs, LIVESTREAM_REFRESH_INTERVAL_MS } from "../../api/src/games/livestreamCodes.js";
 import type {
   ApiResponse,
   CalendarEvent,
@@ -950,14 +951,24 @@ async function listGamesNeedingEventRefresh(env: Env, ttlMs: number): Promise<Ga
     })
   );
 
-  return checks
-    .filter(({ updatedAt }) =>
-      updatedAt === null ||
-      !Number.isFinite(updatedAt) ||
-      updatedAt <= 0 ||
-      shouldRefreshCacheBeforeTtl(updatedAt, ttlMs, refreshMarginMs, nowMs)
-    )
-    .map(({ id }) => id);
+  const due = await Promise.all(
+    checks.map(async ({ id, updatedAt }) => {
+      if (
+        updatedAt === null ||
+        !Number.isFinite(updatedAt) ||
+        updatedAt <= 0 ||
+        shouldRefreshCacheBeforeTtl(updatedAt, ttlMs, refreshMarginMs, nowMs)
+      ) {
+        return true;
+      }
+      // Only rows past the short livestream interval need their payload read.
+      if (nowMs - updatedAt < LIVESTREAM_REFRESH_INTERVAL_MS) return false;
+      const row = await readEventCacheRow(env, id);
+      const events = row ? decodeEventPayload(row.payload) : null;
+      return events != null && isCacheStale(updatedAt, eventCacheTtlMs(events, ttlMs, nowMs), nowMs);
+    })
+  );
+  return checks.filter((_, idx) => due[idx]).map(({ id }) => id);
 }
 
 async function listGamesNeedingVersionRefresh(env: Env, ttlMs: number): Promise<GameId[]> {
@@ -1027,7 +1038,8 @@ async function getEventsForGameWithCache(env: Env, game: GameId, ctx?: Execution
       if (parsed && Number.isFinite(updatedAt) && updatedAt > 0) {
         // Serve whatever D1 has — even past TTL — and let the refresh happen in
         // the background. Requests must never wait on (or fail with) upstream.
-        if (isCacheStale(updatedAt, cacheTtlMs, Date.now())) {
+        const nowMs = Date.now();
+        if (isCacheStale(updatedAt, eventCacheTtlMs(parsed, cacheTtlMs, nowMs), nowMs)) {
           scheduleBackgroundTask(ctx, "Stale event cache refresh failed", () => triggerRefreshGameEvents(env, game));
         }
         return { events: parsed, updatedAtMs: updatedAt };

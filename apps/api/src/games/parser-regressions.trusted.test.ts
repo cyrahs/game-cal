@@ -28,6 +28,7 @@ import {
 } from "./zzz.js";
 import { fetchEventsForGame } from "./index.js";
 import {
+  eventCacheTtlMs,
   extractLivestreamStart,
   extractRedeemCodeExpiry,
   extractRedeemCodes,
@@ -1003,6 +1004,23 @@ test("livestream schedule: preview wording variants", () => {
   assert.equal(at("前瞻特别节目将于1月2日（本周五）13:00开启", Date.UTC(2026, 11, 31)), "2027-01-02T05:00:00.000Z");
   // Activity windows next to the announcement are not the stream time.
   assert.equal(at("活动时间：2026年9月12日-2026年9月14日23:59"), null);
+});
+
+test("livestream refresh: a recently started stream shortens the event cache TTL", () => {
+  const ttlMs = 8 * 60 * 60 * 1000;
+  const stream = {
+    id: "zzz:livestream-code:schedule:1",
+    title: "3.3版本前瞻特别节目",
+    start_time: "2026-10-09T19:30:00+08:00",
+    end_time: "2026-10-09T21:30:00+08:00",
+    is_livestream: true,
+  };
+  const at = (iso: string) => eventCacheTtlMs([stream], ttlMs, Date.parse(iso));
+  assert.equal(at("2026-10-09T19:00:00+08:00"), ttlMs);
+  assert.equal(at("2026-10-09T19:38:00+08:00"), 10 * 60 * 1000);
+  assert.equal(at("2026-10-10T07:00:00+08:00"), 10 * 60 * 1000);
+  assert.equal(at("2026-10-10T07:30:00+08:00"), ttlMs);
+  assert.equal(eventCacheTtlMs([{ ...stream, is_livestream: undefined }], ttlMs, Date.parse("2026-10-09T20:00:00+08:00")), ttlMs);
 });
 
 test("livestream codes: Star Rail combines the livestream API codes with the post expiry", async () => {
