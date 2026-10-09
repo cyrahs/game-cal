@@ -164,33 +164,45 @@ function RedeemCodeList(props: { codes: string[] }) {
   }, [copiedCode]);
 
   return (
-    <div className="grid gap-1.5">
-      <div className="text-xs text-[color:var(--muted)]">前瞻兑换码（点击复制，请在失效前于游戏内兑换）</div>
-      <div className="flex flex-wrap gap-2">
-        {props.codes.map((code) => (
-          <button
-            key={code}
-            type="button"
-            className="glass px-3 py-1.5 rounded-xl text-sm font-mono tracking-wide border border-[color:var(--line)] hover:border-[color:var(--ink)]"
-            aria-label={`复制兑换码 ${code}`}
-            onClick={async (e) => {
-              e.stopPropagation();
-              try {
-                await navigator.clipboard.writeText(code);
-                setCopiedCode(code);
-              } catch {
-                // ignore
-              }
-            }}
-          >
-            {code}
-            {copiedCode === code ? (
-              <span className="ml-1.5 text-xs text-[color:var(--muted)]">已复制</span>
-            ) : null}
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-col items-start gap-1.5">
+      {props.codes.map((code) => (
+        <button
+          key={code}
+          type="button"
+          className="glass inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-mono tracking-wide border border-[color:var(--line)] hover:border-[color:var(--ink)]"
+          aria-label={`复制兑换码 ${code}`}
+          title="复制"
+          onClick={async (e) => {
+            e.stopPropagation();
+            try {
+              await navigator.clipboard.writeText(code);
+              setCopiedCode(code);
+            } catch {
+              // ignore
+            }
+          }}
+        >
+          {code}
+          {copiedCode === code ? (
+            <span className="inline-flex items-center gap-1 font-sans text-xs text-[color:var(--muted)]">
+              <CheckIcon className="w-3.5 h-3.5" />
+              已复制
+            </span>
+          ) : (
+            <CopyIcon className="w-3.5 h-3.5 text-[color:var(--muted)]" />
+          )}
+        </button>
+      ))}
     </div>
+  );
+}
+
+function CopyIcon(props: { className?: string }) {
+  return (
+    <svg className={props.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
   );
 }
 
