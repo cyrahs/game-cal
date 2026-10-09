@@ -618,9 +618,15 @@ type ResetGroup = { key: string; title: string; end: Dayjs; events: ParsedRecurr
 type RemainingTone = "normal" | "urgent" | "ok" | "muted";
 
 const HIDE_COMPLETED_STORAGE_KEY = "gc.timeline.hideCompleted";
-// Recurring activities sharing one refresh moment (e.g. every game's weekly reset)
-// collapse into a single block once at least this many line up.
+// Weekly recurring activities sharing one refresh moment (every game's weekly reset)
+// collapse into a single 每周 block once at least this many line up.
 const RESET_GROUP_MIN_SIZE = 3;
+
+function isWeeklyActivity(activity: RecurringActivity): boolean {
+  const { rule, durationDays } = activity;
+  const weekly = rule.kind === "weekly" || (rule.kind === "interval" && rule.everyDays === 7);
+  return weekly && (durationDays == null || durationDays <= 7);
+}
 const LONG_TERM_END_TEXT = /长期|永久|持续开放/;
 
 function readHideCompleted(): boolean {
@@ -1237,6 +1243,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     if (!isHome) return [];
     const byEnd = new Map<number, ParsedRecurringEvent[]>();
     for (const event of visibleRecurring) {
+      const def = (prefs.timeline.recurringActivitiesByGame[event.sourceGameId] ?? []).find(
+        (a) => a.id === event.recurringActivityId
+      );
+      // Only items that reset every week go in the 每周 block; longer cycles stay in the timeline.
+      if (!def || !isWeeklyActivity(def)) continue;
       const endMs = event._e.valueOf();
       const list = byEnd.get(endMs);
       if (list) list.push(event);
@@ -1245,15 +1256,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     return [...byEnd.entries()]
       .filter(([, list]) => list.length >= RESET_GROUP_MIN_SIZE)
       .sort((a, b) => a[0] - b[0])
-      .map(([endMs, list]) => {
-        const allWeekly = list.every((event) => {
-          const def = (prefs.timeline.recurringActivitiesByGame[event.sourceGameId] ?? []).find(
-            (a) => a.id === event.recurringActivityId
-          );
-          return def?.rule.kind === "weekly";
-        });
-        return { key: String(endMs), title: allWeekly ? "每周重置" : "同时刷新", end: list[0]!._e, events: list };
-      });
+      .map(([endMs, list]) => ({ key: String(endMs), title: "每周", end: list[0]!._e, events: list }));
   }, [isHome, prefs.timeline.recurringActivitiesByGame, visibleRecurring]);
 
   const groupedRecurringKeys = useMemo(
@@ -1805,7 +1808,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         {allDone ? (
           <div className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl bg-[color:var(--ok-soft)] text-[color:var(--ok)] text-[13px] font-semibold">
             <CheckIcon className="w-4 h-4 shrink-0" strokeWidth={2.6} />
-            {group.title === "每周重置" ? "本周事项已全部完成" : "这些事项已全部完成"}，下次刷新在 {endLabel}
+            本周事项已全部完成，下次刷新在 {endLabel}
           </div>
         ) : null}
         {chips.length > 0 ? (
