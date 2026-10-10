@@ -143,6 +143,49 @@ test("Genshin excludes first-purchase bonus reset notices from events", async ()
   }
 });
 
+test("Genshin excludes world-quest explanation notices from events", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    if (url.endsWith("/content")) throw new Error("Content unavailable");
+    return new Response(JSON.stringify({
+      retcode: 0,
+      message: "OK",
+      data: { list: [{
+        type_id: 1,
+        type_label: "活动公告",
+        list: [
+          {
+            ann_id: 21882,
+            title: "「溯流的变奏曲」世界任务说明",
+            subtitle: "「溯流的变奏曲」",
+            start_time: "2026-09-21 12:00:00",
+            end_time: "2026-11-04 07:00:00",
+          },
+          {
+            ann_id: 21881,
+            title: "「风仙亦是仙，古剑通幽玄！」世界任务说明",
+            subtitle: "「风仙亦是仙，古剑通幽玄！」",
+            start_time: "2026-09-21 12:00:00",
+            end_time: "2026-11-04 07:00:00",
+          },
+        ],
+      }] },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const events = await fetchGenshinEvents({
+      GENSHIN_API_URL: "https://fixture.invalid/list",
+      GENSHIN_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(events, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Star Rail preserves permanent version-relative activity windows", () => {
   const range = extractStarRailTimeRangeFromContent(
     "<p>活动时间</p><p>4.6版本更新后永久开放</p><p>参与条件</p>",
