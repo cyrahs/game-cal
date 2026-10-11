@@ -419,10 +419,14 @@ function isAnyStarRailTimeLabelLine(line: string, labels: string[]): boolean {
   return labels.some((label) => isStarRailTimeLabelLine(line, label));
 }
 
-function extractStarRailTimeSection(content: string | undefined): string | null {
+function extractStarRailTimeSection(
+  content: string | undefined,
+  preferOutfitDiscount = false
+): string | null {
   const text = stripHtml(content);
   const lines = text.split("\n");
   const labels = [
+    ...(preferOutfitDiscount ? ["特惠时间"] : []),
     "活动跃迁时间",
     "限时活动期",
     "活动时间",
@@ -438,7 +442,11 @@ function extractStarRailTimeSection(content: string | undefined): string | null 
 
     let endIdx = lines.length;
     for (let i = startIdx + 1; i < lines.length; i += 1) {
-      if (isStarRailSectionBoundary(lines[i]!) || isAnyStarRailTimeLabelLine(lines[i]!, labels)) {
+      if (
+        isStarRailSectionBoundary(lines[i]!) ||
+        (preferOutfitDiscount && normalizeSectionBoundary(lines[i]!) === "时装说明") ||
+        isAnyStarRailTimeLabelLine(lines[i]!, labels)
+      ) {
         endIdx = i;
         break;
       }
@@ -560,7 +568,8 @@ export function extractStarRailTimeRangeFromContent(
     : undefined;
   if (titleLongTermRange) return titleLongTermRange;
 
-  const section = extractStarRailTimeSection(content);
+  const outfitDiscount = isStarRailShopOutfitDiscount(opts.title, content);
+  const section = extractStarRailTimeSection(content, outfitDiscount);
   if (!section) {
     const fallback = longTermFallback(text);
     return fallback.startIso
@@ -590,7 +599,7 @@ export function extractStarRailTimeRangeFromContent(
     const rawEndIso = toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET);
     return {
       startIso: relativeStartIso,
-      endIso: preserveStructuredEndSeconds(rawEndIso, opts.listEndIso),
+      endIso: outfitDiscount ? rawEndIso : preserveStructuredEndSeconds(rawEndIso, opts.listEndIso),
     };
   }
 
@@ -618,7 +627,7 @@ export function extractStarRailTimeRangeFromContent(
     const rawEndIso = toIsoWithSourceOffset(dates[1]!, STARRAIL_SOURCE_TZ_OFFSET);
     return {
       startIso: toIsoWithSourceOffset(dates[0]!, STARRAIL_SOURCE_TZ_OFFSET),
-      endIso: preserveStructuredEndSeconds(rawEndIso, opts.listEndIso),
+      endIso: outfitDiscount ? rawEndIso : preserveStructuredEndSeconds(rawEndIso, opts.listEndIso),
     };
   }
 
@@ -1045,7 +1054,33 @@ function shouldKeepStarRailEventTitle(title: string): boolean {
   if (!title) return false;
   if (isGachaEventTitle("starrail", title)) return true;
   if (INCLUDE_WORDS.some((w) => title.includes(w))) return true;
+  if (title.includes("商店上新")) return !shouldIgnoreStarRailTitle(title.replace("商店上新", ""));
   return !shouldIgnoreStarRailTitle(title);
+}
+
+function isStarRailShopOutfitDiscount(title: string, content: string | undefined): boolean {
+  if (!title.includes("商店上新")) return false;
+  const text = stripHtml(content);
+  if (!/时装「[^」]+」特惠上架/.test(text) || !/限时售价/.test(text)) return false;
+
+  const section = extractStarRailTimeSection(content, true);
+  if (!section || !isStarRailTimeLabelLine(section.split("\n")[0]!, "特惠时间")) return false;
+
+  const window = new RegExp(
+    `(${STARRAIL_DATE_TIME_PATTERN}|(?:[vV]?\\d+(?:\\.\\d+)+\\s*)?版本(?:更新后|开启后|期间))\\s*${RANGE_SEPARATOR_PATTERN}\\s*(${STARRAIL_DATE_TIME_PATTERN})`
+  ).exec(section);
+  if (!window) return false;
+
+  const endIso = toStarRailSourceIso(window[2]);
+  if (!endIso || !Number.isFinite(Date.parse(endIso)) ||
+    unixSecondsToIsoWithSourceOffset(Date.parse(endIso) / 1000, STARRAIL_SOURCE_TZ_OFFSET) !== endIso) {
+    return false;
+  }
+
+  if (/版本(?:更新后|开启后|期间)/.test(window[1]!)) return true;
+  const startIso = toStarRailSourceIso(window[1]);
+  return !!startIso && isValidTimeRange({ startIso, endIso }) &&
+    unixSecondsToIsoWithSourceOffset(Date.parse(startIso) / 1000, STARRAIL_SOURCE_TZ_OFFSET) === startIso;
 }
 
 export function shouldIncludeStarRailAnnouncement(
@@ -1054,6 +1089,7 @@ export function shouldIncludeStarRailAnnouncement(
 ): boolean {
   return (
     shouldKeepStarRailEventTitle(title) &&
+    (!title.includes("商店上新") || isStarRailShopOutfitDiscount(title, content)) &&
     !isOperationalResourceUpdateNotice(title, content) &&
     !isExternalServiceLaunchNotice(title, content)
   );
@@ -1215,6 +1251,7 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       listEndIso,
     });
     if (contentRange.unresolvedVersionStart) return [];
+    if (title.includes("商店上新") && !isValidTimeRange(contentRange)) return [];
 
     const eventId = `starrail:${makeAnnItemKey(item)}`;
     const shared = {

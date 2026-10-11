@@ -266,6 +266,130 @@ test("Star Rail uses the version notice's stated end for a version-long web acti
   }
 });
 
+test("Star Rail includes shop outfit discounts with the body deadline instead of the list window", async () => {
+  const title = "4.6版本商店上新";
+  const content = [
+    "<p>绯英时装「月待花时」特惠上架</p>",
+    "<p>4.6版本更新后，时装「月待花时」上架，限时售价星琼*2680。</p>",
+    "<p>■特惠时间</p>",
+    '<p>4.6版本更新后 - <t class="t_gl">2026/11/11 03:59:00</t></p>',
+    "<p>■时装说明</p>",
+  ].join("");
+  let shopContent = content;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    const list = url.endsWith("/list")
+      ? [
+          {
+            type_id: 4,
+            type_label: "公告",
+            list: [{
+              ann_id: 1426,
+              title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+              start_time: "2026-09-28 07:00:00",
+              end_time: "2026-11-11 07:00:00",
+            }],
+          },
+          {
+            type_id: 3,
+            type_label: "资讯",
+            list: [{
+              ann_id: 1365,
+              title,
+              start_time: "2026-09-20 20:15:00",
+              end_time: "2026-11-11 06:00:00",
+            }],
+          },
+        ]
+      : [
+          {
+            ann_id: 1426,
+            title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+            content: "<p>■更新时间 2026/09/28 06:00:00开始，预计5个小时完成。</p>",
+          },
+          { ann_id: 1365, title, content: shopContent },
+        ];
+    return new Response(JSON.stringify({ retcode: 0, message: "OK", data: { list } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(events.map(({ title: eventTitle, start_time, end_time }) => ({
+      title: eventTitle, start_time, end_time,
+    })), [{
+      title,
+      start_time: "2026-09-28T11:00:00+08:00",
+      end_time: "2026-11-11T03:59:00+08:00",
+    }]);
+    for (const deadline of ["", "2026/09/28 06:00:00"]) {
+      shopContent = content.replace("2026/11/11 03:59:00", deadline);
+      assert.deepEqual(await fetchStarRailEvents({
+        STARRAIL_API_URL: "https://fixture.invalid/list",
+        STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+      }), []);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Star Rail keeps generic shop arrivals and merchandise arrivals excluded", () => {
+  assert.equal(shouldIncludeStarRailAnnouncement("4.6版本商店上新", undefined), false);
+  for (const deadline of ["", "2026/13/11 03:59:00"]) {
+    assert.equal(shouldIncludeStarRailAnnouncement(
+      "4.6版本商店上新",
+      `<p>时装「月待花时」特惠上架，限时售价星琼*2680。</p><p>■特惠时间</p><p>4.6版本更新后 - ${deadline}</p><p>■时装说明</p>`
+    ), false);
+  }
+  assert.equal(shouldIncludeStarRailAnnouncement(
+    "4.6版本商店上新",
+    "<p>全新时装上架，礼包限购次数刷新。</p><p>■特惠时间</p><p>4.6版本更新后 - 2026/11/11 03:59:00</p>"
+  ), false);
+  assert.equal(shouldIncludeStarRailAnnouncement(
+    "周边上新",
+    "<p>时装「月待花时」特惠上架，限时售价星琼*2680。</p><p>■特惠时间</p><p>4.6版本更新后 - 2026/11/11 03:59:00</p>"
+  ), false);
+});
+
+test("Star Rail keeps activity time ahead of discount time outside qualifying shop outfit notices", () => {
+  const content = [
+    "<p>时装「月待花时」特惠上架，限时售价星琼*2680。</p>",
+    "<p>■活动时间</p>",
+    "<p>2026/09/28 11:00:00 - 2026/11/11 06:00:00</p>",
+    "<p>■特惠时间</p>",
+    "<p>2026/09/28 11:00:00 - 2026/11/11 03:59:00</p>",
+    "<p>■活动说明</p>",
+  ].join("");
+  const opts = {
+    versionMaintenanceEndByLabel: new Map<string, string>(),
+    singleVersionMaintenanceEndIso: null,
+    listEndIso: "2026-11-11T06:00:00+08:00",
+  };
+
+  assert.deepEqual(extractStarRailTimeRangeFromContent(content, {
+    ...opts,
+    title: "时装活动说明",
+  }), {
+    startIso: "2026-09-28T11:00:00+08:00",
+    endIso: "2026-11-11T06:00:00+08:00",
+  });
+  assert.deepEqual(extractStarRailTimeRangeFromContent(content, {
+    ...opts,
+    title: "4.6版本商店上新",
+  }), {
+    startIso: "2026-09-28T11:00:00+08:00",
+    endIso: "2026-11-11T03:59:00+08:00",
+  });
+});
+
 test("Star Rail limits version end overrides to matching version-long sections", () => {
   const opts = {
     title: "网页活动",
