@@ -819,6 +819,19 @@ test("Endfield prefers a full version notice over its maintenance preview", () =
   assert.equal(notices[0]?.title, "「向渊行」版本更新说明");
 });
 
+test("Endfield does not use a later stage opening as the overall activity start", () => {
+  assert.deepEqual(
+    parseEndfieldWindowText(
+      "▼//活动时间 「丹青渡」版本更新后 - 版本更新维护前 · 活动阶段1开放时间：「丹青渡」版本更新后 · 活动阶段2开放时间：2026/10/22 04:00（服务器时间）"
+    ),
+    { start: null, end: null, endText: "版本更新维护前" }
+  );
+  assert.deepEqual(
+    parseEndfieldWindowText("活动阶段2开放时间：2026/10/22 04:00（服务器时间）"),
+    { start: "2026-10-22 04:00", end: null, endText: null }
+  );
+});
+
 test("Endfield merges equivalent notices whose finite ends differ by one minute", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
