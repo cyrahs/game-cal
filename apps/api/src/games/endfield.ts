@@ -195,6 +195,17 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
   const text = normalizeTitle(input);
   if (!text) return { start: null, end: null };
 
+  const versionRelativeRange = new RegExp(
+    `版本(?:开启后|更新(?:维护)?后(?:开启)?)\\s*${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*((?:下次)?版本更新维护前)`
+  ).exec(text);
+  const firstExplicitTime = new RegExp(ENDFIELD_DATE_TIME_PATTERN).exec(text);
+  if (
+    versionRelativeRange &&
+    (!firstExplicitTime || versionRelativeRange.index < firstExplicitTime.index)
+  ) {
+    return { start: null, end: null, endText: versionRelativeRange[1] };
+  }
+
   // Prefer a clear "start - end" (or "~", "至") range.
   const range = new RegExp(
     `(${ENDFIELD_DATE_TIME_PATTERN})\\s*(?:[（(][^）)]{0,32}[）)])?\\s*${ENDFIELD_RANGE_SEPARATOR_PATTERN}\\s*(${ENDFIELD_DATE_TIME_PATTERN})`
