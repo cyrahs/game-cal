@@ -46,7 +46,7 @@ Implemented in `apps/api/src/index.ts`:
 - `GET /api/events/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`)
 - `GET /api/version?game=genshin|starrail|ww|zzz|snowbreak|endfield`
 - `GET /api/version/:game` (`genshin|starrail|ww|zzz|snowbreak|endfield`; `genshin`/`starrail`/`ww`/`zzz`/`snowbreak` return non-null data)
-- `GET /api/upstream/zzz/snapshot` (fixed-target relay for one complete official ZZZ raw snapshot; initial collection shares the Node cache, while exact-head verification uses a separate trusted-base snapshot server)
+- `GET /api/upstream/zzz/snapshot` (fixed-target relay for one complete official ZZZ raw snapshot)
 - `GET /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `PUT /api/sync/:uuid` (always `501` in Node API; supported in Worker + D1 binding)
 - `POST /api/sync/:uuid/rotate` (always `501` in Node API; supported in Worker + D1 binding)
@@ -78,7 +78,7 @@ Upstream override URLs (optional):
   - `MIYOUSHE_USER_POST_API_URL` / `MIYOUSHE_HOME_API_URL` (米游社 official account posts / app home navigator)
   - `MIYOLIVE_INDEX_API_URL` / `MIYOLIVE_CODE_API_URL` (米游社 livestream info / livestream codes)
   - `WW_KUROBBS_SEARCH_API_URL` / `WW_KUROBBS_POST_DETAIL_API_URL` (库街区 post search / post detail)
-  - `LIVESTREAM_CODES_DISABLED` (`1`/`true` skips all livestream code fetching; set by the upstream autopatch workflow)
+  - `LIVESTREAM_CODES_DISABLED` (`1`/`true` skips all livestream code fetching; useful when checking parsers against upstream notices)
 
 Notes:
 - The API imports `dotenv/config`, so `.env` is loaded from the process working directory.
@@ -142,7 +142,6 @@ Upstream-fetch hygiene:
 ## Verification Checklist
 
 Automated safeguard tests are available. Before opening a PR, prefer:
-- `pnpm test:upstream-review`
 - `pnpm test:game-parsers`
 - `pnpm test:web`
 - `pnpm typecheck`
