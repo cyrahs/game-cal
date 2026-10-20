@@ -1234,7 +1234,10 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
-  return [...filteredWithContent, ...contentOnlyItems].flatMap((item): CalendarEvent[] => {
+  const noticeEvents = [...filteredWithContent, ...contentOnlyItems].map((item): {
+    listStartIso: string;
+    events: CalendarEvent[];
+  } => {
     const title = item.title?.trim() || item.subtitle?.trim() || "";
     const contentItem = pickBestContentItem(contentById.get(item.ann_id), title, item.subtitle);
     const content = contentItem?.content ?? item.content;
@@ -1250,8 +1253,8 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
       listStartIso,
       listEndIso,
     });
-    if (contentRange.unresolvedVersionStart) return [];
-    if (title.includes("商店上新") && !isValidTimeRange(contentRange)) return [];
+    if (contentRange.unresolvedVersionStart) return { listStartIso, events: [] };
+    if (title.includes("商店上新") && !isValidTimeRange(contentRange)) return { listStartIso, events: [] };
 
     const eventId = `starrail:${makeAnnItemKey(item)}`;
     const shared = {
@@ -1268,16 +1271,53 @@ export async function fetchStarRailEvents(env: RuntimeEnv = {}): Promise<Calenda
           listEndIso,
         })
       : null;
-    if (bannerEvents) return bannerEvents.map((event) => ({ ...event, ...shared }));
+    if (bannerEvents) {
+      return { listStartIso, events: bannerEvents.map((event) => ({ ...event, ...shared })) };
+    }
 
-    return [{
-      id: eventId,
-      title,
-      ...resolveStarRailEventWindow(contentRange, listStartIso, listEndIso).window,
-      ...shared,
-      gacha_kind: isGacha ? gachaKind : undefined,
-    }];
+    return {
+      listStartIso,
+      events: [{
+        id: eventId,
+        title,
+        ...resolveStarRailEventWindow(contentRange, listStartIso, listEndIso).window,
+        ...shared,
+        gacha_kind: isGacha ? gachaKind : undefined,
+      }],
+    };
   });
+
+  return dedupeStarRailWarpEvents(noticeEvents);
+}
+
+// Consecutive warp notices of one version (其一 / 其二) both list the banners that run
+// through the whole version. Keep one event per banner window, taken from the
+// earliest-published notice so its id stays stable while both notices are listed.
+function dedupeStarRailWarpEvents(
+  noticeEvents: Array<{ listStartIso: string; events: CalendarEvent[] }>
+): CalendarEvent[] {
+  const earliestByWindow = new Map<string, string>();
+  for (const { listStartIso, events } of noticeEvents) {
+    for (const event of events) {
+      if (!event.is_gacha) continue;
+      const key = `${event.title}|${event.start_time}|${event.end_time ?? event.end_time_text ?? ""}`;
+      const current = earliestByWindow.get(key);
+      if (current == null || Date.parse(listStartIso) < Date.parse(current)) {
+        earliestByWindow.set(key, listStartIso);
+      }
+    }
+  }
+
+  const kept = new Set<string>();
+  return noticeEvents.flatMap(({ listStartIso, events }) =>
+    events.filter((event) => {
+      if (!event.is_gacha) return true;
+      const key = `${event.title}|${event.start_time}|${event.end_time ?? event.end_time_text ?? ""}`;
+      if (earliestByWindow.get(key) !== listStartIso || kept.has(key)) return false;
+      kept.add(key);
+      return true;
+    })
+  );
 }
 
 // Splits a notice that announces several banners into one event per banner, each

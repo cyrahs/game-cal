@@ -1645,3 +1645,167 @@ test("ZZZ prefers an explicit version end from update content", () => {
 
   assert.equal(endIso, "2026-09-09T06:00:00+08:00");
 });
+
+test("Star Rail lists a banner shared by both version warp notices only once", async () => {
+  const bannerHtml = (name: string, label: string, featured: string, window: string): string => {
+    const noun = label === "角色活动跃迁" ? "角色" : "光锥";
+    return [
+      `<ul><li><p>「${name}」${label}期间，<strong>限定5星${noun}「${featured}」</strong>，4星${noun}「青雀（智识•量子）」跃迁成功概率限时提升。</p></li></ul>`,
+      "<div class=\"table-wrapper\"><table><tbody>",
+      `<tr><td><p>活动时间</p></td><td><p>概率提升-5星${noun}</p></td><td><p>概率提升-4星${noun}</p></td></tr>`,
+      `<tr><td rowspan="3"><p>${window}</p></td><td rowspan="3"><p>${featured}</p></td><td><p>青雀（智识•量子）</p></td></tr>`,
+      "</tbody></table></div>",
+    ].join("");
+  };
+  const versionLong = "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;";
+  // Both 4.6 warp notices (其一 1366, 其二 1360) repeat the version-long 「沧海萃珠」 section.
+  const sharedSection = [
+    "<h1>「沧海萃珠」「流光定影•献给明日的色彩」活动跃迁</h1>",
+    bannerHtml("沧海萃珠", "角色活动跃迁", "真珠（欢愉•冰）", versionLong),
+    bannerHtml("流光定影•献给明日的色彩", "光锥活动跃迁", "献给明日的色彩（欢愉）", versionLong),
+  ].join("");
+  const firstContent = [
+    sharedSection,
+    "<h1>「韶艾裁英」「溯回忆象•邂逅于下一个花季」活动跃迁</h1>",
+    bannerHtml("韶艾裁英", "角色活动跃迁", "绯英（欢愉•物理）", "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/10/21 11:59:00&lt;/t&gt;"),
+    bannerHtml("溯回忆象•邂逅于下一个花季", "光锥活动跃迁", "邂逅于下一个花季（欢愉）", "4.6版本更新后 - &lt;t class=\"t_lc\"&gt;2026/10/21 11:59:00&lt;/t&gt;"),
+  ].join("");
+  const secondWindow = "&lt;t class=\"t_lc\"&gt;2026/10/21 12:00:00&lt;/t&gt; - &lt;t class=\"t_lc\"&gt;2026/11/10 15:00:00&lt;/t&gt;";
+  const secondContent = [
+    sharedSection,
+    "<h1>「我身即刃」「溯回忆象•灼尽炼狱的新骸」活动跃迁</h1>",
+    bannerHtml("我身即刃", "角色活动跃迁", "刃（毁灭•风）", secondWindow),
+    bannerHtml("溯回忆象•灼尽炼狱的新骸", "光锥活动跃迁", "灼尽炼狱的新骸（毁灭）", secondWindow),
+  ].join("");
+
+  const versionNotice = {
+    ann_id: 1426,
+    title: "4.6版本「月升之前，与兽共舞」版本更新说明",
+    start_time: "2026-09-28 07:00:00",
+    end_time: "2026-11-11 07:00:00",
+  };
+  const firstNotice = {
+    ann_id: 1366,
+    title: "4.6版本活动跃迁（其一）",
+    start_time: "2026-09-27 14:00:00",
+    end_time: "2026-10-21 11:59:00",
+  };
+  const secondNotice = {
+    ann_id: 1360,
+    title: "4.6版本活动跃迁（其二）",
+    start_time: "2026-10-20 14:00:00",
+    end_time: "2026-11-10 15:00:00",
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const body = String(input).endsWith("/list")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: { list: [{ type_id: 3, type_label: "资讯", list: [versionNotice, secondNotice, firstNotice] }] },
+        }
+      : {
+          retcode: 0,
+          message: "OK",
+          data: {
+            list: [
+              {
+                ann_id: 1426,
+                title: versionNotice.title,
+                content: "<h1>更新时间</h1><p>2026/09/28 06:00:00 开始，预计需要5个小时。</p>",
+              },
+              { ann_id: 1360, title: secondNotice.title, content: secondContent },
+              { ann_id: 1366, title: firstNotice.title, content: firstContent },
+            ],
+          },
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchStarRailEvents({
+      STARRAIL_API_URL: "https://fixture.invalid/list",
+      STARRAIL_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    const gacha = events
+      .filter((event) => event.is_gacha)
+      .map((event) => ({ title: event.title, notice: String(event.id).split("|")[0], end_time: event.end_time }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+    assert.deepEqual(
+      gacha,
+      [
+        { title: "「我身即刃」角色活动跃迁", notice: "starrail:1360", end_time: "2026-11-10T15:00:00+08:00" },
+        { title: "「沧海萃珠」角色活动跃迁", notice: "starrail:1366", end_time: "2026-11-10T15:00:00+08:00" },
+        { title: "「流光定影•献给明日的色彩」光锥活动跃迁", notice: "starrail:1366", end_time: "2026-11-10T15:00:00+08:00" },
+        { title: "「溯回忆象•灼尽炼狱的新骸」光锥活动跃迁", notice: "starrail:1360", end_time: "2026-11-10T15:00:00+08:00" },
+        { title: "「溯回忆象•邂逅于下一个花季」光锥活动跃迁", notice: "starrail:1366", end_time: "2026-10-21T11:59:00+08:00" },
+        { title: "「韶艾裁英」角色活动跃迁", notice: "starrail:1366", end_time: "2026-10-21T11:59:00+08:00" },
+      ].sort((a, b) => a.title.localeCompare(b.title))
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Endfield ends a reward window at the maintenance of the version it names", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "6415",
+              tab: "updates",
+              title: "版本更新说明",
+              data: {
+                html: [
+                  "<p>欢迎来到全新版本「丹青渡」！</p>",
+                  "<p>■ 更新维护时间</p>",
+                  "<p>2026/10/15 06:00 - 2026/10/15 12:00（UTC+8）</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "2183",
+              tab: "events",
+              title: "新版本导览",
+              startAt: 1791288000,
+              data: {
+                html: [
+                  "<p>▼//网页上线时间</p>",
+                  "<p>· 新版本导览专题网页自2026/10/06 20:00（UTC+8）起长期可浏览，内容将随游戏版本替换。</p>",
+                  "<p>▼//奖励领取说明</p>",
+                  "<p>· 奖励领取期限：「丹青渡」新版本导览专题网页上线后，至「丹青渡」版本更新维护前，可在该页面点击领取奖励。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const event = events.find((item) => item.title === "新版本导览");
+    assert.ok(event);
+    assert.deepEqual(
+      { start_time: event.start_time, end_time: event.end_time, end_time_text: event.end_time_text },
+      { start_time: "2026-10-06T20:00:00+08:00", end_time: "2026-10-15T06:00:00+08:00", end_time_text: undefined }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

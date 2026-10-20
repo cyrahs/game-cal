@@ -26,6 +26,7 @@ type HypergryphAggregateResponse = {
 type EndfieldVersionNotice = {
   item: HypergryphAggregateItem;
   version: string;
+  maintenanceStartNaive: string;
   maintenanceEndNaive: string;
   maintenanceStartIso: string;
   maintenanceEndIso: string;
@@ -512,6 +513,7 @@ function toEndfieldVersionNotice(item: HypergryphAggregateItem): EndfieldVersion
   return {
     item,
     version,
+    maintenanceStartNaive: maintenance.start,
     maintenanceEndNaive: maintenance.end,
     maintenanceStartIso: toIsoWithSourceOffset(maintenance.start, ENDFIELD_SOURCE_TZ_OFFSET),
     maintenanceEndIso: toIsoWithSourceOffset(maintenance.end, ENDFIELD_SOURCE_TZ_OFFSET),
@@ -1142,6 +1144,21 @@ async function fetchEndfieldAggregateItems(
   return res.data?.list ?? [];
 }
 
+// 「X」版本更新维护前 names the maintenance that installs version X. Once that version's
+// notice is out, its maintenance start is the concrete end instead of the next maintenance.
+function resolveNamedVersionMaintenanceStart(
+  html: string,
+  maintenanceStartByVersion: Map<string, string>
+): string | null {
+  const text = stripHtml(html);
+  const named = [...text.matchAll(/「([^」]+)」版本更新维护前/g)];
+  if (named.length === 0 || named.length !== text.split("版本更新维护前").length - 1) return null;
+
+  const versions = new Set(named.map((match) => `「${normalizeTitle(match[1]!)}」`));
+  if (versions.size !== 1) return null;
+  return maintenanceStartByVersion.get([...versions][0]!) ?? null;
+}
+
 export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
   const items = await fetchEndfieldAggregateItems(env);
   const versionNotice = pickCurrentEndfieldVersionNotice(items);
@@ -1149,6 +1166,12 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
   const versionScheduleEntries = versionNotice
     ? parseEndfieldVersionScheduleEntries(versionNotice.item, versionStartNaive)
     : [];
+  const maintenanceStartByVersion = new Map<string, string>();
+  for (const notice of items.map(toEndfieldVersionNotice)) {
+    if (notice && !maintenanceStartByVersion.has(notice.version)) {
+      maintenanceStartByVersion.set(notice.version, notice.maintenanceStartNaive);
+    }
+  }
 
   const tabEvents = items
     .filter((it) => {
@@ -1162,7 +1185,14 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
       const sectionEvents = parseStandaloneSectionEvents(it);
       if (sectionEvents.length > 0) return sectionEvents;
 
-      const { start, end, endText } = extractTimeRangeFromHtml(html);
+      const parsedWindow = extractTimeRangeFromHtml(html);
+      const { start } = parsedWindow;
+      const namedMaintenanceEnd =
+        parsedWindow.end == null && parsedWindow.endText === "版本更新维护前"
+          ? resolveNamedVersionMaintenanceStart(html, maintenanceStartByVersion)
+          : null;
+      const end = parsedWindow.end ?? namedMaintenanceEnd;
+      const endText = namedMaintenanceEnd ? null : parsedWindow.endText;
       const startNaive = resolveEndfieldStartNaive(it, start, html, versionStartNaive);
       if (!startNaive) return [];
 
