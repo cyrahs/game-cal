@@ -1809,3 +1809,68 @@ test("Endfield ends a reward window at the maintenance of the version it names",
     globalThis.fetch = originalFetch;
   }
 });
+
+test("ZZZ deduplicates activity notices whose punctuation differs only in width", async () => {
+  const noticeTitle = "「赛博圣手，出诊!」活动说明";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    const body = url.endsWith("/activity")
+      ? {
+          retcode: 0,
+          message: "OK",
+          data: {
+            activity_list: [
+              {
+                activity_id: "1681",
+                name: "赛博圣手，出诊！",
+                start_time: "1793152800",
+                end_time: "1794772799",
+              },
+            ],
+          },
+        }
+      : url.endsWith("/content")
+        ? {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [
+                {
+                  ann_id: 1333,
+                  title: noticeTitle,
+                  content:
+                    "【活动时间】 2026/10/28 10:00（服务器时间） ~ 2026/11/16 03:59（服务器时间） 【活动奖励】",
+                },
+              ],
+            },
+          }
+        : {
+            retcode: 0,
+            message: "OK",
+            data: {
+              list: [{ type_id: 3, type_label: "游戏公告", list: [{ ann_id: 1333, title: noticeTitle }] }],
+            },
+          };
+
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchZzzEvents({
+      ZZZ_ACTIVITY_API_URL: "https://fixture.invalid/activity",
+      ZZZ_CONTENT_API_URL: "https://fixture.invalid/content",
+      ZZZ_API_URL: "https://fixture.invalid/list",
+    });
+
+    assert.deepEqual(
+      events.map((event) => ({ id: event.id, title: event.title })),
+      [{ id: "1681", title: "赛博圣手，出诊！" }]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
