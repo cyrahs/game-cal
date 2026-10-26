@@ -34,8 +34,9 @@ function stripHtml(input: string | undefined): string {
 }
 
 function normalizeTitleKey(input: string | undefined): string {
-  // Make a matching key resilient to different quote styles / spacing.
+  // Make a matching key resilient to different quote styles / spacing / full-width punctuation.
   return stripHtml(input)
+    .normalize("NFKC")
     .toLowerCase()
     .replace(/\s+/g, "")
     .replace(/[「」『』“”"'’‘]/g, "");
