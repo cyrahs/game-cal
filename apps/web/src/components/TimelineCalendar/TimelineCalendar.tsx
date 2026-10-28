@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import type { CalendarEvent, GachaKind, GameId, GameVersionInfo } from "../../api/types";
 import { useTheme } from "../../context/theme";
 import { LiveClock, LiveDuration } from "../LiveDuration";
+import LivestreamMarker from "../LivestreamMarker";
 import VersionProgressBar from "../VersionProgressBar";
 import type { UseCurrentVersionState } from "../../hooks/useCurrentVersion";
 import { type RecurringActivity, type RecurringRule, usePrefs } from "../../context/prefs";
@@ -60,11 +61,14 @@ type TimelineCalendarProps =
       // Announced version livestreams (`is_livestream` events) for the progress bar.
       livestreamEvents?: CalendarEvent[];
       currentVersions?: never;
+      livestreamEventsByGame?: never;
     }
   | {
       mode: "home";
       events: TimelineCalendarEvent[];
       currentVersions?: GameVersionInfo[];
+      // Announced version livestreams per game, for the version progress rows.
+      livestreamEventsByGame?: Partial<Record<GameId, CalendarEvent[]>>;
       gameId?: never;
       currentVersionState?: never;
       livestreamEvents?: never;
@@ -1467,7 +1471,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       return {
         gameId,
         valid,
+        startMs: valid ? s!.valueOf() : 0,
         endMs,
+        livestream: valid
+          ? resolveLivestream(gameId, props.livestreamEventsByGame?.[gameId] ?? [], s!.valueOf(), endMs)
+          : null,
         num: label.num,
         name: label.name,
         pct: valid ? clamp(((nowMs - s!.valueOf()) / (e!.valueOf() - s!.valueOf())) * 100, 0, 100) : 0,
@@ -1475,7 +1483,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       };
     });
     return rows.sort((a, b) => a.endMs - b.endMs);
-  }, [isHome, now, props.currentVersions, sourceGameIds]);
+  }, [isHome, now, props.currentVersions, props.livestreamEventsByGame, sourceGameIds]);
 
   const gachaGroups = useMemo(
     () => groupGachaEvents(gachaEvents, sortedUpstream.filter((e) => e.is_gacha), isHome),
@@ -2299,6 +2307,19 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     </div>
   );
 
+  // Version rows link to the game page through a stretched link (an ::after over the whole row), so
+  // the 前瞻 dot can sit on the track above it as a button of its own instead of inside the link.
+  const stretchedLinkClass =
+    "focus:outline-none after:absolute after:inset-0 after:z-[1] after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-[color:var(--ring)]";
+  const versionTrack = (row: (typeof versionRows)[number], urgent: boolean, className?: string) => (
+    <div className={clsx("relative h-1.5 rounded-full bg-[color:var(--line-soft)]", className)}>
+      <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
+      {row.livestream ? (
+        <LivestreamMarker info={row.livestream} startMs={row.startMs} endMs={row.endMs} ink={gameInkVar(row.gameId)} />
+      ) : null}
+    </div>
+  );
+
   const versionScroller =
     isHome && versionRows.length > 0 ? (
       <div className="lg:hidden -mx-4 md:-mx-8 px-4 md:px-8 overflow-x-auto no-scrollbar">
@@ -2307,12 +2328,11 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             const meta = GAME_REGISTRY_BY_ID[row.gameId];
             const urgent = row.valid && row.remainingMs <= DAY_MS;
             return (
-              <Link
+              <div
                 key={row.gameId}
-                to={meta.route}
-                className="w-[220px] shrink-0 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] px-3.5 py-3 grid gap-2.5"
+                className="relative w-[220px] shrink-0 rounded-2xl border border-[color:var(--line)] bg-[color:var(--card)] px-3.5 py-3 grid gap-2.5"
               >
-                <div className="flex items-center gap-2.5 min-w-0">
+                <Link to={meta.route} className={clsx("flex items-center gap-2.5 min-w-0 after:rounded-2xl", stretchedLinkClass)}>
                   <img src={meta.icon} alt={meta.name} className="w-[30px] h-[30px] rounded-[9px] object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
@@ -2328,12 +2348,10 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                       <div className="text-xs text-[color:var(--muted)]">暂无版本数据</div>
                     )}
                   </div>
-                </div>
+                </Link>
                 {row.valid ? (
                   <div className="flex items-center gap-2">
-                    <div className="flex-1 h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
-                    </div>
+                    {versionTrack(row, urgent, "flex-1")}
                     <span
                       className="inline-flex items-center gap-1 text-xs font-semibold font-mono whitespace-nowrap"
                       style={{ color: urgent ? "var(--urgent)" : "var(--ink2)" }}
@@ -2343,7 +2361,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     </span>
                   </div>
                 ) : null}
-              </Link>
+              </div>
             );
           })}
         </div>
@@ -2358,12 +2376,8 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
             const meta = GAME_REGISTRY_BY_ID[row.gameId];
             const urgent = row.valid && row.remainingMs <= DAY_MS;
             return (
-              <Link
-                key={row.gameId}
-                to={meta.route}
-                className="grid gap-2 py-2.5 border-t border-[color:var(--line-soft)] rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]"
-              >
-                <div className="flex items-center gap-2.5">
+              <div key={row.gameId} className="relative grid gap-2 py-2.5 border-t border-[color:var(--line-soft)]">
+                <Link to={meta.route} className={clsx("flex items-center gap-2.5 after:rounded-sm", stretchedLinkClass)}>
                   <img src={meta.icon} alt={meta.name} className="w-7 h-7 shrink-0 rounded-lg object-cover" referrerPolicy="no-referrer" />
                   <div className="min-w-0 flex-1">
                     {row.valid ? (
@@ -2386,13 +2400,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
                     {urgent ? <ClockIcon /> : null}
                     {row.valid ? <LiveDuration untilMs={row.endMs} /> : "—"}
                   </span>
-                </div>
-                {row.valid ? (
-                  <div className="h-1.5 rounded-full bg-[color:var(--line-soft)] overflow-hidden">
-                    <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
-                  </div>
-                ) : null}
-              </Link>
+                </Link>
+                {row.valid ? versionTrack(row, urgent) : null}
+              </div>
             );
           })}
         </SideCard>

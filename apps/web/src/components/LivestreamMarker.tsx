@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import dayjs from "dayjs";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { clamp } from "../lib/color";
 import { getClockNowMs, subscribeClock } from "../lib/clock";
 import type { LivestreamInfo } from "../lib/livestream";
@@ -9,36 +10,59 @@ import { LiveDuration } from "./LiveDuration";
 /**
  * A dot on the version track at the next version livestream. Hovering (or
  * focusing) shows the details; on touch screens a tap toggles them.
- * Predicted streams are a hollow ring, confirmed ones a solid dot.
+ * Predicted streams are a hollow ring, confirmed ones a solid dot. The card is
+ * portaled to the body with fixed positioning, so a scrolling or clipped parent
+ * (the home page's version cards) cannot cut it off.
  */
 export default function LivestreamMarker(props: { info: LivestreamInfo; startMs: number; endMs: number; ink: string }) {
   const { info, startMs, endMs, ink } = props;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const floatRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
   const [shiftPx, setShiftPx] = useState(0);
   const lastPointerRef = useRef<string>("mouse");
   const aired = useSyncExternalStore(subscribeClock, () => getClockNowMs() >= info.startMs);
 
+  const isInside = (target: EventTarget | null) =>
+    target instanceof Node && Boolean(rootRef.current?.contains(target) || floatRef.current?.contains(target));
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      if (!isInside(e.target)) setOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
+    // The card is fixed to where the dot was when it opened; scrolling would leave it behind.
+    const close = () => setOpen(false);
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
     };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !buttonRef.current) {
+      setAnchor(null);
+      return;
+    }
+    const rect = buttonRef.current.getBoundingClientRect();
+    setAnchor({ x: rect.left + rect.width / 2, y: rect.bottom });
   }, [open]);
 
   // Centered under the dot, then nudged back inside the viewport near either edge.
   useLayoutEffect(() => {
-    if (!open || !tipRef.current) {
+    if (!anchor || !tipRef.current) {
       setShiftPx(0);
       return;
     }
@@ -49,7 +73,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
     const maxRight = document.documentElement.clientWidth - margin;
     setShiftPx(left < margin ? margin - left : right > maxRight ? maxRight - right : 0);
     // Measure once per opening; the dot does not move while the card is shown.
-  }, [open]);
+  }, [anchor]);
 
   const pct = clamp(((info.startMs - startMs) / Math.max(1, endMs - startMs)) * 100, 0, 100);
   const confirmed = info.kind === "confirmed";
@@ -69,6 +93,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
       }}
     >
       <button
+        ref={buttonRef}
         type="button"
         aria-label={`${(confirmed && info.title) || "下个版本前瞻"}（${kindLabel}）：${when.format("MM/DD HH:mm")}`}
         aria-expanded={open}
@@ -82,7 +107,7 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
           lastPointerRef.current = "";
         }}
         onBlur={(e) => {
-          if (!rootRef.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+          if (!isInside(e.relatedTarget)) setOpen(false);
         }}
         className={clsx(
           "relative block w-3.5 h-3.5 rounded-full border-2 transition-transform hover:scale-110",
@@ -94,11 +119,13 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
             : { background: "var(--card)", borderColor: ink }
         }
       />
-      {open ? (
+      {open && anchor ? createPortal(
         // The top padding bridges the gap to the dot, so the pointer can reach the link.
+        // React events bubble through the portal, so hovering the card keeps it open.
         <div
-          className="absolute top-full left-1/2 pt-2.5"
-          style={{ transform: `translateX(calc(-50% + ${shiftPx}px))` }}
+          ref={floatRef}
+          className="fixed z-50 pt-2.5"
+          style={{ left: anchor.x, top: anchor.y, transform: `translateX(calc(-50% + ${shiftPx}px))` }}
         >
           <div
             ref={tipRef}
@@ -140,7 +167,8 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
               </a>
             ) : null}
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </div>
   );
