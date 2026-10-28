@@ -2315,7 +2315,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
     <div className={clsx("relative h-1.5 rounded-full bg-[color:var(--line-soft)]", className)}>
       <div className="h-full rounded-full" style={{ width: `${row.pct}%`, background: urgent ? "var(--urgent)" : gameColorVar(row.gameId) }} />
       {row.livestream ? (
-        <LivestreamMarker info={row.livestream} startMs={row.startMs} endMs={row.endMs} ink={gameInkVar(row.gameId)} />
+        <LivestreamMarker info={row.livestream} startMs={row.startMs} endMs={row.endMs} ink={gameInkVar(row.gameId)} small />
       ) : null}
     </div>
   );
