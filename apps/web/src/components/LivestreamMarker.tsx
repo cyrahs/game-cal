@@ -12,10 +12,17 @@ import { LiveDuration } from "./LiveDuration";
  * focusing) shows the details; on touch screens a tap toggles them.
  * Predicted streams are a hollow ring, confirmed ones a solid dot. The card is
  * portaled to the body with fixed positioning, so a scrolling or clipped parent
- * (the home page's version cards) cannot cut it off.
+ * (the home page's version cards) cannot cut it off. `small` fits the thinner
+ * home tracks.
  */
-export default function LivestreamMarker(props: { info: LivestreamInfo; startMs: number; endMs: number; ink: string }) {
-  const { info, startMs, endMs, ink } = props;
+export default function LivestreamMarker(props: {
+  info: LivestreamInfo;
+  startMs: number;
+  endMs: number;
+  ink: string;
+  small?: boolean;
+}) {
+  const { info, startMs, endMs, ink, small } = props;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -110,12 +117,13 @@ export default function LivestreamMarker(props: { info: LivestreamInfo; startMs:
           if (!isInside(e.relatedTarget)) setOpen(false);
         }}
         className={clsx(
-          "relative block w-3.5 h-3.5 rounded-full border-2 transition-transform hover:scale-110",
+          "relative block rounded-full transition-transform hover:scale-110",
+          small ? "w-2.5 h-2.5 border-[1.5px]" : "w-3.5 h-3.5 border-2",
           "after:absolute after:-inset-2 after:content-[''] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ring)]",
         )}
         style={
           confirmed
-            ? { background: ink, borderColor: "var(--card)", boxShadow: `0 0 0 1.5px ${ink}` }
+            ? { background: ink, borderColor: "var(--card)", boxShadow: `0 0 0 ${small ? 1 : 1.5}px ${ink}` }
             : { background: "var(--card)", borderColor: ink }
         }
       />
