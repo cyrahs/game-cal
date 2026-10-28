@@ -1,13 +1,13 @@
 import { useMemo } from "react";
 
-import type { GameId } from "../api/types";
+import type { CalendarEvent, GameId } from "../api/types";
 import LoadingCard from "../components/LoadingCard";
 import TimelineCalendar, { type TimelineCalendarEvent } from "../components/TimelineCalendar/TimelineCalendar";
 import { usePrefs } from "../context/prefs";
 import { localizeErrorMessage } from "../lib/errors";
 import { ALL_GAME_IDS, GAME_REGISTRY_BY_ID } from "../lib/games";
 import { refreshGameData } from "../hooks/refreshGameData";
-import { useEvents } from "../hooks/useEvents";
+import { useEvents, useLivestreamEvents } from "../hooks/useEvents";
 import { useCurrentVersion } from "../hooks/useCurrentVersion";
 
 export default function HomePage() {
@@ -15,6 +15,7 @@ export default function HomePage() {
   // ALL_GAME_IDS is a module constant, so the hook call order is stable across renders.
   const eventStates = ALL_GAME_IDS.map((gameId) => [gameId, useEvents(gameId)] as const);
   const versionStates = ALL_GAME_IDS.map((gameId) => [gameId, useCurrentVersion(gameId)] as const);
+  const livestreamStates = ALL_GAME_IDS.map((gameId) => [gameId, useLivestreamEvents(gameId)] as const);
   const visibleGameIdSet = useMemo(() => new Set<GameId>(prefs.visibleGameIds), [prefs.visibleGameIds]);
 
   const visibleEventStates = eventStates.filter(([gameId]) => visibleGameIdSet.has(gameId));
@@ -36,6 +37,14 @@ export default function HomePage() {
       return state.data;
     });
   }, [...versionStates.map(([, state]) => state), visibleGameIdSet]);
+
+  const livestreamEventsByGame = useMemo(() => {
+    const byGame: Partial<Record<GameId, CalendarEvent[]>> = {};
+    for (const [gameId, state] of livestreamStates) {
+      if (state.status === "success") byGame[gameId] = state.data;
+    }
+    return byGame;
+  }, livestreamStates.map(([, state]) => state));
 
   const hasSuccess = visibleEventStates.some(([, state]) => state.status === "success");
   const isLoading =
@@ -91,7 +100,12 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      <TimelineCalendar events={aggregatedEvents} currentVersions={currentVersions} mode="home" />
+      <TimelineCalendar
+        events={aggregatedEvents}
+        currentVersions={currentVersions}
+        livestreamEventsByGame={livestreamEventsByGame}
+        mode="home"
+      />
     </div>
   );
 }
