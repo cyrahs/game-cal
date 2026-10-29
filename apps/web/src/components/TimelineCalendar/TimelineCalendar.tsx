@@ -679,8 +679,8 @@ function gachaStartKey(event: ParsedUpstreamEvent): string {
 const ENDFIELD_PAIRED_WEAPON_END = /次「特许寻访」后结束/;
 
 // Weapon banners paired with a character banner (opened alongside one, or tied to
-// the Endfield 特许寻访 cycle) are implied by it and not listed. On home, character
-// banners of one game that open and close together also share a line.
+// the Endfield 特许寻访 cycle) are implied by it and not listed. With mergeCharacters,
+// character banners of one game that open and close together also share a line.
 function groupGachaEvents(
   events: ParsedUpstreamEvent[],
   allGachaEvents: ParsedUpstreamEvent[],
@@ -1119,10 +1119,9 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       if (showNotStarted) return true;
       return nowMs >= e._s.valueOf();
     });
-    // Home merges one game's same-window banners into a row; game pages get a row per character.
+    // Trials of one game that open and close together share a row, on home and game pages alike.
     const trialBanners = inWindow.filter((e) => e.is_gacha);
-    const trialItems = isHome ? trialBanners : splitGachaByCharacter(trialBanners);
-    const trialRows = groupGachaEvents(trialItems, trialItems, isHome).map(({ events }): ParsedUpstreamEvent => {
+    const trialRows = groupGachaEvents(trialBanners, trialBanners, true).map(({ events }): ParsedUpstreamEvent => {
       const first = events[0]!;
       return {
         ...first,
