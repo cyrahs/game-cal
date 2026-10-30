@@ -156,6 +156,16 @@ function isExternalServiceLaunchNotice(
   );
 }
 
+// A topic page (专题展示页) is an activity only when visiting or sharing it pays a reward;
+// otherwise it is a promotional page and the list window is not an activity window.
+function isInformationalTopicPageNotice(
+  title: string,
+  content: string | undefined
+): boolean {
+  if (!/专题(?:展示)?页/.test(title)) return false;
+  return !/(?:奖励|领取|可获得)/.test(stripHtml(content));
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&nbsp;/g, " ")
@@ -1091,7 +1101,8 @@ export function shouldIncludeStarRailAnnouncement(
     shouldKeepStarRailEventTitle(title) &&
     (!title.includes("商店上新") || isStarRailShopOutfitDiscount(title, content)) &&
     !isOperationalResourceUpdateNotice(title, content) &&
-    !isExternalServiceLaunchNotice(title, content)
+    !isExternalServiceLaunchNotice(title, content) &&
+    !isInformationalTopicPageNotice(title, content)
   );
 }
 
