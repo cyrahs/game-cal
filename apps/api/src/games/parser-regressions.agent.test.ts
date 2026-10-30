@@ -1874,3 +1874,20 @@ test("ZZZ deduplicates activity notices whose punctuation differs only in width"
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Star Rail excludes topic pages that offer no reward", () => {
+  assert.equal(
+    shouldIncludeStarRailAnnouncement(
+      "「货币战争•入画奇航」专题展示页现已上线",
+      "<p>亲爱的开拓者，「货币战争•入画奇航」专题展示页现已上线。新赛季带来了超大型更新，访问网页即可查看全新赛季主题玩法介绍与各类信息。</p><p>点击前往</p>"
+    ),
+    false
+  );
+  assert.equal(
+    shouldIncludeStarRailAnnouncement(
+      "4.7版本「此刻，将群星付之一笑」专题展示页现已上线",
+      '<p>浏览版本专题展示页，分享页面即可领取信用点*20000奖励。</p><p>※<t class="t_gl">2026/11/18 04:00:00</t>前，首次进行网页分享可获得信用点*20000。</p>'
+    ),
+    true
+  );
+});
