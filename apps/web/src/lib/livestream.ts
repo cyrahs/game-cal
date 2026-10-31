@@ -13,6 +13,11 @@ export type LivestreamRule = {
   weekday: number;
   hour: number;
   minute: number;
+  // Some games occasionally air one week later than usual. Their preview post
+  // always comes several days ahead, so once the usual slot is closer than
+  // `announceLeadMs` with nothing announced, predict the later week instead.
+  lateWeeksBefore?: number;
+  announceLeadMs?: number;
 };
 
 export type LivestreamInfo = {
@@ -36,7 +41,9 @@ export const LIVESTREAM_RULES: Partial<Record<GameId, LivestreamRule>> = {
   genshin: { weeksBefore: 2, weekday: 5, hour: 20, minute: 0 },
   starrail: { weeksBefore: 2, weekday: 5, hour: 19, minute: 30 },
   zzz: { weeksBefore: 2, weekday: 5, hour: 19, minute: 30 },
-  ww: { weeksBefore: 2, weekday: 5, hour: 19, minute: 0 },
+  // WW 2.4–3.8: 10 of 14 streams two weeks before, 4 (2.5, 2.8, 3.2, 3.8) one
+  // week before; every preview post came out 4–9 days ahead of its stream.
+  ww: { weeksBefore: 2, weekday: 5, hour: 19, minute: 0, lateWeeksBefore: 1, announceLeadMs: 3 * DAY_MS },
   endfield: { weeksBefore: 2, weekday: 5, hour: 19, minute: 30 },
 };
 
@@ -56,13 +63,29 @@ export function livestreamTimeFromRule(rule: LivestreamRule, versionEndMs: numbe
   return streamDay + (rule.hour * 60 + rule.minute) * 60 * 1000 - SOURCE_OFFSET_MS;
 }
 
+/** The rule in effect at `nowMs`: the late week once the usual slot went unannounced. */
+function effectiveRule(rule: LivestreamRule, versionEndMs: number, nowMs: number): LivestreamRule {
+  if (rule.lateWeeksBefore == null || rule.announceLeadMs == null) return rule;
+  const usualMs = livestreamTimeFromRule(rule, versionEndMs);
+  if (nowMs < usualMs - rule.announceLeadMs) return rule;
+  return { ...rule, weeksBefore: rule.lateWeeksBefore };
+}
+
 /**
  * The predicted livestream for the version that follows the current one, or null
  * when the game has no known pattern or the date falls outside the current version.
+ * Only called when nothing is announced, which is what moves a late-prone game
+ * to its later week (see `lateWeeksBefore`).
  */
-export function predictLivestream(gameId: GameId, versionStartMs: number, versionEndMs: number): LivestreamInfo | null {
-  const rule = LIVESTREAM_RULES[gameId];
-  if (!rule || !(versionEndMs > versionStartMs)) return null;
+export function predictLivestream(
+  gameId: GameId,
+  versionStartMs: number,
+  versionEndMs: number,
+  nowMs: number = Date.now(),
+): LivestreamInfo | null {
+  const base = LIVESTREAM_RULES[gameId];
+  if (!base || !(versionEndMs > versionStartMs)) return null;
+  const rule = effectiveRule(base, versionEndMs, nowMs);
   const startMs = livestreamTimeFromRule(rule, versionEndMs);
   if (startMs <= versionStartMs || startMs >= versionEndMs) return null;
   return { kind: "predicted", startMs, ruleText: describeLivestreamRule(rule) };
@@ -95,9 +118,10 @@ export function resolveLivestream(
   events: readonly CalendarEvent[],
   versionStartMs: number,
   versionEndMs: number,
+  nowMs: number = Date.now(),
 ): LivestreamInfo | null {
   return (
     pickAnnouncedLivestream(events, versionStartMs, versionEndMs) ??
-    predictLivestream(gameId, versionStartMs, versionEndMs)
+    predictLivestream(gameId, versionStartMs, versionEndMs, nowMs)
   );
 }

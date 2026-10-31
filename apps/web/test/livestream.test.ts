@@ -87,3 +87,27 @@ test("resolveLivestream prefers the announced stream of the next version", () =>
     ms("2026-10-30T19:30:00+08:00")
   );
 });
+
+test("predictLivestream moves WW to the later week once the usual slot goes unannounced", () => {
+  // WW 3.7 (09/30 – 11/12); the 3.8 stream aired on 11/06, one week later than usual.
+  const start = ms("2026-09-30T09:20:00+08:00");
+  const end = ms("2026-11-12T03:59:59+08:00");
+  // Well ahead of the usual Friday: the two-week rule.
+  assert.deepEqual(predictLivestream("ww", start, end, ms("2026-10-20T12:00:00+08:00")), {
+    kind: "predicted",
+    startMs: ms("2026-10-30T19:00:00+08:00"),
+    ruleText: "版本结束前两周的周五 19:00",
+  });
+  // Previews come at least four days ahead; three days out with none, it is the later week.
+  assert.deepEqual(predictLivestream("ww", start, end, ms("2026-10-27T19:00:00+08:00")), {
+    kind: "predicted",
+    startMs: ms("2026-11-06T19:00:00+08:00"),
+    ruleText: "版本结束前一周的周五 19:00",
+  });
+  // Games without a late week keep their rule.
+  assert.equal(
+    predictLivestream("genshin", ms("2026-09-23T07:00:00+08:00"), ms("2026-11-04T06:00:00+08:00"), ms("2026-10-22T12:00:00+08:00"))
+      ?.startMs,
+    ms("2026-10-23T20:00:00+08:00")
+  );
+});
