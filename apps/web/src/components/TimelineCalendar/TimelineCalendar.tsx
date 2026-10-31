@@ -1473,7 +1473,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
         startMs: valid ? s!.valueOf() : 0,
         endMs,
         livestream: valid
-          ? resolveLivestream(gameId, props.livestreamEventsByGame?.[gameId] ?? [], s!.valueOf(), endMs)
+          ? resolveLivestream(gameId, props.livestreamEventsByGame?.[gameId] ?? [], s!.valueOf(), endMs, nowMs)
           : null,
         num: label.num,
         name: label.name,
@@ -2616,7 +2616,7 @@ export default function TimelineCalendar(props: TimelineCalendarProps) {
       s,
       e,
       label: splitVersionLabel(currentVersion),
-      livestream: resolveLivestream(primaryGameId, props.livestreamEvents ?? [], s.valueOf(), e.valueOf()),
+      livestream: resolveLivestream(primaryGameId, props.livestreamEvents ?? [], s.valueOf(), e.valueOf(), now.valueOf()),
     };
   })();
 
