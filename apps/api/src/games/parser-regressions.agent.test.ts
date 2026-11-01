@@ -1891,3 +1891,19 @@ test("Star Rail excludes topic pages that offer no reward", () => {
     true
   );
 });
+
+test("Star Rail reads season-prefixed open-time labels as the activity window", () => {
+  assert.deepEqual(
+    extractStarRailTimeRangeFromContent(
+      "<h1>新赛季开放时间</h1><p>4.7版本更新后</p><h1>参与条件</h1><p>开拓等级≥21级</p>",
+      {
+        title: "「货币战争•入画奇航」全新赛季来袭！",
+        versionMaintenanceEndByLabel: new Map(),
+        singleVersionMaintenanceEndIso: null,
+        listStartIso: "2026-11-01T12:00:00+08:00",
+        listEndIso: "2036-12-23T03:59:00+08:00",
+      }
+    ),
+    { startIso: null, endIso: null, unresolvedVersionStart: true }
+  );
+});
