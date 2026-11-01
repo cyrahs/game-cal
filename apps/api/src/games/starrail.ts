@@ -421,7 +421,7 @@ function escapeRegExp(input: string): string {
 function isStarRailTimeLabelLine(line: string, label: string): boolean {
   const normalized = normalizeSectionBoundary(line);
   return new RegExp(
-    `^(?:本期)?${escapeRegExp(label)}(?:$|\\s*[：:为]|\\s+)`
+    `^(?:本期|(?:全?新)?赛季)?${escapeRegExp(label)}(?:$|\\s*[：:为]|\\s+)`
   ).test(normalized);
 }
 
