@@ -53,6 +53,7 @@ const GENSHIN_DEFAULT_CONTENT_API =
   "https://hk4e-api.mihoyo.com/common/hk4e_cn/announcement/api/getAnnContent?game=hk4e&game_biz=hk4e_cn&lang=zh-cn&bundle_id=hk4e_cn&platform=pc&region=cn_gf01&level=55&uid=100000000";
 const GENSHIN_SOURCE_TZ_OFFSET = "+08:00";
 const VERSION_UPDATE_NOTICE_KEYWORD = "版本更新说明";
+const VERSION_MAINTENANCE_PREVIEW_KEYWORD = "版本更新维护预告";
 const GENSHIN_DATE_TIME_PATTERN =
   String.raw`\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?`;
 const RANGE_SEPARATOR_PATTERN = String.raw`(?:-|~|～|至|到|—|–|\u2013|\u2014)`;
@@ -282,7 +283,7 @@ function extractMaintenanceEndIsoFromVersionContent(content: string | undefined)
   if (rangeEndIso) return rangeEndIso;
 
   const startRe = new RegExp(
-    `(?:更新时间|更新维护时间|维护时间)[^\\d]{0,80}(${GENSHIN_DATE_TIME_PATTERN})\\s*开始`
+    `(?:更新时间|更新维护时间|维护时间|更新维护信息)[^\\d]{0,80}(${GENSHIN_DATE_TIME_PATTERN})\\s*开始`
   );
   const start = startRe.exec(text);
   if (!start?.[1]) return null;
@@ -540,15 +541,17 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
     categories.find((c) => c.type_id === 2) ??
     categories.find((c) => c.type_label.includes("游戏公告"));
   const versionMaintenanceEndByLabel = new Map<string, string>();
+  const previewMaintenanceEndByLabel = new Map<string, string>();
   for (const noticeItem of noticeCategory?.list ?? []) {
     const noticeTitle = noticeItem.title ?? "";
     const noticeSubtitle = noticeItem.subtitle ?? "";
-    if (
-      !noticeTitle.includes(VERSION_UPDATE_NOTICE_KEYWORD) &&
-      !noticeSubtitle.includes(VERSION_UPDATE_NOTICE_KEYWORD)
-    ) {
-      continue;
-    }
+    const noticeText = `${noticeTitle}\n${noticeSubtitle}`;
+    const isUpdateNotice = noticeText.includes(VERSION_UPDATE_NOTICE_KEYWORD);
+    // Before the update notes are posted, the maintenance preview already gives
+    // the maintenance start and duration for the upcoming version.
+    const isMaintenancePreview =
+      !isUpdateNotice && noticeText.includes(VERSION_MAINTENANCE_PREVIEW_KEYWORD);
+    if (!isUpdateNotice && !isMaintenancePreview) continue;
 
     const versionLabel = extractVersionLabel(noticeItem);
     if (!versionLabel) continue;
@@ -556,12 +559,22 @@ export async function fetchGenshinEvents(env: RuntimeEnv = {}): Promise<Calendar
     const noticeContent = contentById.get(noticeItem.ann_id)?.content ?? noticeItem.content;
     const maintenanceEndIso = extractMaintenanceEndIsoFromVersionContent(noticeContent);
     if (maintenanceEndIso) {
-      versionMaintenanceEndByLabel.set(versionLabel, maintenanceEndIso);
+      (isUpdateNotice ? versionMaintenanceEndByLabel : previewMaintenanceEndByLabel).set(
+        versionLabel,
+        maintenanceEndIso
+      );
     }
   }
   const concreteVersionMaintenanceEnds = [...new Set(versionMaintenanceEndByLabel.values())];
   const singleVersionMaintenanceEndIso =
     concreteVersionMaintenanceEnds.length === 1 ? concreteVersionMaintenanceEnds[0]! : null;
+  // Previews only fill labels the update notes don't cover yet, so an unlabeled
+  // 「版本更新后」 keeps resolving against the posted update notes.
+  for (const [label, maintenanceEndIso] of previewMaintenanceEndByLabel) {
+    if (!versionMaintenanceEndByLabel.has(label)) {
+      versionMaintenanceEndByLabel.set(label, maintenanceEndIso);
+    }
+  }
   addInferredMoonVersionMaintenanceEnds(versionMaintenanceEndByLabel);
 
   return filtered.map((item) => {
