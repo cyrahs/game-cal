@@ -1907,3 +1907,99 @@ test("Star Rail reads season-prefixed open-time labels as the activity window", 
     { startIso: null, endIso: null, unresolvedVersionStart: true }
   );
 });
+
+test("Genshin resolves next-version starts from the maintenance preview before the update notes", async () => {
+  const originalFetch = globalThis.fetch;
+  const listBody = {
+    retcode: 0,
+    message: "OK",
+    data: { list: [
+      {
+        type_id: 2,
+        type_label: "游戏公告",
+        list: [
+          {
+            ann_id: 22003,
+            title: "7.2版本更新维护预告",
+            subtitle: "7.2版本更新维护预告",
+            start_time: "2026-11-02 11:10:00",
+            end_time: "2026-11-04 06:00:00",
+          },
+          {
+            ann_id: 21894,
+            title: "「往冥府的安魂歌」7.1版本更新说明",
+            subtitle: "7.1版本更新说明",
+            start_time: "2026-09-23 07:00:00",
+            end_time: "2026-11-04 06:00:00",
+          },
+        ],
+      },
+      {
+        type_id: 1,
+        type_label: "活动公告",
+        list: [
+          {
+            ann_id: 21975,
+            title: "「万序衍盈」祈愿：「列律名虚·米提亚(雷)」概率UP！",
+            subtitle: "「万序衍盈」祈愿",
+            start_time: "2026-11-02 12:00:00",
+            end_time: "2026-11-24 17:59:00",
+          },
+          {
+            ann_id: 21970,
+            title: "「坏灭肇始之时」时限内完成魔神任务，可额外获得原石、角色突破素材等奖励",
+            subtitle: "「坏灭肇始之时」",
+            start_time: "2026-11-02 12:00:00",
+            end_time: "2026-12-15 14:59:59",
+          },
+        ],
+      },
+    ] },
+  };
+  const contentBody = {
+    retcode: 0,
+    message: "OK",
+    data: { list: [
+      {
+        ann_id: 22003,
+        content: '<p>制作组预计将于<t class="t_gl">2026/11/04 06:00</t>进行版本更新维护，维护完成后，游戏将更新为全新7.2版本——「坏灭肇始之时」。</p><p>〓更新维护信息〓</p><p><t class="t_gl">2026/11/04 06:00</t>开始，预计5个小时完成。</p>',
+      },
+      {
+        ann_id: 21894,
+        content: '<p>〓更新时间〓</p><p><t class="t_gl">2026/09/23 06:00</t>开始，预计5个小时完成。</p>',
+      },
+      {
+        ann_id: 21975,
+        content: '<p>〓祈愿介绍〓</p><table><tr><td>祈愿时间</td><td>概率提升角色（5星）</td></tr><tr><td><p>7.2版本更新后</p><p>~</p><p><t class="t_lc">2026/11/24 17:59</t></p></td><td>「列律名虚·米提亚(雷)」</td></tr></table><p>●活动期间，限定5星角色「列律名虚·米提亚(雷)」的祈愿获取概率将大幅提升！</p>',
+      },
+      {
+        ann_id: 21970,
+        content: '<p>〓获取奖励时限〓</p><p>7.2版本更新后 ~ <t class="t_lc">2026/12/15 14:59</t></p><p>〓魔神任务前置条件〓</p><p>冒险等阶≥18级</p>',
+      },
+    ] },
+  };
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    assert.ok(url === "https://fixture.invalid/list" || url === "https://fixture.invalid/content");
+    return new Response(JSON.stringify(url.endsWith("/content") ? contentBody : listBody), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const events = await fetchGenshinEvents({
+      GENSHIN_API_URL: "https://fixture.invalid/list",
+      GENSHIN_CONTENT_API_URL: "https://fixture.invalid/content",
+    });
+    assert.deepEqual(
+      events.map(({ id, start_time, end_time }) => ({ id: String(id), start_time, end_time })),
+      [
+        { id: "21975", start_time: "2026-11-04T11:00:00+08:00", end_time: "2026-11-24T17:59:00+08:00" },
+        { id: "21970", start_time: "2026-11-04T11:00:00+08:00", end_time: "2026-12-15T14:59:59+08:00" },
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
