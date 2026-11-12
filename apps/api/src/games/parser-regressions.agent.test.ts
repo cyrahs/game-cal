@@ -2003,3 +2003,20 @@ test("Genshin resolves next-version starts from the maintenance preview before t
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Star Rail excludes notices that only link to a video", () => {
+  assert.equal(
+    shouldIncludeStarRailAnnouncement(
+      "EP：「无中生有」",
+      '<p>当第一声「阿哈」响起，「欢愉」将再度诞生。</p><p>在虚与实的边缘起舞吧，今夜，奇迹将由众生缔造！</p><p><a href="https://www.bilibili.com/">点击前往/打开哔哩哔哩观看</a></p>'
+    ),
+    false
+  );
+  assert.equal(
+    shouldIncludeStarRailAnnouncement(
+      "听歌领80星琼！歌曲「无中生有」音乐活动正式上线",
+      '<p><a href="https://y.qq.com/">前往QQ音乐</a></p><p>活动时间</p><p>2026/11/12 12:00 - 2026/11/29 23:59</p><p>活动奖励</p><p>星琼*80（限量300万份，先到先得）</p>'
+    ),
+    true
+  );
+});

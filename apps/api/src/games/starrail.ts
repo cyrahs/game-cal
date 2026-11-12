@@ -166,6 +166,14 @@ function isInformationalTopicPageNotice(
   return !/(?:奖励|领取|可获得)/.test(stripHtml(content));
 }
 
+// A notice that only links to a video (PV, EP, animated short) is promotion, not an
+// activity: it has no activity window of its own and pays no reward.
+function isVideoOnlyNotice(title: string, content: string | undefined): boolean {
+  const text = stripHtml(content);
+  if (!/(?:哔哩哔哩|bilibili)\s*观看/i.test(text)) return false;
+  return !/(?:奖励|领取|可获得|活动时间|参与)/.test(`${title}\n${text}`);
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&nbsp;/g, " ")
@@ -1102,7 +1110,8 @@ export function shouldIncludeStarRailAnnouncement(
     (!title.includes("商店上新") || isStarRailShopOutfitDiscount(title, content)) &&
     !isOperationalResourceUpdateNotice(title, content) &&
     !isExternalServiceLaunchNotice(title, content) &&
-    !isInformationalTopicPageNotice(title, content)
+    !isInformationalTopicPageNotice(title, content) &&
+    !isVideoOnlyNotice(title, content)
   );
 }
 
