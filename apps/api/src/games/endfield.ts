@@ -230,6 +230,13 @@ export function parseEndfieldWindowText(input: string): EndfieldParsedWindow {
     };
   }
 
+  // A version-long window listed ahead of a dated phase ("建设提速开启时间：…") is the
+  // activity's own window; the later date only marks a phase inside it.
+  const versionPeriod = /(?:[「『“"][^」』”"]+[」』”"]|\bV?\d+(?:\.\d+)+)?\s*版本期间/i.exec(text);
+  if (versionPeriod && firstExplicitTime && versionPeriod.index < firstExplicitTime.index) {
+    return { start: null, end: null, endText: versionPeriod[0].trim() };
+  }
+
   // Sometimes the start is fuzzy (e.g. "公测开启") but the end is explicit.
   // In that case we still keep the end and let the caller fall back to startAt.
   const endFromRangeWithFuzzyStart = new RegExp(
@@ -1159,6 +1166,30 @@ function resolveNamedVersionMaintenanceStart(
   return maintenanceStartByVersion.get([...versions][0]!) ?? null;
 }
 
+// A notice parsed as one window still opens its side activities ("同时，开放「作战演练」
+// 干员试用活动") for that same window.
+function buildEndfieldCoopenedEvents(
+  item: HypergryphAggregateItem,
+  html: string,
+  window: { startNaive: string; endNaive: string | null; endTimeText?: string }
+): CalendarEvent[] {
+  return extractEndfieldCoopenedActivities(tokenizeHtmlLines(html)).flatMap((activity) => {
+    const titleKey = normalizeTitleKey(activity.title);
+    if (!titleKey) return [];
+    const event = buildEndfieldEvent({
+      id: `${item.cid ?? "event"}:${titleKey}:${window.startNaive}:${window.endNaive ?? window.endTimeText ?? ""}`,
+      title: activity.title,
+      startNaive: window.startNaive,
+      endNaive: window.endNaive,
+      endTimeText: window.endTimeText,
+      banner: extractFirstImgSrc(html),
+      content: html,
+      classificationContent: "",
+    });
+    return event ? [event] : [];
+  });
+}
+
 export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<CalendarEvent[]> {
   const items = await fetchEndfieldAggregateItems(env);
   const versionNotice = pickCurrentEndfieldVersionNotice(items);
@@ -1173,6 +1204,7 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
     }
   }
 
+  const coopenedEvents: CalendarEvent[] = [];
   const tabEvents = items
     .filter((it) => {
       const tab = String(it.tab ?? "").toLowerCase();
@@ -1221,14 +1253,24 @@ export async function fetchEndfieldEvents(env: RuntimeEnv = {}): Promise<Calenda
         banner: extractFirstImgSrc(html),
         content: html,
       });
-      return event ? [event] : [];
+      if (!event) return [];
+      coopenedEvents.push(
+        ...buildEndfieldCoopenedEvents(it, html, {
+          startNaive: eventStartNaive,
+          endNaive,
+          endTimeText: eventEndTimeText,
+        })
+      );
+      return [event];
     });
 
   const versionEvents = versionNotice
     ? parseVersionNoticeEvents(versionNotice.item, versionStartNaive)
     : [];
 
-  return mergeEvents([...tabEvents, ...versionEvents]);
+  // Side activities go last so a fuller title for the same activity (from its own notice or
+  // the version notice) wins the merge.
+  return mergeEvents([...tabEvents, ...versionEvents, ...coopenedEvents]);
 }
 
 export async function fetchEndfieldCurrentVersion(

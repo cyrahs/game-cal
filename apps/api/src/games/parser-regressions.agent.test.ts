@@ -2020,3 +2020,77 @@ test("Star Rail excludes notices that only link to a video", () => {
     true
   );
 });
+
+test("Endfield keeps a version-long window when a later phase has its own date", () => {
+  assert.deepEqual(
+    parseEndfieldWindowText(
+      "▼//活动时间 · 「穿越甚大蘑境与你相逢」版本期间 · 建设提速开启时间：2026/12/31 06:00（服务器时间）"
+    ),
+    { start: null, end: null, endText: "「穿越甚大蘑境与你相逢」版本期间" }
+  );
+});
+
+test("Endfield lists the trial a gacha notice opens alongside its own window", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        data: {
+          list: [
+            {
+              cid: "version-update",
+              tab: "notice",
+              title: "「穿越甚大蘑境与你相逢」版本更新说明",
+              data: {
+                html: [
+                  "<p>维护时间</p>",
+                  "<p>2026/11/25 06:00 - 2026/11/25 12:00</p>",
+                ].join(""),
+              },
+            },
+            {
+              cid: "3926",
+              tab: "events",
+              title: "锻砧、行囊与蜜糖\\n特许寻访",
+              header: "「锻砧、行囊与蜜糖」特许寻访",
+              startAt: 1795561200,
+              data: {
+                html: [
+                  "<p>「锻砧、行囊与蜜糖」特许寻访开放期间，6星干员【小刻】获取概率提升！</p>",
+                  "<p>「漫野探奇」限时签到活动同步开放，累计签到可获得【漫野探奇寻访凭证】×5等奖励。同时，开放「作战演练」干员试用活动。</p>",
+                  "<p>▼//「锻砧、行囊与蜜糖」特许寻访说明</p>",
+                  "<p>· 开放时间：「穿越甚大蘑境与你相逢」版本更新后 - 2026/12/23 11:59（服务器时间）</p>",
+                  "<p>▼//「作战演练」干员试用活动</p>",
+                  "<p>开放6星干员【小刻】的「作战演练」干员试用活动。</p>",
+                ].join(""),
+              },
+            },
+          ],
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+
+  try {
+    const events = await fetchEndfieldEvents({
+      ENDFIELD_CODE: "fixture",
+      ENDFIELD_AGGREGATE_API_URL: "https://fixture.invalid/aggregate",
+    });
+    const trial = events.find((event) => event.title === "作战演练");
+    assert.deepEqual(
+      trial && { start_time: trial.start_time, end_time: trial.end_time, is_gacha: trial.is_gacha },
+      {
+        start_time: "2026-11-25T12:00:00+08:00",
+        end_time: "2026-12-23T11:59:00+08:00",
+        is_gacha: false,
+      }
+    );
+    assert.equal(events.find((event) => event.id === "3926")?.is_gacha, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
