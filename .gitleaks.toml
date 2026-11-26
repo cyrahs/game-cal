@@ -1,0 +1,13 @@
+# Secret scanning config (gitleaks). This repository is public: never commit real credentials.
+# Default rules plus one allowlist: generic-api-key hits inside test fixtures / goldens are fake values.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake credentials in tests, fixtures and golden files"
+targetRules = ["generic-api-key"]
+paths = [
+  '''(^|/)(tests?|goldens|fixtures|testdata|__tests__)/''',
+  '''(^|/)[^/]*(_test\.go|\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?|_test\.py|tests\.rs)$''',
+  '''(^|/)test_[^/]*\.py$''',
+]

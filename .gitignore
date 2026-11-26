@@ -23,3 +23,16 @@ yarn-error.log*
 
 # claude worktrees
 .claude/worktrees/
+
+# Local credentials: this repository is public, never commit env or key files
+.env
+.env.*
+*.env
+.envrc
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
